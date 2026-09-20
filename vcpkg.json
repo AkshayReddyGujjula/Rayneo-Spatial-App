@@ -2,6 +2,7 @@
   "name": "rayneo-spatial",
   "version": "0.1.0",
   "dependencies": [
-    "hidapi"
+    "hidapi",
+    "nlohmann-json"
   ]
 }

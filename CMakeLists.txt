@@ -16,6 +16,14 @@ if(WIN32)
 endif()
 
 find_package(hidapi CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
+
+add_library(rayneo_layout STATIC
+  src/layout/layout.cpp
+  src/render/screen_geometry.cpp
+)
+target_include_directories(rayneo_layout PUBLIC src)
+target_link_libraries(rayneo_layout PUBLIC nlohmann_json::nlohmann_json)
 
 add_library(rayneo_core STATIC
   src/imu/gt_protocol.cpp
@@ -36,7 +44,7 @@ add_executable(spatial_desk
   src/render/camera.cpp
   src/render/renderer.cpp
 )
-target_link_libraries(spatial_desk PRIVATE rayneo_core d3d11 dxgi d3dcompiler user32)
+target_link_libraries(spatial_desk PRIVATE rayneo_core rayneo_layout d3d11 dxgi d3dcompiler user32 gdi32)
 
 add_executable(camera_selftest
   src/tools/camera_selftest.cpp
@@ -59,3 +67,7 @@ target_link_libraries(orientation_calibrate PRIVATE rayneo_core)
 add_executable(protocol_selftest src/tools/protocol_selftest.cpp)
 target_link_libraries(protocol_selftest PRIVATE rayneo_core)
 add_test(NAME protocol_selftest COMMAND protocol_selftest)
+
+add_executable(layout_selftest src/tools/layout_selftest.cpp)
+target_link_libraries(layout_selftest PRIVATE rayneo_layout)
+add_test(NAME layout_selftest COMMAND layout_selftest)

@@ -1,5 +1,6 @@
 #include "imu/imu_source.h"
 #include "imu/orientation_calibration.h"
+#include "layout/layout.h"
 #include "render/renderer.h"
 
 #include <windows.h>
@@ -28,11 +29,13 @@ struct MonitorEntry {
 struct Options {
     int monitor = -1;
     float fov = 46.0f;
+    bool fov_explicit = false;
     bool no_imu = false;
     bool freeze_still = true;
     double seconds = 0.0;
     std::string log_path;
     std::string calibration_path;
+    std::string layout_path;
 };
 
 struct AppState {
@@ -90,7 +93,8 @@ void print_usage() {
         "  --freeze-still  hold the view steady while the head is still (default)\n"
         "  --no-freeze-still  always follow the raw head pose\n"
         "  --log FILE     append a diagnostic CSV (elapsed, gyro, bias, pose, still)\n"
-        "  --calibration FILE  sensor-to-head calibration (default config/orientation.json)\n");
+        "  --calibration FILE  sensor-to-head calibration (default config/orientation.json)\n"
+        "  --layout FILE  screen layout (default config/layouts/default.json)\n");
 }
 
 bool parse_args(int argc, char** argv, Options& opt) {
@@ -100,6 +104,7 @@ bool parse_args(int argc, char** argv, Options& opt) {
             opt.monitor = std::atoi(argv[++i]);
         } else if (std::strcmp(a, "--fov") == 0 && i + 1 < argc) {
             opt.fov = static_cast<float>(std::atof(argv[++i]));
+            opt.fov_explicit = true;
         } else if (std::strcmp(a, "--no-imu") == 0) {
             opt.no_imu = true;
         } else if (std::strcmp(a, "--freeze-still") == 0) {
@@ -112,6 +117,8 @@ bool parse_args(int argc, char** argv, Options& opt) {
             opt.log_path = argv[++i];
         } else if (std::strcmp(a, "--calibration") == 0 && i + 1 < argc) {
             opt.calibration_path = argv[++i];
+        } else if (std::strcmp(a, "--layout") == 0 && i + 1 < argc) {
+            opt.layout_path = argv[++i];
         } else if (std::strcmp(a, "--help") == 0 || std::strcmp(a, "-h") == 0) {
             print_usage();
             return false;
@@ -136,16 +143,16 @@ void enable_dpi_awareness() {
     SetProcessDPIAware();
 }
 
-std::string default_calibration_path() {
+std::string default_repo_path(const std::filesystem::path& relative) {
     std::wstring executable(32768, L'\0');
     const DWORD length = GetModuleFileNameW(nullptr, executable.data(),
                                             static_cast<DWORD>(executable.size()));
     if (length == 0 || length >= executable.size()) {
-        return "config/orientation.json";
+        return relative.string();
     }
     executable.resize(length);
     const std::filesystem::path executable_path(executable);
-    return (executable_path.parent_path().parent_path() / "config" / "orientation.json").string();
+    return (executable_path.parent_path().parent_path() / relative).string();
 }
 
 }  // namespace
@@ -156,7 +163,11 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (opt.calibration_path.empty()) {
-        opt.calibration_path = default_calibration_path();
+        opt.calibration_path = default_repo_path(std::filesystem::path("config") / "orientation.json");
+    }
+    if (opt.layout_path.empty()) {
+        opt.layout_path =
+            default_repo_path(std::filesystem::path("config") / "layouts" / "default.json");
     }
     if (!std::isfinite(opt.fov) || opt.fov < 20.0f || opt.fov > 150.0f ||
         !std::isfinite(opt.seconds) || opt.seconds < 0.0) {
@@ -173,6 +184,15 @@ int main(int argc, char** argv) {
             std::printf("run orientation_calibrate.exe while wearing the glasses, then start spatial_desk again\n");
             return 1;
         }
+    }
+    gt::Layout layout;
+    std::string layout_error;
+    if (!gt::load_layout(opt.layout_path, layout, layout_error)) {
+        std::printf("layout load failed: %s (%s)\n", opt.layout_path.c_str(), layout_error.c_str());
+        return 1;
+    }
+    if (!opt.fov_explicit) {
+        opt.fov = layout.fov_deg;
     }
 
     enable_dpi_awareness();
@@ -238,6 +258,13 @@ int main(int argc, char** argv) {
         DestroyWindow(hwnd);
         return 1;
     }
+    if (!renderer.set_layout(layout, error)) {
+        std::printf("renderer layout failed: %s\n", error.c_str());
+        renderer.shutdown();
+        DestroyWindow(hwnd);
+        return 1;
+    }
+    std::printf("loaded layout: %s (%zu screens)\n", opt.layout_path.c_str(), layout.screens.size());
 
     gt::ImuSource imu;
     AppState state;
@@ -263,6 +290,9 @@ int main(int argc, char** argv) {
                        "roll_deg,still\n";
     }
     int log_rows = 0;
+    std::error_code layout_time_error;
+    auto layout_write_time = std::filesystem::last_write_time(opt.layout_path, layout_time_error);
+    double next_layout_check = 0.5;
 
     while (!state.quit) {
         MSG message;
@@ -276,6 +306,28 @@ int main(int argc, char** argv) {
         const double elapsed = std::chrono::duration<double>(SteadyClock::now() - start).count();
         if (opt.seconds > 0.0 && elapsed >= opt.seconds) {
             state.quit = true;
+        }
+
+        if (elapsed >= next_layout_check) {
+            next_layout_check = elapsed + 0.5;
+            std::error_code time_error;
+            const auto write_time = std::filesystem::last_write_time(opt.layout_path, time_error);
+            if (!time_error && (layout_time_error || write_time != layout_write_time)) {
+                layout_write_time = write_time;
+                layout_time_error.clear();
+                gt::Layout candidate;
+                std::string reload_error;
+                if (gt::load_layout(opt.layout_path, candidate, reload_error) &&
+                    renderer.set_layout(candidate, reload_error)) {
+                    layout = std::move(candidate);
+                    if (!opt.fov_explicit) {
+                        opt.fov = layout.fov_deg;
+                    }
+                    std::printf("reloaded layout (%zu screens)\n", layout.screens.size());
+                } else {
+                    std::printf("layout reload ignored: %s\n", reload_error.c_str());
+                }
+            }
         }
 
         const gt::Quat head = opt.no_imu ? gt::Quat{} : imu.orientation();

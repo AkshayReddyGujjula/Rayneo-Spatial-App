@@ -1,4 +1,5 @@
 #include "render/renderer.h"
+#include "render/screen_geometry.h"
 
 #include <DirectXMath.h>
 #include <d3dcompiler.h>
@@ -6,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
@@ -18,6 +20,7 @@ constexpr float kPi = 3.14159265358979323846f;
 struct Vertex {
     float x, y, z;
     float r, g, b, a;
+    float u, v;
 };
 
 const char* kShaderSource = R"(
@@ -28,44 +31,132 @@ cbuffer Transform : register(b0) {
 struct VSInput {
     float3 pos : POSITION;
     float4 color : COLOR;
+    float2 uv : TEXCOORD;
 };
 
 struct PSInput {
     float4 pos : SV_POSITION;
     float4 color : COLOR;
+    float2 uv : TEXCOORD;
 };
+
+Texture2D g_texture : register(t0);
+SamplerState g_sampler : register(s0);
 
 PSInput vs_main(VSInput input) {
     PSInput output;
     output.pos = mul(float4(input.pos, 1.0f), g_view_proj);
     output.color = input.color;
+    output.uv = input.uv;
     return output;
 }
 
 float4 ps_main(PSInput input) : SV_TARGET {
-    return input.color;
+    return g_texture.Sample(g_sampler, input.uv) * input.color;
 }
 )";
 
-void add_quad(std::vector<Vertex>& out, float yaw_deg, float distance, float width, float height,
-              float r, float g, float b) {
-    const float yaw = yaw_deg * kPi / 180.0f;
-    const float cx = std::sin(yaw) * distance;
-    const float cz = std::cos(yaw) * distance;
-    const float rx = std::cos(yaw);
-    const float rz = -std::sin(yaw);
-    const float hw = width * 0.5f;
-    const float hh = height * 0.5f;
-    const Vertex v0{cx - rx * hw, -hh, cz - rz * hw, r, g, b, 1.0f};
-    const Vertex v1{cx + rx * hw, -hh, cz + rz * hw, r, g, b, 1.0f};
-    const Vertex v2{cx + rx * hw, hh, cz + rz * hw, r, g, b, 1.0f};
-    const Vertex v3{cx - rx * hw, hh, cz - rz * hw, r, g, b, 1.0f};
-    out.push_back(v0);
-    out.push_back(v1);
-    out.push_back(v2);
-    out.push_back(v0);
-    out.push_back(v2);
-    out.push_back(v3);
+std::wstring widen(const std::string& text) {
+    if (text.empty()) {
+        return {};
+    }
+    const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
+                                           static_cast<int>(text.size()), nullptr, 0);
+    if (count <= 0) {
+        return std::wstring(text.begin(), text.end());
+    }
+    std::wstring output(static_cast<size_t>(count), L'\0');
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()),
+                        output.data(), count);
+    return output;
+}
+
+bool create_solid_texture(ID3D11Device* device, uint32_t bgra,
+                          ComPtr<ID3D11ShaderResourceView>& view) {
+    D3D11_TEXTURE2D_DESC description{};
+    description.Width = 1;
+    description.Height = 1;
+    description.MipLevels = 1;
+    description.ArraySize = 1;
+    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    description.SampleDesc.Count = 1;
+    description.Usage = D3D11_USAGE_IMMUTABLE;
+    description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA data{};
+    data.pSysMem = &bgra;
+    data.SysMemPitch = sizeof(bgra);
+    ComPtr<ID3D11Texture2D> texture;
+    return SUCCEEDED(device->CreateTexture2D(&description, &data, &texture)) &&
+           SUCCEEDED(device->CreateShaderResourceView(texture.Get(), nullptr, &view));
+}
+
+bool create_label_texture(ID3D11Device* device, const ScreenLayout& screen,
+                          ComPtr<ID3D11ShaderResourceView>& view) {
+    constexpr int width = 512;
+    constexpr int height = 288;
+    BITMAPINFO bitmap_info{};
+    bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmap_info.bmiHeader.biWidth = width;
+    bitmap_info.bmiHeader.biHeight = -height;
+    bitmap_info.bmiHeader.biPlanes = 1;
+    bitmap_info.bmiHeader.biBitCount = 32;
+    bitmap_info.bmiHeader.biCompression = BI_RGB;
+    void* pixels = nullptr;
+    HBITMAP bitmap = CreateDIBSection(nullptr, &bitmap_info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (bitmap == nullptr || dc == nullptr || pixels == nullptr) {
+        if (bitmap != nullptr) DeleteObject(bitmap);
+        if (dc != nullptr) DeleteDC(dc);
+        return false;
+    }
+    const HGDIOBJ old_bitmap = SelectObject(dc, bitmap);
+    const BYTE red = static_cast<BYTE>(screen.color[0] * 255.0f);
+    const BYTE green = static_cast<BYTE>(screen.color[1] * 255.0f);
+    const BYTE blue = static_cast<BYTE>(screen.color[2] * 255.0f);
+    RECT bounds{0, 0, width, height};
+    HBRUSH background = CreateSolidBrush(RGB(red, green, blue));
+    FillRect(dc, &bounds, background);
+    DeleteObject(background);
+
+    HPEN border = CreatePen(PS_SOLID, 8, RGB(245, 247, 255));
+    const HGDIOBJ old_pen = SelectObject(dc, border);
+    const HGDIOBJ old_brush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+    Rectangle(dc, 4, 4, width - 4, height - 4);
+    SelectObject(dc, old_brush);
+    SelectObject(dc, old_pen);
+    DeleteObject(border);
+
+    HFONT font = CreateFontW(72, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             FF_DONTCARE, L"Segoe UI");
+    const HGDIOBJ old_font = SelectObject(dc, font);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(255, 255, 255));
+    std::wstring label = widen(screen.id);
+    DrawTextW(dc, label.data(), static_cast<int>(label.size()), &bounds,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(dc, old_font);
+    DeleteObject(font);
+
+    D3D11_TEXTURE2D_DESC description{};
+    description.Width = width;
+    description.Height = height;
+    description.MipLevels = 1;
+    description.ArraySize = 1;
+    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    description.SampleDesc.Count = 1;
+    description.Usage = D3D11_USAGE_IMMUTABLE;
+    description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA data{};
+    data.pSysMem = pixels;
+    data.SysMemPitch = width * 4;
+    ComPtr<ID3D11Texture2D> texture;
+    const bool ok = SUCCEEDED(device->CreateTexture2D(&description, &data, &texture)) &&
+                    SUCCEEDED(device->CreateShaderResourceView(texture.Get(), nullptr, &view));
+    SelectObject(dc, old_bitmap);
+    DeleteDC(dc);
+    DeleteObject(bitmap);
+    return ok;
 }
 
 }  // namespace
@@ -164,48 +255,34 @@ bool Renderer::init(HWND hwnd, uint32_t width, uint32_t height, std::string& err
     const D3D11_INPUT_ELEMENT_DESC elements[] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 28, D3D11_INPUT_PER_VERTEX_DATA, 0},
     };
-    if (FAILED(device_->CreateInputLayout(elements, 2, vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(),
+    if (FAILED(device_->CreateInputLayout(elements, 3, vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(),
                                           &input_layout_))) {
         error = "input layout creation failed";
         return false;
     }
 
-    std::vector<Vertex> vertices;
-    for (int i = -10; i <= 10; ++i) {
-        const float t = i * 0.5f;
-        vertices.push_back(Vertex{t, 0.0f, -5.0f, 0.22f, 0.22f, 0.26f, 1.0f});
-        vertices.push_back(Vertex{t, 0.0f, 5.0f, 0.22f, 0.22f, 0.26f, 1.0f});
-        vertices.push_back(Vertex{-5.0f, 0.0f, t, 0.22f, 0.22f, 0.26f, 1.0f});
-        vertices.push_back(Vertex{5.0f, 0.0f, t, 0.22f, 0.22f, 0.26f, 1.0f});
-    }
-    line_vertex_count_ = static_cast<UINT>(vertices.size());
-
-    add_quad(vertices, 0.0f, 2.0f, 1.70f, 0.96f, 0.24f, 0.45f, 0.95f);
-    add_quad(vertices, -90.0f, 2.5f, 1.0f, 1.0f, 0.90f, 0.25f, 0.25f);
-    add_quad(vertices, 90.0f, 2.5f, 1.0f, 1.0f, 0.25f, 0.85f, 0.35f);
-    add_quad(vertices, 180.0f, 3.0f, 1.0f, 1.0f, 0.95f, 0.80f, 0.25f);
-    quad_vertex_start_ = line_vertex_count_;
-    quad_vertex_count_ = static_cast<UINT>(vertices.size()) - line_vertex_count_;
-
-    crosshair_vertex_start_ = static_cast<UINT>(vertices.size());
-    const float s = 0.010f;
-    const float z = 0.5f;
-    vertices.push_back(Vertex{-s, -s, z, 1.0f, 1.0f, 1.0f, 1.0f});
-    vertices.push_back(Vertex{s, -s, z, 1.0f, 1.0f, 1.0f, 1.0f});
-    vertices.push_back(Vertex{s, s, z, 1.0f, 1.0f, 1.0f, 1.0f});
-    vertices.push_back(Vertex{-s, -s, z, 1.0f, 1.0f, 1.0f, 1.0f});
-    vertices.push_back(Vertex{s, s, z, 1.0f, 1.0f, 1.0f, 1.0f});
-    vertices.push_back(Vertex{-s, s, z, 1.0f, 1.0f, 1.0f, 1.0f});
-
     D3D11_BUFFER_DESC vb_desc{};
-    vb_desc.ByteWidth = static_cast<UINT>(vertices.size() * sizeof(Vertex));
-    vb_desc.Usage = D3D11_USAGE_IMMUTABLE;
+    constexpr UINT kMaximumVertices = 84 + 8 * 6 + 6;
+    vb_desc.ByteWidth = kMaximumVertices * sizeof(Vertex);
+    vb_desc.Usage = D3D11_USAGE_DYNAMIC;
     vb_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    D3D11_SUBRESOURCE_DATA vb_data{};
-    vb_data.pSysMem = vertices.data();
-    if (FAILED(device_->CreateBuffer(&vb_desc, &vb_data, &vertex_buffer_))) {
+    vb_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(device_->CreateBuffer(&vb_desc, nullptr, &vertex_buffer_))) {
         error = "vertex buffer creation failed";
+        return false;
+    }
+
+    D3D11_SAMPLER_DESC sampler_desc{};
+    sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
+    if (FAILED(device_->CreateSamplerState(&sampler_desc, &sampler_)) ||
+        !create_solid_texture(device_.Get(), 0xFFFFFFFFu, white_texture_)) {
+        error = "texture resources creation failed";
         return false;
     }
 
@@ -242,6 +319,67 @@ bool Renderer::init(HWND hwnd, uint32_t width, uint32_t height, std::string& err
         error = "depth-disabled stencil state creation failed";
         return false;
     }
+    return set_layout(default_layout(), error);
+}
+
+bool Renderer::set_layout(const Layout& layout, std::string& error) {
+    if (!device_ || !context_ || !vertex_buffer_) {
+        error = "renderer is not initialized";
+        return false;
+    }
+    if (!validate_layout(layout, error)) {
+        return false;
+    }
+
+    std::vector<Vertex> vertices;
+    vertices.reserve(84 + layout.screens.size() * 6 + 6);
+    for (int i = -10; i <= 10; ++i) {
+        const float t = static_cast<float>(i) * 0.5f;
+        vertices.push_back(Vertex{t, 0.0f, -5.0f, 0.22f, 0.22f, 0.26f, 1.0f, 0.5f, 0.5f});
+        vertices.push_back(Vertex{t, 0.0f, 5.0f, 0.22f, 0.22f, 0.26f, 1.0f, 0.5f, 0.5f});
+        vertices.push_back(Vertex{-5.0f, 0.0f, t, 0.22f, 0.22f, 0.26f, 1.0f, 0.5f, 0.5f});
+        vertices.push_back(Vertex{5.0f, 0.0f, t, 0.22f, 0.22f, 0.26f, 1.0f, 0.5f, 0.5f});
+    }
+    const UINT new_line_vertex_count = static_cast<UINT>(vertices.size());
+
+    std::vector<ScreenDraw> new_draws;
+    new_draws.reserve(layout.screens.size());
+    for (const ScreenLayout& screen : layout.screens) {
+        ScreenDraw draw;
+        draw.vertex_start = static_cast<UINT>(vertices.size());
+        if (!create_label_texture(device_.Get(), screen, draw.texture)) {
+            error = "failed to create label texture for screen '" + screen.id + "'";
+            return false;
+        }
+        const auto geometry = make_screen_quad(screen);
+        for (const ScreenGeometryVertex& point : geometry) {
+            vertices.push_back(Vertex{point.x, point.y, point.z, 1.0f, 1.0f, 1.0f, 1.0f,
+                                      point.u, point.v});
+        }
+        new_draws.push_back(std::move(draw));
+    }
+
+    const UINT new_crosshair_start = static_cast<UINT>(vertices.size());
+    constexpr float s = 0.010f;
+    constexpr float z = 0.5f;
+    vertices.push_back(Vertex{-s, -s, z, 1.0f, 1.0f, 1.0f, 1.0f, 0.5f, 0.5f});
+    vertices.push_back(Vertex{s, -s, z, 1.0f, 1.0f, 1.0f, 1.0f, 0.5f, 0.5f});
+    vertices.push_back(Vertex{s, s, z, 1.0f, 1.0f, 1.0f, 1.0f, 0.5f, 0.5f});
+    vertices.push_back(Vertex{-s, -s, z, 1.0f, 1.0f, 1.0f, 1.0f, 0.5f, 0.5f});
+    vertices.push_back(Vertex{s, s, z, 1.0f, 1.0f, 1.0f, 1.0f, 0.5f, 0.5f});
+    vertices.push_back(Vertex{-s, s, z, 1.0f, 1.0f, 1.0f, 1.0f, 0.5f, 0.5f});
+
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context_->Map(vertex_buffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+        error = "failed to update screen geometry";
+        return false;
+    }
+    std::memcpy(mapped.pData, vertices.data(), vertices.size() * sizeof(Vertex));
+    context_->Unmap(vertex_buffer_.Get(), 0);
+
+    line_vertex_count_ = new_line_vertex_count;
+    crosshair_vertex_start_ = new_crosshair_start;
+    screen_draws_ = std::move(new_draws);
     return true;
 }
 
@@ -262,6 +400,9 @@ void Renderer::shutdown() {
     rasterizer_.Reset();
     depth_state_.Reset();
     depth_disabled_state_.Reset();
+    sampler_.Reset();
+    white_texture_.Reset();
+    screen_draws_.clear();
     context_.Reset();
     device_.Reset();
 }
@@ -290,6 +431,8 @@ void Renderer::render(const Quat& head, float fov_horizontal_deg, float time_s) 
     context_->IASetInputLayout(input_layout_.Get());
     context_->VSSetShader(vertex_shader_.Get(), nullptr, 0);
     context_->PSSetShader(pixel_shader_.Get(), nullptr, 0);
+    ID3D11SamplerState* samplers[] = {sampler_.Get()};
+    context_->PSSetSamplers(0, 1, samplers);
     ID3D11Buffer* cb_buffers[] = {constant_buffer_.Get()};
     context_->VSSetConstantBuffers(0, 1, cb_buffers);
     context_->PSSetConstantBuffers(0, 1, cb_buffers);
@@ -307,13 +450,20 @@ void Renderer::render(const Quat& head, float fov_horizontal_deg, float time_s) 
     context_->UpdateSubresource(constant_buffer_.Get(), 0, nullptr, &matrix, 0, 0);
 
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+    ID3D11ShaderResourceView* white[] = {white_texture_.Get()};
+    context_->PSSetShaderResources(0, 1, white);
     context_->Draw(line_vertex_count_, 0);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    context_->Draw(quad_vertex_count_, quad_vertex_start_);
+    for (const ScreenDraw& screen : screen_draws_) {
+        ID3D11ShaderResourceView* texture[] = {screen.texture.Get()};
+        context_->PSSetShaderResources(0, 1, texture);
+        context_->Draw(6, screen.vertex_start);
+    }
 
     DirectX::XMStoreFloat4x4(&matrix, DirectX::XMMatrixTranspose(projection));
     context_->UpdateSubresource(constant_buffer_.Get(), 0, nullptr, &matrix, 0, 0);
     context_->OMSetDepthStencilState(depth_disabled_state_.Get(), 0);
+    context_->PSSetShaderResources(0, 1, white);
     context_->Draw(6, crosshair_vertex_start_);
 }
 

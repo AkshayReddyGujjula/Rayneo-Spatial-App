@@ -1,6 +1,7 @@
 #pragma once
 
 #include "imu/fusion.h"
+#include "layout/layout.h"
 #include "render/camera.h"
 
 #include <windows.h>
@@ -10,6 +11,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace gt {
 
@@ -17,6 +19,7 @@ class Renderer {
 public:
     bool init(HWND hwnd, uint32_t width, uint32_t height, std::string& error);
     void shutdown();
+    bool set_layout(const Layout& layout, std::string& error);
 
     void render(const Quat& head, float fov_horizontal_deg, float time_s);
     void wait_for_frame();
@@ -38,12 +41,18 @@ private:
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizer_;
     Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depth_state_;
     Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depth_disabled_state_;
+    Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler_;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> white_texture_;
+
+    struct ScreenDraw {
+        UINT vertex_start = 0;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> texture;
+    };
+    std::vector<ScreenDraw> screen_draws_;
 
     uint32_t width_ = 0;
     uint32_t height_ = 0;
     UINT line_vertex_count_ = 0;
-    UINT quad_vertex_start_ = 0;
-    UINT quad_vertex_count_ = 0;
     UINT crosshair_vertex_start_ = 0;
     HANDLE frame_latency_waitable_ = nullptr;
     CameraSigns signs_;
