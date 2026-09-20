@@ -29,7 +29,9 @@ constexpr uint32_t kIoctlAdd = 0x0022e004;
 constexpr uint32_t kIoctlRemove = 0x0022a008;
 constexpr uint32_t kIoctlUpdate = 0x0022a00c;
 constexpr uint32_t kIoctlVersion = 0x0022e010;
-constexpr int kMaximumDisplays = 16;
+// The Parsec driver can create up to 16 displays per adapter, but the
+// reference API caps at 8 to avoid plugging lag.
+constexpr int kMaximumDisplays = 8;
 
 HANDLE native_handle(void* handle) {
     return static_cast<HANDLE>(handle);
@@ -190,7 +192,7 @@ void VddClient::close() {
 }
 
 bool VddClient::ioctl(uint32_t code, const std::array<uint8_t, 32>& input, uint32_t timeout_ms,
-                      uint32_t* output, std::string* error) {
+                      uint32_t* output, std::string* error, bool require_output_size) {
     std::lock_guard<std::mutex> lock(ioctl_mutex_);
     if (handle_ == nullptr) {
         if (error != nullptr) *error = "Parsec VDD handle is not open";
@@ -226,7 +228,7 @@ bool VddClient::ioctl(uint32_t code, const std::array<uint8_t, 32>& input, uint3
         }
         return false;
     }
-    if (output != nullptr && transferred != sizeof(result)) {
+    if (output != nullptr && require_output_size && transferred != sizeof(result)) {
         if (error != nullptr) {
             *error = "VDD IOCTL returned " + std::to_string(transferred) +
                      " bytes; expected 4";
@@ -251,7 +253,8 @@ bool VddClient::query_version(int& version) {
 
 bool VddClient::ping() {
     std::array<uint8_t, 32> input{};
-    return ioctl(kIoctlUpdate, input, 1000, nullptr, nullptr);
+    uint32_t response = 0;
+    return ioctl(kIoctlUpdate, input, 1000, &response, nullptr, false);
 }
 
 bool VddClient::add_display(int& index, std::string& error) {
@@ -268,7 +271,8 @@ bool VddClient::add_display(int& index, std::string& error) {
 
 bool VddClient::remove_display(int index) {
     const auto input = vdd_remove_payload(index);
-    const bool removed = ioctl(kIoctlRemove, input, 1000, nullptr, nullptr);
+    uint32_t response = 0;
+    const bool removed = ioctl(kIoctlRemove, input, 1000, &response, nullptr, false);
     ping();
     return removed;
 }
@@ -288,7 +292,7 @@ void VddClient::keepalive_loop() {
 
 bool VddClient::connect(size_t display_count, std::string& error) {
     if (display_count == 0 || display_count > static_cast<size_t>(kMaximumDisplays)) {
-        error = "VDD display count must be between 1 and 16";
+        error = "VDD display count must be between 1 and " + std::to_string(kMaximumDisplays);
         return false;
     }
     disconnect();
@@ -323,7 +327,7 @@ bool VddClient::resize(size_t display_count, std::string& error) {
         return false;
     }
     if (display_count == 0 || display_count > static_cast<size_t>(kMaximumDisplays)) {
-        error = "VDD display count must be between 1 and 16";
+        error = "VDD display count must be between 1 and " + std::to_string(kMaximumDisplays);
         return false;
     }
     const size_t original_count = display_indices_.size();

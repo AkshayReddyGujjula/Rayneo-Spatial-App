@@ -43,7 +43,7 @@ void print_usage() {
         "  --pose          stream through the Madgwick pose estimator\n"
         "  --mag           enable the magnetometer correction (default off)\n"
         "  --settle N      samples skipped before bias calibration (default 150)\n"
-        "  --bias-samples N  samples averaged for the gyro bias (default 1000)\n"
+        "  --bias-samples N  samples averaged for the gyro bias (default 1500)\n"
         "  --beta F        Madgwick gain (default 0.05)\n"
         "  --keep-stream   do not stop an already running stream first\n");
 }

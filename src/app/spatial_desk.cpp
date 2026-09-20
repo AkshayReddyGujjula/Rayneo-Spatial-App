@@ -33,7 +33,17 @@ struct MonitorEntry {
     std::wstring name;
     std::wstring description;
     bool glasses = false;
+    bool virtual_display = false;
 };
+
+// Per-screen capture throttle. Tiers index active_fps / mid_fps / idle_fps:
+// 0 = active (closest to the view), 1 = mid, 2 = idle.
+struct CaptureTierState {
+    int tier = 1;
+    double next_poll_time = 0.0;
+};
+
+constexpr int kFatalCaptureFailures = 120;
 
 struct Options {
     int monitor = -1;
@@ -106,6 +116,9 @@ BOOL CALLBACK monitor_enum_proc(HMONITOR handle, HDC, LPRECT, LPARAM data) {
             const bool tcl_secondary = !entry.primary &&
                                        searchable.find(L"tcl") != std::wstring::npos;
             entry.glasses = branded || tcl_secondary;
+            entry.virtual_display = searchable.find(L"parsec") != std::wstring::npos ||
+                                    searchable.find(L"psccdd") != std::wstring::npos ||
+                                    searchable.find(L"vda") != std::wstring::npos;
         }
         list->push_back(entry);
     }
@@ -179,7 +192,7 @@ void print_usage() {
         "  --no-imu      run without head tracking (fixed camera)\n"
         "  --freeze-still  hard-freeze the view while still (default: absorb drift instead)\n"
         "  --no-freeze-still  always follow the raw head pose\n"
-        "  --log FILE     append a diagnostic CSV (elapsed, gyro, bias, pose, still)\n"
+        "  --log FILE     append a diagnostic CSV (elapsed, gyro, bias, view pose, still)\n"
         "  --calibration FILE  sensor-to-head calibration (default config/orientation.json)\n"
         "  --layout FILE  screen layout (default config/layouts/default.json)\n"
         "  --no-virtual-displays  render labelled test screens without Parsec VDD\n"
@@ -256,16 +269,52 @@ void enable_dpi_awareness() {
     SetProcessDPIAware();
 }
 
-std::string default_repo_path(const std::filesystem::path& relative) {
+float wrap_deg(float degrees) {
+    while (degrees > 180.0f) {
+        degrees -= 360.0f;
+    }
+    while (degrees < -180.0f) {
+        degrees += 360.0f;
+    }
+    return degrees;
+}
+
+// Locate the repository root by walking up from the executable until a config
+// directory is found, so nested build directories keep working. Falls back to
+// the historical "two levels below the root" assumption if no marker is found.
+std::filesystem::path repo_root_from_executable() {
     std::wstring executable(32768, L'\0');
     const DWORD length = GetModuleFileNameW(nullptr, executable.data(),
                                             static_cast<DWORD>(executable.size()));
     if (length == 0 || length >= executable.size()) {
-        return relative.string();
+        return {};
     }
     executable.resize(length);
-    const std::filesystem::path executable_path(executable);
-    return (executable_path.parent_path().parent_path() / relative).string();
+    const std::filesystem::path executable_directory =
+        std::filesystem::path(executable).parent_path();
+    for (std::filesystem::path candidate = executable_directory;; candidate = candidate.parent_path()) {
+        std::error_code exists_error;
+        if (std::filesystem::exists(candidate / "config" / "layouts" / "default.json",
+                                    exists_error)) {
+            return candidate;
+        }
+        exists_error.clear();
+        if (std::filesystem::exists(candidate / "config", exists_error)) {
+            return candidate;
+        }
+        if (candidate == candidate.parent_path()) {
+            break;
+        }
+    }
+    return executable_directory.parent_path();
+}
+
+std::string default_repo_path(const std::filesystem::path& relative) {
+    const std::filesystem::path root = repo_root_from_executable();
+    if (root.empty()) {
+        return relative.string();
+    }
+    return (root / relative).string();
 }
 
 bool bind_desktop_captures(
@@ -402,17 +451,27 @@ int main(int argc, char** argv) {
     }
     if (selected < 0) {
         for (size_t i = 0; i < monitors.size(); ++i) {
-            if (!monitors[i].primary) {
+            if (!monitors[i].primary && !monitors[i].virtual_display) {
                 selected = static_cast<int>(i);
                 break;
             }
         }
-        if (selected < 0 && !monitors.empty()) {
-            selected = 0;
+    }
+    if (selected < 0) {
+        for (size_t i = 0; i < monitors.size(); ++i) {
+            if (!monitors[i].virtual_display) {
+                selected = static_cast<int>(i);
+                break;
+            }
         }
     }
     if (selected < 0) {
-        std::printf("no monitors found\n");
+        if (monitors.empty()) {
+            std::printf("no monitors found\n");
+        } else {
+            std::printf("only Parsec virtual displays are available to render on; "
+                        "pass --monitor N to choose one explicitly\n");
+        }
         return 1;
     }
     const MonitorEntry& target = monitors[selected];
@@ -460,6 +519,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::printf("loaded layout: %s (%zu screens)\n", opt.layout_path.c_str(), layout.screens.size());
+    std::printf("capture policy: active %dfps (|yaw delta| <= %.0f deg), mid %dfps, "
+                "idle %dfps (|yaw delta| >= %.0f deg)\n",
+                layout.capture_policy.active_fps, layout.capture_policy.leave_deg,
+                layout.capture_policy.mid_fps, layout.capture_policy.idle_fps,
+                layout.capture_policy.enter_deg);
 
     std::vector<std::unique_ptr<gt::DesktopDuplicator>> captures;
     if (opt.virtual_displays &&
@@ -469,6 +533,7 @@ int main(int argc, char** argv) {
         DestroyWindow(hwnd);
         return 1;
     }
+    std::vector<CaptureTierState> capture_states(captures.size());
 
     gt::ImuSource imu;
     AppState state;
@@ -489,15 +554,19 @@ int main(int argc, char** argv) {
 
     std::ofstream diagnostics;
     if (!opt.log_path.empty()) {
-        diagnostics.open(opt.log_path, std::ios::out | std::ios::trunc);
-        diagnostics << "elapsed_s,tick_100us,gx_raw,gy_raw,gz_raw,bias_x,bias_y,bias_z,yaw_deg,pitch_deg,"
-                       "roll_deg,still\n";
+        const bool write_header = !std::filesystem::exists(opt.log_path);
+        diagnostics.open(opt.log_path, std::ios::out | std::ios::app);
+        if (diagnostics.is_open() && write_header) {
+            diagnostics << "elapsed_s,tick_100us,gx_raw,gy_raw,gz_raw,bias_x,bias_y,bias_z,"
+                           "view_yaw_deg,view_pitch_deg,view_roll_deg,still\n";
+        }
     }
     int log_rows = 0;
     std::error_code layout_time_error;
     auto layout_write_time = std::filesystem::last_write_time(opt.layout_path, layout_time_error);
     double next_layout_check = 0.5;
     double next_capture_error_log = 0.0;
+    int consecutive_capture_failures = 0;
 
     while (!state.quit) {
         MSG message;
@@ -546,7 +615,10 @@ int main(int argc, char** argv) {
                 }
                 if (reload_ok) {
                     layout = std::move(candidate);
-                    if (opt.virtual_displays) captures = std::move(candidate_captures);
+                    if (opt.virtual_displays) {
+                        captures = std::move(candidate_captures);
+                        capture_states.assign(captures.size(), CaptureTierState{});
+                    }
                     if (!opt.fov_explicit) {
                         opt.fov = layout.fov_deg;
                     }
@@ -586,56 +658,6 @@ int main(int argc, char** argv) {
             state.quit = true;
         }
 
-        for (size_t screen_index = 0; screen_index < captures.size(); ++screen_index) {
-            gt::CapturedDesktop captured;
-            std::string capture_error;
-            const gt::CapturePollResult result = captures[screen_index]->poll(captured, capture_error);
-            if (result == gt::CapturePollResult::Frame && captured.texture) {
-                if (!renderer.set_screen_texture(screen_index, captured.texture.Get(), capture_error)) {
-                    std::printf("desktop texture update failed: %s\n", capture_error.c_str());
-                    state.quit = true;
-                }
-                gt::CursorUpdate cursor;
-                cursor.position_updated = captured.pointer.position_updated;
-                cursor.visible = captured.pointer.visible;
-                cursor.x = captured.pointer.x;
-                cursor.y = captured.pointer.y;
-                cursor.desktop_width = captured.width;
-                cursor.desktop_height = captured.height;
-                cursor.shape_updated = captured.pointer.shape_updated;
-                cursor.shape_width = captured.pointer.shape.Width;
-                cursor.shape_height = captured.pointer.shape.Height;
-                cursor.shape_pitch = captured.pointer.shape.Pitch;
-                cursor.shape_pixels = captured.pointer.pixels.data();
-                cursor.shape_bytes = captured.pointer.pixels.size();
-                switch (captured.pointer.shape.Type) {
-                    case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR:
-                        cursor.mode = gt::CursorShapeMode::Color;
-                        break;
-                    case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR:
-                        cursor.mode = gt::CursorShapeMode::MaskedColor;
-                        break;
-                    case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME:
-                        cursor.mode = gt::CursorShapeMode::Monochrome;
-                        break;
-                    default:
-                        cursor.shape_updated = false;
-                        break;
-                }
-                if ((cursor.position_updated || cursor.shape_updated) &&
-                    !renderer.update_screen_cursor(screen_index, cursor, capture_error)) {
-                    std::printf("desktop cursor update failed: %s\n", capture_error.c_str());
-                    state.quit = true;
-                }
-            } else if (result == gt::CapturePollResult::Failed) {
-                if (elapsed >= next_capture_error_log) {
-                    std::printf("desktop capture failed for screen '%s': %s\n",
-                                layout.screens[screen_index].id.c_str(), capture_error.c_str());
-                    next_capture_error_log = elapsed + 1.0;
-                }
-            }
-        }
-
         gt::Quat head = opt.no_imu ? gt::Quat{} : imu.orientation();
         if (state.capture_yaw_hold) {
             state.held_yaw_twist = gt::quat_twist_about(head, 0.0f, 0.0f, 1.0f);
@@ -655,9 +677,127 @@ int main(int argc, char** argv) {
             const gt::Quat swing = gt::quat_multiply(gt::quat_conjugate(twist), head);
             head = gt::quat_multiply(state.held_pitch_twist, swing);
         }
+
+        const float view_yaw_deg = gt::camera_applied_euler(head, signs).yaw_deg;
+        const gt::CapturePolicy& capture_policy = layout.capture_policy;
+        const double tier_intervals[3] = {
+            1.0 / static_cast<double>(capture_policy.active_fps),
+            1.0 / static_cast<double>(capture_policy.mid_fps),
+            1.0 / static_cast<double>(capture_policy.idle_fps),
+        };
+
+        bool frame_capture_failed = false;
+        for (size_t screen_index = 0; screen_index < captures.size(); ++screen_index) {
+            CaptureTierState& tier_state = capture_states[screen_index];
+            const float yaw_delta = std::fabs(
+                wrap_deg(view_yaw_deg - layout.screens[screen_index].yaw_deg));
+            // Two-threshold hysteresis: inside the leave cone a screen is active,
+            // beyond the enter cone it is idle; the band between keeps the
+            // previous tier so a screen near a boundary does not flip tier (and
+            // re-poll every frame) when the head yaw jitters.
+            if (yaw_delta <= capture_policy.leave_deg) {
+                tier_state.tier = 0;
+            } else if (yaw_delta >= capture_policy.enter_deg) {
+                tier_state.tier = 2;
+            }
+            if (elapsed < tier_state.next_poll_time) {
+                continue;
+            }
+            tier_state.next_poll_time = elapsed + tier_intervals[tier_state.tier];
+
+            gt::CapturedDesktop captured;
+            std::string capture_error;
+            const gt::CapturePollResult result = captures[screen_index]->poll(captured, capture_error);
+            if (result == gt::CapturePollResult::Failed) {
+                if (elapsed >= next_capture_error_log) {
+                    std::printf("desktop capture failed for screen '%s': %s\n",
+                                layout.screens[screen_index].id.c_str(), capture_error.c_str());
+                    next_capture_error_log = elapsed + 1.0;
+                }
+                continue;
+            }
+            if (result != gt::CapturePollResult::Frame) {
+                continue;
+            }
+            if (captured.protected_content_masked) {
+                // The driver masks protected content to black; blank the screen
+                // (drop the live texture) instead of painting that black frame.
+                if (!renderer.set_screen_texture(screen_index, nullptr, capture_error)) {
+                    if (elapsed >= next_capture_error_log) {
+                        std::printf("desktop texture update failed for screen '%s': %s\n",
+                                    layout.screens[screen_index].id.c_str(), capture_error.c_str());
+                        next_capture_error_log = elapsed + 1.0;
+                    }
+                    frame_capture_failed = true;
+                    if (++consecutive_capture_failures >= kFatalCaptureFailures) {
+                        std::printf("desktop capture kept failing; exiting\n");
+                        state.quit = true;
+                    }
+                }
+                continue;
+            }
+            if (captured.desktop_updated &&
+                !renderer.set_screen_texture(screen_index, captured.texture.Get(), capture_error)) {
+                if (elapsed >= next_capture_error_log) {
+                    std::printf("desktop texture update failed for screen '%s': %s\n",
+                                layout.screens[screen_index].id.c_str(), capture_error.c_str());
+                    next_capture_error_log = elapsed + 1.0;
+                }
+                frame_capture_failed = true;
+                if (++consecutive_capture_failures >= kFatalCaptureFailures) {
+                    std::printf("desktop capture kept failing; exiting\n");
+                    state.quit = true;
+                }
+                continue;
+            }
+            gt::CursorUpdate cursor;
+            cursor.position_updated = captured.pointer.position_updated;
+            cursor.visible = captured.pointer.visible;
+            cursor.x = captured.pointer.x;
+            cursor.y = captured.pointer.y;
+            cursor.desktop_width = captured.width;
+            cursor.desktop_height = captured.height;
+            cursor.shape_updated = captured.pointer.shape_updated;
+            cursor.shape_width = captured.pointer.shape.Width;
+            cursor.shape_height = captured.pointer.shape.Height;
+            cursor.shape_pitch = captured.pointer.shape.Pitch;
+            cursor.shape_pixels = captured.pointer.pixels.data();
+            cursor.shape_bytes = captured.pointer.pixels.size();
+            switch (captured.pointer.shape.Type) {
+                case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR:
+                    cursor.mode = gt::CursorShapeMode::Color;
+                    break;
+                case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR:
+                    cursor.mode = gt::CursorShapeMode::MaskedColor;
+                    break;
+                case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME:
+                    cursor.mode = gt::CursorShapeMode::Monochrome;
+                    break;
+                default:
+                    cursor.shape_updated = false;
+                    break;
+            }
+            if ((cursor.position_updated || cursor.shape_updated) &&
+                !renderer.update_screen_cursor(screen_index, cursor, capture_error)) {
+                if (elapsed >= next_capture_error_log) {
+                    std::printf("desktop cursor update failed for screen '%s': %s\n",
+                                layout.screens[screen_index].id.c_str(), capture_error.c_str());
+                    next_capture_error_log = elapsed + 1.0;
+                }
+                frame_capture_failed = true;
+                if (++consecutive_capture_failures >= kFatalCaptureFailures) {
+                    std::printf("desktop cursor update kept failing; exiting\n");
+                    state.quit = true;
+                }
+            }
+        }
+        if (!frame_capture_failed) {
+            consecutive_capture_failures = 0;
+        }
+
         renderer.set_signs(signs);
-        renderer.render(head, opt.fov, static_cast<float>(elapsed));
         renderer.wait_for_frame();
+        renderer.render(head, opt.fov, static_cast<float>(elapsed));
         if (!renderer.present()) {
             std::printf("present failed, exiting\n");
             break;

@@ -54,7 +54,7 @@ private:
     bool ping();
     bool query_version(int& version);
     bool ioctl(uint32_t code, const std::array<uint8_t, 32>& input, uint32_t timeout_ms,
-               uint32_t* output, std::string* error);
+               uint32_t* output, std::string* error, bool require_output_size = true);
     void keepalive_loop();
 
     void* handle_ = nullptr;

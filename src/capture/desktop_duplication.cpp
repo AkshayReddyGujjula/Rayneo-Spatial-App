@@ -22,6 +22,10 @@ std::string hresult_text(const char* operation, HRESULT result) {
 
 }  // namespace
 
+DesktopDuplicator::~DesktopDuplicator() {
+    reset();
+}
+
 bool DesktopDuplicator::initialize(ID3D11Device* device, ID3D11DeviceContext* context,
                                    const std::wstring& output_name, std::string& error,
                                    bool force_gdi_fallback) {
@@ -41,6 +45,7 @@ bool DesktopDuplicator::initialize(ID3D11Device* device, ID3D11DeviceContext* co
 
 bool DesktopDuplicator::create_duplication(std::string& error) {
     duplication_.Reset();
+    have_desktop_texture_ = false;
     ComPtr<IDXGIDevice> dxgi_device;
     ComPtr<IDXGIAdapter> adapter;
     HRESULT result = device_.As(&dxgi_device);
@@ -108,6 +113,10 @@ bool DesktopDuplicator::ensure_gdi_texture(std::string& error) {
         error = "GDI capture output dimensions are zero";
         return false;
     }
+    if (copy_texture_.Get() != nullptr && copy_view_.Get() != nullptr &&
+        gdi_bitmap_ != nullptr && gdi_surface_width_ == width_ && gdi_surface_height_ == height_) {
+        return true;
+    }
     D3D11_TEXTURE2D_DESC description{};
     description.Width = width_;
     description.Height = height_;
@@ -127,10 +136,8 @@ bool DesktopDuplicator::ensure_gdi_texture(std::string& error) {
         error = hresult_text("creating the GDI fallback texture", result);
         return false;
     }
-    return true;
-}
 
-CapturePollResult DesktopDuplicator::poll_gdi(CapturedDesktop& frame, std::string& error) {
+    destroy_gdi_surface();
     BITMAPINFO bitmap_info{};
     bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bitmap_info.bmiHeader.biWidth = static_cast<LONG>(width_);
@@ -138,56 +145,96 @@ CapturePollResult DesktopDuplicator::poll_gdi(CapturedDesktop& frame, std::strin
     bitmap_info.bmiHeader.biPlanes = 1;
     bitmap_info.bmiHeader.biBitCount = 32;
     bitmap_info.bmiHeader.biCompression = BI_RGB;
-    void* pixels = nullptr;
-    HDC desktop = GetDC(nullptr);
-    HDC memory = CreateCompatibleDC(desktop);
-    HBITMAP bitmap = CreateDIBSection(desktop, &bitmap_info, DIB_RGB_COLORS, &pixels, nullptr, 0);
-    if (desktop == nullptr || memory == nullptr || bitmap == nullptr || pixels == nullptr) {
-        if (bitmap != nullptr) DeleteObject(bitmap);
-        if (memory != nullptr) DeleteDC(memory);
-        if (desktop != nullptr) ReleaseDC(nullptr, desktop);
+    gdi_desktop_dc_ = GetDC(nullptr);
+    gdi_memory_dc_ = CreateCompatibleDC(gdi_desktop_dc_);
+    gdi_bitmap_ =
+        CreateDIBSection(gdi_desktop_dc_, &bitmap_info, DIB_RGB_COLORS, &gdi_pixels_, nullptr, 0);
+    if (gdi_desktop_dc_ == nullptr || gdi_memory_dc_ == nullptr || gdi_bitmap_ == nullptr ||
+        gdi_pixels_ == nullptr) {
+        destroy_gdi_surface();
         error = "could not allocate the GDI fallback capture surface";
+        return false;
+    }
+    gdi_previous_bitmap_ = SelectObject(gdi_memory_dc_, gdi_bitmap_);
+    gdi_surface_width_ = width_;
+    gdi_surface_height_ = height_;
+    return true;
+}
+
+void DesktopDuplicator::destroy_gdi_surface() {
+    if (gdi_memory_dc_ != nullptr) {
+        if (gdi_previous_bitmap_ != nullptr) {
+            SelectObject(gdi_memory_dc_, gdi_previous_bitmap_);
+        }
+        if (gdi_bitmap_ != nullptr) {
+            DeleteObject(gdi_bitmap_);
+        }
+        DeleteDC(gdi_memory_dc_);
+    }
+    if (gdi_desktop_dc_ != nullptr) {
+        ReleaseDC(nullptr, gdi_desktop_dc_);
+    }
+    gdi_desktop_dc_ = nullptr;
+    gdi_memory_dc_ = nullptr;
+    gdi_bitmap_ = nullptr;
+    gdi_previous_bitmap_ = nullptr;
+    gdi_pixels_ = nullptr;
+    gdi_surface_width_ = 0;
+    gdi_surface_height_ = 0;
+    gdi_cursor_valid_ = false;
+}
+
+CapturePollResult DesktopDuplicator::poll_gdi(CapturedDesktop& frame, std::string& error) {
+    if (gdi_memory_dc_ == nullptr || gdi_bitmap_ == nullptr || gdi_pixels_ == nullptr) {
+        error = "the GDI fallback capture surface is not initialized";
         return CapturePollResult::Failed;
     }
-    const HGDIOBJ previous = SelectObject(memory, bitmap);
-    const BOOL copied = BitBlt(memory, 0, 0, static_cast<int>(width_), static_cast<int>(height_),
-                               desktop, output_rect_.left, output_rect_.top, SRCCOPY | CAPTUREBLT);
+    const BOOL copied = BitBlt(gdi_memory_dc_, 0, 0, static_cast<int>(width_),
+                               static_cast<int>(height_), gdi_desktop_dc_, output_rect_.left,
+                               output_rect_.top, SRCCOPY | CAPTUREBLT);
 
+    bool cursor_showing = false;
+    LONG cursor_x = 0;
+    LONG cursor_y = 0;
     CURSORINFO cursor{};
     cursor.cbSize = sizeof(cursor);
     if (copied && GetCursorInfo(&cursor) && (cursor.flags & CURSOR_SHOWING) != 0 &&
         cursor.hCursor != nullptr) {
         ICONINFO icon{};
         if (GetIconInfo(cursor.hCursor, &icon)) {
+            cursor_showing = true;
+            cursor_x = cursor.ptScreenPos.x;
+            cursor_y = cursor.ptScreenPos.y;
             const int x = cursor.ptScreenPos.x - output_rect_.left -
                           static_cast<int>(icon.xHotspot);
             const int y = cursor.ptScreenPos.y - output_rect_.top -
                           static_cast<int>(icon.yHotspot);
-            DrawIconEx(memory, x, y, cursor.hCursor, 0, 0, 0, nullptr, DI_NORMAL);
+            DrawIconEx(gdi_memory_dc_, x, y, cursor.hCursor, 0, 0, 0, nullptr, DI_NORMAL);
             if (icon.hbmColor != nullptr) DeleteObject(icon.hbmColor);
             if (icon.hbmMask != nullptr) DeleteObject(icon.hbmMask);
         }
     }
-
-    if (copied) {
-        ID3D11ShaderResourceView* unbound[] = {nullptr, nullptr};
-        context_->PSSetShaderResources(0, 2, unbound);
-        context_->UpdateSubresource(copy_texture_.Get(), 0, nullptr, pixels, width_ * 4, 0);
-    }
-    SelectObject(memory, previous);
-    DeleteObject(bitmap);
-    DeleteDC(memory);
-    ReleaseDC(nullptr, desktop);
     if (!copied) {
         error = "BitBlt failed while capturing the fallback desktop";
         return CapturePollResult::Failed;
     }
 
+    const bool cursor_changed = !gdi_cursor_valid_ || cursor_showing != gdi_cursor_showing_ ||
+                                cursor_x != gdi_cursor_x_ || cursor_y != gdi_cursor_y_;
+    gdi_cursor_valid_ = true;
+    gdi_cursor_showing_ = cursor_showing;
+    gdi_cursor_x_ = cursor_x;
+    gdi_cursor_y_ = cursor_y;
+
+    ID3D11ShaderResourceView* unbound[] = {nullptr, nullptr};
+    context_->PSSetShaderResources(0, 2, unbound);
+    context_->UpdateSubresource(copy_texture_.Get(), 0, nullptr, gdi_pixels_, width_ * 4, 0);
+
     frame.texture = copy_view_;
     frame.width = width_;
     frame.height = height_;
     frame.desktop_updated = true;
-    frame.pointer.position_updated = true;
+    frame.pointer.position_updated = cursor_changed;
     frame.pointer.visible = false;
     ++frames_captured_;
     return CapturePollResult::Frame;
@@ -262,15 +309,17 @@ CapturePollResult DesktopDuplicator::poll(CapturedDesktop& frame, std::string& e
         if (FAILED(result)) error = hresult_text("reading the duplicated desktop texture", result);
         return CapturePollResult::Failed;
     }
-    ID3D11ShaderResourceView* unbound[] = {nullptr, nullptr};
-    context_->PSSetShaderResources(0, 2, unbound);
-    context_->CopyResource(copy_texture_.Get(), source.Get());
-
     frame.texture = copy_view_;
     frame.width = width_;
     frame.height = height_;
-    frame.desktop_updated = info.LastPresentTime.QuadPart != 0;
+    frame.desktop_updated = info.LastPresentTime.QuadPart != 0 || !have_desktop_texture_;
     frame.protected_content_masked = info.ProtectedContentMaskedOut != FALSE;
+    if (frame.desktop_updated) {
+        ID3D11ShaderResourceView* unbound[] = {nullptr, nullptr};
+        context_->PSSetShaderResources(0, 2, unbound);
+        context_->CopyResource(copy_texture_.Get(), source.Get());
+        have_desktop_texture_ = true;
+    }
     if (info.LastMouseUpdateTime.QuadPart != 0) {
         frame.pointer.position_updated = true;
         frame.pointer.visible = info.PointerPosition.Visible != FALSE;
@@ -313,6 +362,7 @@ CapturePollResult DesktopDuplicator::poll(CapturedDesktop& frame, std::string& e
 }
 
 void DesktopDuplicator::reset() {
+    destroy_gdi_surface();
     duplication_.Reset();
     copy_view_.Reset();
     copy_texture_.Reset();
@@ -321,6 +371,7 @@ void DesktopDuplicator::reset() {
     output_name_.clear();
     width_ = 0;
     height_ = 0;
+    have_desktop_texture_ = false;
 }
 
 }  // namespace gt
