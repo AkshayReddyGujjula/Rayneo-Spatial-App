@@ -15,15 +15,26 @@ public:
         int settle_samples = 150;
         int bias_samples = 600;
         int bias_timeout_samples = 4000;
-        float still_dev_threshold_degs = 0.6f;
+        // Enter threshold must sit below the exit threshold but high enough that a
+        // mild tremor can still reach it - a band with no way back to stillness
+        // would freeze both adaptation paths (and so let creep run unchecked).
+        float still_dev_threshold_degs = 1.0f;
         float motion_dev_threshold_degs = 1.2f;
-        // Calibration keeps a generous raw cap (a real gyro bias can reach about
-        // 1.5 deg/s). The continuous adaptation instead gates on the rate that
-        // remains AFTER the bias is subtracted, so deliberate slow movement is
-        // never mistaken for bias.
-        float calibration_rate_cap_degs = 5.0f;
-        float adapt_rate_cap_degs = 1.0f;
+        // With the magnetometer off, a slow yaw rotation and a yaw bias are
+        // physically indistinguishable, so every gate here is deliberately
+        // conservative: the startup calibration captures the bulk of the bias
+        // (a real bias stays under ~1.5 deg/s), the continuous adaptation only
+        // touches rates a real bias could explain, the estimate can never exceed
+        // bias_limit_degs, and a long still period always re-opens adaptation so a
+        // stale estimate can recover without any runaway.
+        float calibration_rate_cap_degs = 1.5f;
+        float adapt_rate_cap_degs = 0.3f;
         float drift_rate_cap_degs = 0.5f;
+        float bias_limit_degs = 1.5f;
+        // Long enough that a deliberate slow pan (a few seconds) never trips it,
+        // short enough that a stale estimate recovers within seconds of stillness.
+        float adapt_escape_s = 8.0f;
+        float bias_adapt_slow_tau_s = 10.0f;
         float still_hold_s = 0.8f;
         float fast_ema_tau_s = 0.2f;
         float dev_ema_tau_s = 0.5f;
@@ -31,7 +42,7 @@ public:
         // After any detected motion the adaptation paths stay hands-off for this
         // long, so the slow ramp and settle of a deliberate head movement are not
         // mistaken for drift.
-        float motion_holdoff_s = 2.0f;
+        float motion_holdoff_s = 1.0f;
         bool freeze_when_still = false;
         bool map_package_axes = true;
         std::array<float, 9> sensor_to_head{
@@ -85,6 +96,7 @@ private:
     float still_time_ = 0.0f;
     float stillness_degs_ = 0.0f;
     float holdoff_s_ = 0.0f;
+    float still_since_motion_s_ = 0.0f;
 
     Quat q_ref_;
     Quat q_frozen_;

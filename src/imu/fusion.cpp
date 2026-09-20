@@ -59,18 +59,6 @@ float quat_angle_degs(const Quat& q) {
     return 2.0f * std::atan2(sin_half, std::fabs(n.w)) * 180.0f / 3.14159265358979323846f;
 }
 
-Quat quat_scaled(const Quat& q, float fraction) {
-    const Quat n = quat_normalize(q);
-    const float sin_half = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
-    if (sin_half < 1e-6f) {
-        return Quat{};
-    }
-    const float angle = 2.0f * std::atan2(sin_half, n.w);
-    const float scaled_half = 0.5f * angle * fraction;
-    const float scale = std::sin(scaled_half) / sin_half;
-    return Quat{std::cos(scaled_half), n.x * scale, n.y * scale, n.z * scale};
-}
-
 Euler quat_to_euler(const Quat& q) {
     const Quat n = quat_normalize(q);
     const float w = n.w;

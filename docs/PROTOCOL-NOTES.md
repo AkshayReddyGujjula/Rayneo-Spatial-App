@@ -73,6 +73,16 @@ Streaming persists after the host process exits; send `66 02` to stop it (or re-
 
 ## Fusion notes (live-verified)
 
+- **Yaw has no absolute reference.** With the magnetometer off, a very slow steady
+  yaw rotation and a yaw bias are physically indistinguishable, so the estimator is
+  deliberately conservative: the startup calibration captures the bulk of the bias
+  (a real bias stays under about 1.5 deg/s), the continuous bias adaptation and the
+  drift absorption only act on rates a bias could explain (0.3 and 0.5 deg/s), the
+  estimate is hard-clamped to +-1.5 deg/s so it can never run away, and after a long
+  still period (8 s) a slower escape path re-opens adaptation so a stale estimate
+  can still recover. Consequence: a *steady* sub-0.5 deg/s yaw rotation is treated as
+  drift and cancelled (use `R`/recenter after such a movement), while every normal
+  head turn registers fully. `pose_scenarios` covers both sides of this trade-off.
 - **Magnetometer: off by default.** In the test environment the field reads |B| ~= 71 uT
   dominated by the package X axis (laptop/desk interference; Earth's field here should be
   ~50 uT with a strong inclination). Feeding it into the filter produced a constant

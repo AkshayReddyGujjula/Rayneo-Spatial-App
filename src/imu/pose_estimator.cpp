@@ -54,6 +54,7 @@ void PoseEstimator::configure(const Config& cfg) {
     still_time_ = 0.0f;
     stillness_degs_ = 0.0f;
     holdoff_s_ = 0.0f;
+    still_since_motion_s_ = 0.0f;
     q_ref_ = Quat{};
     q_frozen_ = Quat{};
     drift_correction_ = Quat{};
@@ -89,6 +90,12 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
         return false;
     }
 
+    if (!std::isfinite(sample.gyro_degs.x) || !std::isfinite(sample.gyro_degs.y) ||
+        !std::isfinite(sample.gyro_degs.z) || !std::isfinite(sample.accel_mps2.x) ||
+        !std::isfinite(sample.accel_mps2.y) || !std::isfinite(sample.accel_mps2.z)) {
+        return false;
+    }
+
     const Vec3 raw = sample.gyro_degs;
 
     float dt = 1.0f / 476.0f;
@@ -98,6 +105,12 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
         const float dt_candidate = static_cast<float>(delta_ticks) * 1e-4f;
         if (dt_candidate > 1e-5f && dt_candidate < 0.05f) {
             dt = dt_candidate;
+        } else if (dt_candidate >= 0.05f) {
+            // Samples were lost: skip this one and restart the interval rather than
+            // integrating it with a substituted dt (which silently halves motion).
+            last_tick_ = tick;
+            have_prev_live_ = false;
+            return false;
         }
     }
     last_tick_ = tick;
@@ -130,31 +143,35 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
                 still_ = true;
             }
         } else {
-            still_time_ = 0.0f;
+            // Decay rather than reset, so a periodic tremor (which dips below the
+            // enter threshold twice per cycle) can still accumulate stillness.
+            still_time_ = std::max(0.0f, still_time_ - dt);
         }
     } else if (stillness_degs_ > cfg_.motion_dev_threshold_degs) {
         still_ = false;
         still_time_ = 0.0f;
     }
 
-    // A constant rotation looks "still" to a variation-based detector, but a real
-    // gyro bias is never a large rate - and after any motion the estimator must
-    // stay hands-off for a moment, otherwise the settle phase of a deliberate
-    // head movement is absorbed as if it were drift.
-    if (!still_) {
+    // Drive the refractory counters from the deviation LEVEL, not from the still
+    // flag: the flag flickers on noise, and resetting on every flicker would keep
+    // adaptation permanently gated off after any motion.
+    if (stillness_degs_ > cfg_.motion_dev_threshold_degs) {
         holdoff_s_ = cfg_.motion_holdoff_s;
-    } else if (holdoff_s_ > 0.0f) {
-        holdoff_s_ -= dt;
+        still_since_motion_s_ = 0.0f;
+    } else {
+        if (holdoff_s_ > 0.0f) {
+            holdoff_s_ -= dt;
+        }
+        still_since_motion_s_ += dt;
     }
     const float raw_rate_magnitude = max_abs(fast_ema_);
-    const Vec3 corrected_rate{fast_ema_.x - bias_degs_.x, fast_ema_.y - bias_degs_.y,
-                              fast_ema_.z - bias_degs_.z};
-    const float adapt_rate_magnitude = max_abs(corrected_rate);
-    // Calibration runs on the raw rate because the bias is not known yet; the
-    // continuous adaptation gates on the corrected rate plus a refractory hold-off.
+    // Every gate is on the RAW rate: the corrected rate is a lag test (a slowly
+    // ramping rotation keeps lagging the estimate by less than the cap), which is
+    // how deliberate motion used to end up inside the bias.
+    const bool slow_enough = raw_rate_magnitude < cfg_.adapt_rate_cap_degs;
+    const bool escape = still_since_motion_s_ >= cfg_.adapt_escape_s;
     const bool calib_eligible = still_ && raw_rate_magnitude < cfg_.calibration_rate_cap_degs;
-    const bool adapt_eligible =
-        still_ && holdoff_s_ <= 0.0f && adapt_rate_magnitude < cfg_.adapt_rate_cap_degs;
+    const bool adapt_eligible = still_ && holdoff_s_ <= 0.0f && (slow_enough || escape);
 
     if (!bias_done_) {
         if (calib_eligible) {
@@ -174,6 +191,9 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
             if (still_count_ > 0) {
                 const float n = static_cast<float>(still_count_);
                 bias_degs_ = Vec3{bias_sum_still_.x / n, bias_sum_still_.y / n, bias_sum_still_.z / n};
+                bias_degs_.x = std::max(-cfg_.bias_limit_degs, std::min(cfg_.bias_limit_degs, bias_degs_.x));
+                bias_degs_.y = std::max(-cfg_.bias_limit_degs, std::min(cfg_.bias_limit_degs, bias_degs_.y));
+                bias_degs_.z = std::max(-cfg_.bias_limit_degs, std::min(cfg_.bias_limit_degs, bias_degs_.z));
             }
             bias_done_ = true;
             filter_.reset();
@@ -199,10 +219,16 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
     }
 
     if (adapt_eligible) {
-        const float k = dt / cfg_.bias_adapt_tau_s;
+        // The escape path corrects slowly: it exists so a stale estimate can never
+        // lock the estimator out, not to track motion.
+        const float tau = (slow_enough || !escape) ? cfg_.bias_adapt_tau_s : cfg_.bias_adapt_slow_tau_s;
+        const float k = dt / tau;
         bias_degs_.x += (fast_ema_.x - bias_degs_.x) * k;
         bias_degs_.y += (fast_ema_.y - bias_degs_.y) * k;
         bias_degs_.z += (fast_ema_.z - bias_degs_.z) * k;
+        bias_degs_.x = std::max(-cfg_.bias_limit_degs, std::min(cfg_.bias_limit_degs, bias_degs_.x));
+        bias_degs_.y = std::max(-cfg_.bias_limit_degs, std::min(cfg_.bias_limit_degs, bias_degs_.y));
+        bias_degs_.z = std::max(-cfg_.bias_limit_degs, std::min(cfg_.bias_limit_degs, bias_degs_.z));
     }
 
     if (!initialized_) {
@@ -230,12 +256,13 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
         // while residual creep - a long run of sub-threshold increments - is
         // cancelled instead of accumulating into a visible offset.
         const Quat live = filter_.orientation();
-        if (have_prev_live_ && adapt_eligible && cfg_.drift_rate_cap_degs > 0.0f) {
+        // The absorption gates on its own (still + hold-off + a slow raw rate):
+        // rates this small are below anything a deliberate pan produces, so this
+        // never needs the escape window that the bias adaptation uses.
+        if (have_prev_live_ && still_ && holdoff_s_ <= 0.0f && cfg_.drift_rate_cap_degs > 0.0f &&
+            raw_rate_magnitude < cfg_.drift_rate_cap_degs) {
             const Quat increment = quat_multiply(live, quat_conjugate(q_prev_live_));
-            const float increment_rate = quat_angle_degs(increment) / dt;
-            if (increment_rate < cfg_.drift_rate_cap_degs) {
-                drift_correction_ = quat_multiply(increment, drift_correction_);
-            }
+            drift_correction_ = quat_multiply(increment, drift_correction_);
         }
         q_prev_live_ = live;
         have_prev_live_ = true;
