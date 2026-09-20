@@ -1,7 +1,10 @@
 #include "imu/gt_hid.h"
 
+#include "imu/gt_protocol.h"
+
 #include <hidapi.h>
 
+#include <chrono>
 #include <cstdio>
 
 namespace gt {
@@ -94,11 +97,41 @@ void GtHidDevice::close() {
     }
 }
 
-bool GtHidDevice::write_report(const uint8_t* data, size_t length) {
+int GtHidDevice::write_report(const uint8_t* data, size_t length) {
     if (device_ == nullptr) {
+        return -1;
+    }
+    return hid_write(device_, data, length);
+}
+
+bool GtHidDevice::send_command_verified(uint8_t command, int timeout_ms, std::string* error) {
+    if (device_ == nullptr) {
+        if (error != nullptr) {
+            *error = "device is not open";
+        }
         return false;
     }
-    return hid_write(device_, data, length) == static_cast<int>(length);
+    uint8_t frame[64];
+    build_command(command, frame);
+    write_report(frame, sizeof(frame));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        uint8_t buffer[64] = {};
+        const int bytes = read_report(buffer, sizeof(buffer), 25);
+        if (bytes <= 0) {
+            continue;
+        }
+        const Report report = decode_report(buffer, static_cast<size_t>(bytes));
+        if (report.kind == ReportKind::Ack && report.ack_cmd == command) {
+            return true;
+        }
+    }
+    if (error != nullptr) {
+        char text[80];
+        std::snprintf(text, sizeof(text), "no acknowledgement for command 0x%02x", command);
+        *error = text;
+    }
+    return false;
 }
 
 int GtHidDevice::read_report(uint8_t* data, size_t length, int timeout_ms) {

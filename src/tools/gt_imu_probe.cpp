@@ -82,10 +82,12 @@ bool parse_args(int argc, char** argv, Options& opt) {
 }
 
 void send_command(gt::GtHidDevice& dev, uint8_t cmd, const char* name) {
-    uint8_t frame[64];
-    gt::build_command(cmd, frame);
-    const bool ok = dev.write_report(frame, sizeof(frame));
-    std::printf("  send 66 %02x (%s): %s\n", cmd, name, ok ? "ok" : "FAILED");
+    std::string error;
+    if (dev.send_command_verified(cmd, 500, &error)) {
+        std::printf("  send 66 %02x (%s): ok (ack)\n", cmd, name);
+    } else {
+        std::printf("  send 66 %02x (%s): FAILED (%s)\n", cmd, name, error.c_str());
+    }
 }
 
 int drain_replies(gt::GtHidDevice& dev, double seconds, const char* tag, int max_print) {

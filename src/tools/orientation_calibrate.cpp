@@ -82,9 +82,7 @@ uint64_t now_us() {
 }
 
 bool send_command(gt::GtHidDevice& device, uint8_t command) {
-    uint8_t frame[64];
-    gt::build_command(command, frame);
-    return device.write_report(frame, sizeof(frame));
+    return device.send_command_verified(command, 500, nullptr);
 }
 
 void drain(gt::GtHidDevice& device, int milliseconds) {
@@ -211,10 +209,14 @@ int main(int argc, char** argv) {
         return 1;
     }
     StreamGuard stream_guard(device);
-    send_command(device, gt::kCmdStreamOff);
+    if (!send_command(device, gt::kCmdStreamOff)) {
+        std::printf("warning: the stream-off command was not acknowledged\n");
+    }
     drain(device, 100);
-    if (!send_command(device, gt::kCmdStreamOn)) {
-        std::printf("failed to start the IMU stream\n");
+    std::string stream_error;
+    if (!device.send_command_verified(gt::kCmdStreamOn, 1000, &stream_error)) {
+        std::printf("failed to start the IMU stream: %s\n", stream_error.c_str());
+        std::printf("check that no other app is using the glasses, then retry\n");
         return 1;
     }
     stream_guard.mark_started();
