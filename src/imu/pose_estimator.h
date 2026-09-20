@@ -17,15 +17,21 @@ public:
         int bias_timeout_samples = 4000;
         float still_dev_threshold_degs = 0.6f;
         float motion_dev_threshold_degs = 1.2f;
-        float still_rate_cap_degs = 5.0f;
-        float still_hold_s = 0.5f;
+        // Calibration keeps a generous raw cap (a real gyro bias can reach about
+        // 1.5 deg/s). The continuous adaptation instead gates on the rate that
+        // remains AFTER the bias is subtracted, so deliberate slow movement is
+        // never mistaken for bias.
+        float calibration_rate_cap_degs = 5.0f;
+        float adapt_rate_cap_degs = 1.0f;
+        float drift_rate_cap_degs = 0.5f;
+        float still_hold_s = 0.8f;
         float fast_ema_tau_s = 0.2f;
         float dev_ema_tau_s = 0.5f;
         float bias_adapt_tau_s = 3.0f;
-        // While the head is still, fold this fraction of each incremental rotation
-        // into a slow drift correction. Real micro-movements exceed the stillness
-        // gate and pause the absorption, so they pass through intact.
-        float drift_tau_s = 1.5f;
+        // After any detected motion the adaptation paths stay hands-off for this
+        // long, so the slow ramp and settle of a deliberate head movement are not
+        // mistaken for drift.
+        float motion_holdoff_s = 2.0f;
         bool freeze_when_still = false;
         bool map_package_axes = true;
         std::array<float, 9> sensor_to_head{
@@ -63,11 +69,9 @@ private:
     MadgwickFilter filter_;
 
     Vec3 bias_sum_still_;
-    Vec3 bias_sum_all_;
     Vec3 bias_degs_;
     int settle_count_ = 0;
     int still_count_ = 0;
-    int all_count_ = 0;
     int phase_samples_ = 0;
     bool bias_done_ = false;
 
@@ -80,6 +84,7 @@ private:
     bool still_ = false;
     float still_time_ = 0.0f;
     float stillness_degs_ = 0.0f;
+    float holdoff_s_ = 0.0f;
 
     Quat q_ref_;
     Quat q_frozen_;

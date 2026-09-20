@@ -53,6 +53,12 @@ Quat quat_twist_about(const Quat& q, float axis_x, float axis_y, float axis_z) {
     return twist;
 }
 
+float quat_angle_degs(const Quat& q) {
+    const Quat n = quat_normalize(q);
+    const float sin_half = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+    return 2.0f * std::atan2(sin_half, std::fabs(n.w)) * 180.0f / 3.14159265358979323846f;
+}
+
 Quat quat_scaled(const Quat& q, float fraction) {
     const Quat n = quat_normalize(q);
     const float sin_half = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);

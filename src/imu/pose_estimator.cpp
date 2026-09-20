@@ -40,11 +40,9 @@ void PoseEstimator::configure(const Config& cfg) {
     filter_.reset();
     filter_.set_beta(cfg.beta);
     bias_sum_still_ = Vec3{};
-    bias_sum_all_ = Vec3{};
     bias_degs_ = Vec3{};
     settle_count_ = 0;
     still_count_ = 0;
-    all_count_ = 0;
     phase_samples_ = 0;
     bias_done_ = false;
     have_tick_ = false;
@@ -55,6 +53,7 @@ void PoseEstimator::configure(const Config& cfg) {
     still_ = false;
     still_time_ = 0.0f;
     stillness_degs_ = 0.0f;
+    holdoff_s_ = 0.0f;
     q_ref_ = Quat{};
     q_frozen_ = Quat{};
     drift_correction_ = Quat{};
@@ -138,17 +137,27 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
         still_time_ = 0.0f;
     }
 
-    // A constant rotation looks "still" to a variation-based detector, but a
-    // real gyro bias is never several deg/s - so cap the rate as well.
-    const float rate_magnitude = max_abs(fast_ema_);
-    const bool bias_eligible = still_ && rate_magnitude < cfg_.still_rate_cap_degs;
+    // A constant rotation looks "still" to a variation-based detector, but a real
+    // gyro bias is never a large rate - and after any motion the estimator must
+    // stay hands-off for a moment, otherwise the settle phase of a deliberate
+    // head movement is absorbed as if it were drift.
+    if (!still_) {
+        holdoff_s_ = cfg_.motion_holdoff_s;
+    } else if (holdoff_s_ > 0.0f) {
+        holdoff_s_ -= dt;
+    }
+    const float raw_rate_magnitude = max_abs(fast_ema_);
+    const Vec3 corrected_rate{fast_ema_.x - bias_degs_.x, fast_ema_.y - bias_degs_.y,
+                              fast_ema_.z - bias_degs_.z};
+    const float adapt_rate_magnitude = max_abs(corrected_rate);
+    // Calibration runs on the raw rate because the bias is not known yet; the
+    // continuous adaptation gates on the corrected rate plus a refractory hold-off.
+    const bool calib_eligible = still_ && raw_rate_magnitude < cfg_.calibration_rate_cap_degs;
+    const bool adapt_eligible =
+        still_ && holdoff_s_ <= 0.0f && adapt_rate_magnitude < cfg_.adapt_rate_cap_degs;
 
     if (!bias_done_) {
-        ++all_count_;
-        bias_sum_all_.x += raw.x;
-        bias_sum_all_.y += raw.y;
-        bias_sum_all_.z += raw.z;
-        if (bias_eligible) {
+        if (calib_eligible) {
             ++still_count_;
             bias_sum_still_.x += raw.x;
             bias_sum_still_.y += raw.y;
@@ -158,12 +167,13 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
         const bool enough_still = still_count_ >= cfg_.bias_samples;
         const bool timed_out = phase_samples_ >= cfg_.bias_timeout_samples;
         if (enough_still || timed_out) {
+            // Never fall back to the mean of moving samples: a contaminated bias
+            // would gate out the very adaptation that could correct it, leaving a
+            // permanent creep. If no still samples arrived, keep the current
+            // estimate and let the continuous adaptation do the work.
             if (still_count_ > 0) {
                 const float n = static_cast<float>(still_count_);
                 bias_degs_ = Vec3{bias_sum_still_.x / n, bias_sum_still_.y / n, bias_sum_still_.z / n};
-            } else if (all_count_ > 0) {
-                const float n = static_cast<float>(all_count_);
-                bias_degs_ = Vec3{bias_sum_all_.x / n, bias_sum_all_.y / n, bias_sum_all_.z / n};
             }
             bias_done_ = true;
             filter_.reset();
@@ -188,7 +198,7 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
         frozen_ = false;
     }
 
-    if (bias_eligible) {
+    if (adapt_eligible) {
         const float k = dt / cfg_.bias_adapt_tau_s;
         bias_degs_.x += (fast_ema_.x - bias_degs_.x) * k;
         bias_degs_.y += (fast_ema_.y - bias_degs_.y) * k;
@@ -213,20 +223,19 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
     filter_.update(gyro, map_accel(sample.accel_mps2), map_mag(sample.mag_ut), cfg_.mag_weight, dt);
 
     if (!cfg_.freeze_when_still) {
-        // Drift absorption: while the head is still, fold a small fraction of each
-        // incremental rotation into a correction subtracted from the published pose.
-        // Deliberate movements raise the stillness value and pause the absorption,
-        // so they are preserved - unlike the hard freeze, which discarded every
-        // movement below its release threshold.
+        // Drift absorption: while the head is still, each *slow* incremental
+        // rotation is absorbed fully into a correction subtracted from the
+        // published pose. Deliberate movements exceed the rate gate (and the
+        // hold-off keeps their settling tail out), so they pass through untouched,
+        // while residual creep - a long run of sub-threshold increments - is
+        // cancelled instead of accumulating into a visible offset.
         const Quat live = filter_.orientation();
-        if (have_prev_live_ && still_ && cfg_.drift_tau_s > 0.0f) {
+        if (have_prev_live_ && adapt_eligible && cfg_.drift_rate_cap_degs > 0.0f) {
             const Quat increment = quat_multiply(live, quat_conjugate(q_prev_live_));
-            float fraction = dt / cfg_.drift_tau_s;
-            if (fraction > 1.0f) {
-                fraction = 1.0f;
+            const float increment_rate = quat_angle_degs(increment) / dt;
+            if (increment_rate < cfg_.drift_rate_cap_degs) {
+                drift_correction_ = quat_multiply(increment, drift_correction_);
             }
-            drift_correction_ =
-                quat_multiply(quat_scaled(increment, fraction), drift_correction_);
         }
         q_prev_live_ = live;
         have_prev_live_ = true;
@@ -241,7 +250,10 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
 }
 
 void PoseEstimator::recenter() {
-    q_ref_ = published_orientation();
+    // Reference the LIVE orientation and clear the correction together: taking the
+    // reference from the corrected pose and then clearing the correction would
+    // leave a jump equal to the old correction.
+    q_ref_ = filter_.orientation();
     have_ref_ = true;
     q_frozen_ = q_ref_;
     frozen_ = false;
@@ -250,9 +262,7 @@ void PoseEstimator::recenter() {
 }
 
 float PoseEstimator::drift_correction_degs() const {
-    const Quat n = quat_normalize(drift_correction_);
-    const float sin_half = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
-    return 2.0f * std::atan2(sin_half, std::fabs(n.w)) * 180.0f / kPi;
+    return quat_angle_degs(drift_correction_);
 }
 
 Quat PoseEstimator::published_orientation() const {

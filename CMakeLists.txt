@@ -70,6 +70,10 @@ add_executable(pose_selftest src/tools/pose_selftest.cpp)
 target_link_libraries(pose_selftest PRIVATE rayneo_core)
 add_test(NAME pose_selftest COMMAND pose_selftest)
 
+add_executable(pose_scenarios src/tools/pose_scenarios.cpp)
+target_link_libraries(pose_scenarios PRIVATE rayneo_core)
+add_test(NAME pose_scenarios COMMAND pose_scenarios)
+
 add_executable(orientation_calibration_selftest src/tools/orientation_calibration_selftest.cpp)
 target_link_libraries(orientation_calibration_selftest PRIVATE rayneo_core)
 add_test(NAME orientation_calibration_selftest COMMAND orientation_calibration_selftest)
