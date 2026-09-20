@@ -4,6 +4,7 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <filesystem>
@@ -22,12 +23,12 @@ namespace gt {
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
-constexpr float kMotionOnDegs = 5.0f;
-constexpr float kMotionOffDegs = 3.0f;
+constexpr float kMotionOnDegs = 2.5f;
+constexpr float kMotionOffDegs = 1.5f;
 constexpr float kMotionEndHoldSeconds = 0.45f;
 constexpr float kMinMotionSeconds = 0.25f;
-constexpr float kMinExcursionDeg = 25.0f;
-constexpr float kMinDominance = 8.0f;
+constexpr float kMinExcursionDeg = 12.0f;
+constexpr float kMinDominance = 4.0f;
 constexpr float kMaxPerpendicularRmsDegs = 4.0f;
 
 struct Mat3 {
@@ -314,13 +315,23 @@ bool extract_axis(const CalibrationPhaseData& phase, const Vec3& bias_body, floa
     output.active_samples = segment.size();
 
     if (output.excursion_deg < kMinExcursionDeg) {
+        char text[192];
+        std::snprintf(text, sizeof(text),
+                      "only %.1f deg of motion was detected - move a little further (%.0f deg is "
+                      "enough) and try this step again",
+                      output.excursion_deg, kMinExcursionDeg);
         code = "SMALL_EXCURSION";
-        message = "not enough motion detected - move at least 25 degrees and try again";
+        message = text;
         return false;
     }
     if (output.dominance < kMinDominance) {
+        char text[192];
+        std::snprintf(text, sizeof(text),
+                      "motion used more than one axis (dominance %.1f) - keep the other head axes "
+                      "still and try this step again",
+                      output.dominance);
         code = "AMBIGUOUS_AXIS";
-        message = "motion used more than one axis - move in only the requested direction";
+        message = text;
         return false;
     }
     if (output.perpendicular_rms_degs > kMaxPerpendicularRmsDegs) {
