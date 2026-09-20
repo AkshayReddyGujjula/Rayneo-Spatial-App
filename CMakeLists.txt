@@ -1,0 +1,45 @@
+cmake_minimum_required(VERSION 3.25)
+project(rayneo_spatial LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(MSVC)
+  add_compile_options(/W4 /permissive- /utf-8 /Zc:preprocessor)
+endif()
+
+if(WIN32)
+  add_compile_definitions(UNICODE _UNICODE)
+endif()
+
+find_package(hidapi CONFIG REQUIRED)
+
+add_library(rayneo_core STATIC
+  src/imu/gt_protocol.cpp
+  src/imu/gt_hid.cpp
+  src/imu/fusion.cpp
+  src/imu/pose_estimator.cpp
+)
+target_include_directories(rayneo_core PUBLIC src)
+target_link_libraries(rayneo_core PUBLIC hidapi::hidapi)
+
+add_executable(gt_imu_probe src/tools/gt_imu_probe.cpp)
+target_link_libraries(gt_imu_probe PRIVATE rayneo_core)
+
+add_executable(spatial_desk
+  src/app/spatial_desk.cpp
+  src/imu/imu_source.cpp
+  src/render/camera.cpp
+  src/render/renderer.cpp
+)
+target_link_libraries(spatial_desk PRIVATE rayneo_core d3d11 dxgi d3dcompiler user32)
+
+add_executable(camera_selftest
+  src/tools/camera_selftest.cpp
+  src/render/camera.cpp
+)
+target_link_libraries(camera_selftest PRIVATE rayneo_core)
+
+add_executable(pose_selftest src/tools/pose_selftest.cpp)
+target_link_libraries(pose_selftest PRIVATE rayneo_core)
