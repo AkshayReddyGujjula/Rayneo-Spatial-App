@@ -199,6 +199,27 @@ int main() {
               "configure clears learned bias", reset_bias.x, 1e-6f);
     }
 
+    std::printf("pose_selftest: swing/twist decomposition used by the tracking toggles\n");
+    {
+        const float half = 30.0f * kPi / 360.0f;
+        const Quat yaw_only{std::cos(half), 0.0f, 0.0f, std::sin(half)};
+        const Quat yaw_twist = quat_twist_about(yaw_only, 0.0f, 0.0f, 1.0f);
+        const float yaw_error =
+            std::fabs(yaw_twist.w - yaw_only.w) + std::fabs(yaw_twist.z - yaw_only.z);
+        check(yaw_error < 1e-5f, "twist about the vertical captures a pure yaw", yaw_error, 1e-5f);
+
+        const Quat nod_only{std::cos(half), 0.0f, std::sin(half), 0.0f};
+        const Quat nod_twist = quat_twist_about(nod_only, 0.0f, 0.0f, 1.0f);
+        const float nod_error = std::fabs(nod_twist.w - 1.0f) + std::fabs(nod_twist.x) +
+                                std::fabs(nod_twist.y) + std::fabs(nod_twist.z);
+        check(nod_error < 1e-5f, "twist about the vertical ignores a pure nod", nod_error, 1e-5f);
+
+        const Quat ear_twist = quat_twist_about(nod_only, 0.0f, 1.0f, 0.0f);
+        const float ear_error =
+            std::fabs(ear_twist.w - nod_only.w) + std::fabs(ear_twist.y - nod_only.y);
+        check(ear_error < 1e-5f, "twist about the ear axis captures a pure nod", ear_error, 1e-5f);
+    }
+
     std::printf("pose_selftest: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
