@@ -20,6 +20,7 @@ struct Euler {
 Quat quat_conjugate(const Quat& q);
 Quat quat_multiply(const Quat& a, const Quat& b);
 Quat quat_normalize(const Quat& q);
+Quat quat_twist_about(const Quat& q, float axis_x, float axis_y, float axis_z);
 Euler quat_to_euler(const Quat& q);
 
 class MadgwickFilter {

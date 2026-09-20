@@ -31,6 +31,28 @@ Quat quat_normalize(const Quat& q) {
     return Quat{q.w / n, q.x / n, q.y / n, q.z / n};
 }
 
+Quat quat_twist_about(const Quat& q, float axis_x, float axis_y, float axis_z) {
+    // Swing/twist decomposition: the part of the rotation about the given axis.
+    const float projection = q.x * axis_x + q.y * axis_y + q.z * axis_z;
+    Quat twist{q.w, axis_x * projection, axis_y * projection, axis_z * projection};
+    const float n = std::sqrt(twist.x * twist.x + twist.y * twist.y + twist.z * twist.z +
+                              twist.w * twist.w);
+    if (n < 1e-6f) {
+        return Quat{};
+    }
+    twist.x /= n;
+    twist.y /= n;
+    twist.z /= n;
+    twist.w /= n;
+    if (twist.w < 0.0f) {
+        twist.w = -twist.w;
+        twist.x = -twist.x;
+        twist.y = -twist.y;
+        twist.z = -twist.z;
+    }
+    return twist;
+}
+
 Euler quat_to_euler(const Quat& q) {
     const Quat n = quat_normalize(q);
     const float w = n.w;

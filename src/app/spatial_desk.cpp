@@ -49,9 +49,22 @@ struct Options {
     bool virtual_displays = true;
 };
 
+enum HotkeyId : int {
+    kHotkeyRecenter = 1,
+    kHotkeyToggleYaw = 2,
+    kHotkeyTogglePitch = 3,
+    kHotkeyQuit = 4,
+};
+
 struct AppState {
     bool quit = false;
     gt::ImuSource* imu = nullptr;
+    bool yaw_tracking = true;
+    bool pitch_tracking = true;
+    bool capture_yaw_hold = false;
+    bool capture_pitch_hold = false;
+    gt::Quat held_yaw_twist{};
+    gt::Quat held_pitch_twist{};
 };
 
 AppState* g_app = nullptr;
@@ -116,6 +129,35 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                 std::printf("  recentered\n");
             }
             return 0;
+        case WM_HOTKEY:
+            if (g_app != nullptr) {
+                switch (static_cast<int>(wparam)) {
+                    case kHotkeyRecenter:
+                        if (g_app->imu != nullptr) {
+                            g_app->imu->recenter();
+                            std::printf("  recentered\n");
+                        }
+                        break;
+                    case kHotkeyToggleYaw:
+                        g_app->yaw_tracking = !g_app->yaw_tracking;
+                        g_app->capture_yaw_hold = !g_app->yaw_tracking;
+                        std::printf("  yaw tracking %s\n",
+                                    g_app->yaw_tracking ? "on" : "off (view holds yaw)");
+                        break;
+                    case kHotkeyTogglePitch:
+                        g_app->pitch_tracking = !g_app->pitch_tracking;
+                        g_app->capture_pitch_hold = !g_app->pitch_tracking;
+                        std::printf("  pitch tracking %s\n",
+                                    g_app->pitch_tracking ? "on" : "off (view holds pitch)");
+                        break;
+                    case kHotkeyQuit:
+                        g_app->quit = true;
+                        break;
+                    default:
+                        break;
+                }
+            }
+            return 0;
         case WM_SETCURSOR:
             if (LOWORD(lparam) == HTCLIENT) {
                 SetCursor(nullptr);
@@ -140,7 +182,9 @@ void print_usage() {
         "  --log FILE     append a diagnostic CSV (elapsed, gyro, bias, pose, still)\n"
         "  --calibration FILE  sensor-to-head calibration (default config/orientation.json)\n"
         "  --layout FILE  screen layout (default config/layouts/default.json)\n"
-        "  --no-virtual-displays  render labelled test screens without Parsec VDD\n");
+        "  --no-virtual-displays  render labelled test screens without Parsec VDD\n"
+        "  global hotkeys: Ctrl+Alt+R recenter, Ctrl+Alt+Y yaw tracking, "
+        "Ctrl+Alt+P pitch tracking, Ctrl+Alt+Q quit\n");
 }
 
 bool parse_args(int argc, char** argv, Options& opt) {
@@ -178,6 +222,26 @@ bool parse_args(int argc, char** argv, Options& opt) {
         }
     }
     return true;
+}
+
+void register_global_hotkeys(HWND hwnd) {
+    struct Binding {
+        int id;
+        UINT virtual_key;
+        const wchar_t* label;
+    };
+    const Binding bindings[] = {
+        {kHotkeyRecenter, 'R', L"Ctrl+Alt+R (recenter)"},
+        {kHotkeyToggleYaw, 'Y', L"Ctrl+Alt+Y (yaw tracking)"},
+        {kHotkeyTogglePitch, 'P', L"Ctrl+Alt+P (pitch tracking)"},
+        {kHotkeyQuit, 'Q', L"Ctrl+Alt+Q (quit)"},
+    };
+    for (const Binding& binding : bindings) {
+        if (!RegisterHotKey(hwnd, binding.id, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
+                            binding.virtual_key)) {
+            std::printf("  hotkey %ls unavailable (already in use by another app)\n", binding.label);
+        }
+    }
 }
 
 void enable_dpi_awareness() {
@@ -378,6 +442,9 @@ int main(int argc, char** argv) {
     }
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
+    std::printf("global hotkeys: Ctrl+Alt+R recenter, Ctrl+Alt+Y yaw tracking, "
+                "Ctrl+Alt+P pitch tracking, Ctrl+Alt+Q quit\n");
+    register_global_hotkeys(hwnd);
 
     gt::Renderer renderer;
     std::string error;
@@ -569,7 +636,25 @@ int main(int argc, char** argv) {
             }
         }
 
-        const gt::Quat head = opt.no_imu ? gt::Quat{} : imu.orientation();
+        gt::Quat head = opt.no_imu ? gt::Quat{} : imu.orientation();
+        if (state.capture_yaw_hold) {
+            state.held_yaw_twist = gt::quat_twist_about(head, 0.0f, 0.0f, 1.0f);
+            state.capture_yaw_hold = false;
+        }
+        if (state.capture_pitch_hold) {
+            state.held_pitch_twist = gt::quat_twist_about(head, 0.0f, 1.0f, 0.0f);
+            state.capture_pitch_hold = false;
+        }
+        if (!state.yaw_tracking) {
+            const gt::Quat twist = gt::quat_twist_about(head, 0.0f, 0.0f, 1.0f);
+            const gt::Quat swing = gt::quat_multiply(gt::quat_conjugate(twist), head);
+            head = gt::quat_multiply(state.held_yaw_twist, swing);
+        }
+        if (!state.pitch_tracking) {
+            const gt::Quat twist = gt::quat_twist_about(head, 0.0f, 1.0f, 0.0f);
+            const gt::Quat swing = gt::quat_multiply(gt::quat_conjugate(twist), head);
+            head = gt::quat_multiply(state.held_pitch_twist, swing);
+        }
         renderer.set_signs(signs);
         renderer.render(head, opt.fov, static_cast<float>(elapsed));
         renderer.wait_for_frame();
@@ -611,6 +696,10 @@ int main(int argc, char** argv) {
     }
 
     std::printf("shutting down\n");
+    UnregisterHotKey(hwnd, kHotkeyRecenter);
+    UnregisterHotKey(hwnd, kHotkeyToggleYaw);
+    UnregisterHotKey(hwnd, kHotkeyTogglePitch);
+    UnregisterHotKey(hwnd, kHotkeyQuit);
     if (diagnostics.is_open()) {
         diagnostics.close();
     }
