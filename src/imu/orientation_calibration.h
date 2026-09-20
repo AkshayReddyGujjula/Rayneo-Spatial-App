@@ -57,6 +57,17 @@ OrientationCalibrationResult calibrate_orientation(const CalibrationPhaseData& s
                                                    const CalibrationPhaseData& nod,
                                                    const CalibrationPhaseData& tilt);
 
+// Analyses a single motion phase so a tool can retry one step without
+// repeating the whole session. command_sign is +1 for yaw and tilt, -1 for nod,
+// matching calibrate_orientation.
+bool analyze_motion_phase(const CalibrationPhaseData& phase, const Vec3& bias_body,
+                          float command_sign, CalibrationAxisDiagnostics& diagnostics,
+                          std::string& code, std::string& message);
+
+// Mean body-frame gyro over the quietest contiguous window of the still phase,
+// with that window's RMS (deg/s) reported through rms_degs.
+Vec3 estimate_still_bias(const CalibrationPhaseData& still, float& rms_degs);
+
 Vec3 apply_sensor_to_head(const std::array<float, 9>& matrix, const Vec3& value);
 bool save_orientation_calibration(const std::string& path, const OrientationCalibrationResult& result,
                                   std::string& error);

@@ -175,6 +175,62 @@ void print_axis(const char* name, const gt::CalibrationAxisDiagnostics& axis) {
                 axis.axis_body.y, axis.axis_body.z);
 }
 
+bool capture_still(gt::GtHidDevice& device, gt::CalibrationPhaseData& still, gt::Vec3& bias_body,
+                   std::ofstream& csv, std::string& error) {
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        if (!wait_for_enter("Look straight ahead and hold completely still for 4 seconds.")) {
+            return false;
+        }
+        std::printf("Recording stillness now...\n");
+        if (!capture_phase(device, gt::CalibrationPhase::Still, 4.0, still, csv, error)) {
+            return false;
+        }
+        float rms = 0.0f;
+        bias_body = gt::estimate_still_bias(still, rms);
+        std::printf("[cal] phase=still n=%zu gyro_rms=%.3fdeg/s\n", still.samples.size(), rms);
+        if (rms <= 1.5f) {
+            return true;
+        }
+        std::printf("stillness check failed (%.2f deg/s of movement, limit 1.5).\n"
+                    "Rest the back of your head against something and try again.\n",
+                    rms);
+    }
+    error = "stillness could not be measured after three attempts";
+    return false;
+}
+
+bool capture_motion(gt::GtHidDevice& device, gt::CalibrationPhase phase, float command_sign,
+                    const char* prompt, double seconds, const gt::Vec3& bias_body,
+                    gt::CalibrationPhaseData& data, std::ofstream& csv, std::string& error) {
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        if (!wait_for_enter(prompt)) {
+            return false;
+        }
+        ready_countdown();
+        if (!capture_phase(device, phase, seconds, data, csv, error)) {
+            return false;
+        }
+        gt::CalibrationAxisDiagnostics diagnostics;
+        std::string code;
+        std::string message;
+        if (gt::analyze_motion_phase(data, bias_body, command_sign, diagnostics, code, message)) {
+            std::printf("[cal] phase=%s ok: active=%.2fs excursion=%.1fdeg dominance=%.1f\n",
+                        phase_name(phase), diagnostics.active_seconds, diagnostics.excursion_deg,
+                        diagnostics.dominance);
+            return true;
+        }
+        std::printf("[cal] phase=%s FAIL %s: %s\n", phase_name(phase), code.c_str(), message.c_str());
+        std::printf("  measured: active=%.2fs excursion=%.1fdeg dominance=%.1f perp_rms=%.2fdeg/s\n",
+                    diagnostics.active_seconds, diagnostics.excursion_deg, diagnostics.dominance,
+                    diagnostics.perpendicular_rms_degs);
+        if (attempt < 3) {
+            std::printf("Let's repeat just this step.\n");
+        }
+    }
+    error = std::string("the ") + phase_name(phase) + " step did not pass after three attempts";
+    return false;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -241,41 +297,29 @@ int main(int argc, char** argv) {
     gt::CalibrationPhaseData tilt;
     std::string error;
 
-    if (!wait_for_enter("Look straight ahead and hold completely still for 3 seconds.")) {
-        return 2;
-    }
-    std::printf("Recording stillness now...\n");
-    if (!capture_phase(device, gt::CalibrationPhase::Still, 3.0, still, csv, error)) {
+    gt::Vec3 bias_body;
+    if (!capture_still(device, still, bias_body, csv, error)) {
         std::printf("calibration failed: %s\n", error.c_str());
         return 1;
     }
-
-    if (!wait_for_enter("Slowly turn your head LEFT about 30 degrees, then return to centre. "
-                        "Do not tilt or nod. Slow and smooth is fine.")) {
-        return 2;
-    }
-    ready_countdown();
-    if (!capture_phase(device, gt::CalibrationPhase::Yaw, 6.0, yaw, csv, error)) {
+    if (!capture_motion(device, gt::CalibrationPhase::Yaw, +1.0f,
+                        "Slowly turn your head LEFT about 30 degrees, then return to centre. "
+                        "Do not tilt or nod. Slow and smooth is fine.",
+                        6.0, bias_body, yaw, csv, error)) {
         std::printf("calibration failed: %s\n", error.c_str());
         return 1;
     }
-
-    if (!wait_for_enter("Slowly nod DOWN toward your chest, then return to centre. Do not tilt. "
-                        "A small nod is enough.")) {
-        return 2;
-    }
-    ready_countdown();
-    if (!capture_phase(device, gt::CalibrationPhase::Nod, 6.0, nod, csv, error)) {
+    if (!capture_motion(device, gt::CalibrationPhase::Nod, -1.0f,
+                        "Slowly nod DOWN toward your chest, then return to centre. Do not tilt. "
+                        "A small nod is enough.",
+                        6.0, bias_body, nod, csv, error)) {
         std::printf("calibration failed: %s\n", error.c_str());
         return 1;
     }
-
-    if (!wait_for_enter("Slowly tilt your head toward your RIGHT shoulder as far as is "
-                        "comfortable, then return to centre. About 15-20 degrees is plenty.")) {
-        return 2;
-    }
-    ready_countdown();
-    if (!capture_phase(device, gt::CalibrationPhase::Tilt, 6.0, tilt, csv, error)) {
+    if (!capture_motion(device, gt::CalibrationPhase::Tilt, +1.0f,
+                        "Slowly tilt your head toward your RIGHT shoulder as far as is "
+                        "comfortable, then return to centre. About 15-20 degrees is plenty.",
+                        6.0, bias_body, tilt, csv, error)) {
         std::printf("calibration failed: %s\n", error.c_str());
         return 1;
     }
