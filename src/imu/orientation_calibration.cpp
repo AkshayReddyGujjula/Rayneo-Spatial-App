@@ -374,6 +374,9 @@ Vec3 estimate_still_bias(const CalibrationPhaseData& still, float& rms_degs) {
     // A worn head is never perfectly motionless, and users settle a moment
     // after pressing Enter, so take the quietest contiguous 1.5 s window.
     constexpr float kQuietWindowSeconds = 1.5f;
+    // A steady rotation has no variance either, so a window is only usable if its
+    // mean rate is itself small (a real bias is well under this).
+    constexpr float kMaxStillRateDegs = 2.0f;
     std::vector<float> dt(still_gyro.size(), 1.0f / 476.0f);
     for (size_t i = 1; i < dt.size(); ++i) {
         dt[i] = sample_dt(still.samples[i - 1], still.samples[i]);
@@ -402,7 +405,7 @@ Vec3 estimate_still_bias(const CalibrationPhaseData& still, float& rms_degs) {
             const float variance =
                 std::max(0.0f, window_square_sum / count - dot(window_mean, window_mean));
             const float rms = std::sqrt(variance);
-            if (rms < best_rms) {
+            if (norm(window_mean) < kMaxStillRateDegs && rms < best_rms) {
                 best_rms = rms;
                 best_start = left;
                 best_end = right + 1;
