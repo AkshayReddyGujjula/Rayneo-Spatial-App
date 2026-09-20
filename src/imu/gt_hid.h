@@ -40,8 +40,15 @@ public:
     void close();
     bool is_open() const { return device_ != nullptr; }
 
-    bool write_report(const uint8_t* data, size_t length);
+    // hidapi's raw write result. On Windows it reports the bytes written
+    // including the report ID it prepends (length + 1 for this device), so any
+    // positive value means the report was queued - never compare it to length.
+    int write_report(const uint8_t* data, size_t length);
     int read_report(uint8_t* data, size_t length, int timeout_ms);
+
+    // Sends a 0x66 command frame and waits for its 0x99 0xc8 acknowledgement.
+    // The ack is the reliable confirmation; the write return value is not.
+    bool send_command_verified(uint8_t command, int timeout_ms, std::string* error = nullptr);
 
 private:
     hid_device_* device_ = nullptr;

@@ -91,16 +91,13 @@ void ImuSource::run() {
             continue;
         }
 
-        uint8_t frame[64];
-        build_command(kCmdStreamOff, frame);
-        device.write_report(frame, sizeof(frame));
-        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        device.send_command_verified(kCmdStreamOff, 300, nullptr);
         uint8_t drain[64];
         while (device.read_report(drain, sizeof(drain), 10) > 0) {
         }
-        build_command(kCmdStreamOn, frame);
-        if (!device.write_report(frame, sizeof(frame))) {
-            set_status("failed to start IMU stream, retrying");
+        std::string ack_error;
+        if (!device.send_command_verified(kCmdStreamOn, 500, &ack_error)) {
+            set_status("failed to start IMU stream (" + ack_error + "), retrying");
             has_pose_.store(false, std::memory_order_release);
             sleep_checked(running_, 500);
             continue;
@@ -183,8 +180,7 @@ void ImuSource::run() {
             }
         }
 
-        build_command(kCmdStreamOff, frame);
-        device.write_report(frame, sizeof(frame));
+        device.send_command_verified(kCmdStreamOff, 300, nullptr);
     }
     hid_exit();
 }
