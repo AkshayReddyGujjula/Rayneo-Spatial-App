@@ -5,3 +5,5 @@ out/
 references/
 scratch/
 *.csv
+# per-device orientation calibration (regenerate with orientation_calibrate.exe)
+config/orientation.json
