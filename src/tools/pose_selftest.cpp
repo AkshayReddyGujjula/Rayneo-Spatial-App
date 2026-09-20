@@ -220,6 +220,51 @@ int main() {
         check(ear_error < 1e-5f, "twist about the ear axis captures a pure nod", ear_error, 1e-5f);
     }
 
+    std::printf("pose_selftest: drift absorption keeps micro-movements\n");
+    {
+        PoseEstimator estimator;
+        estimator.configure(PoseEstimator::Config{});
+
+        Mat3 attitude = rotation_about(0.0f, 0.0f, 1.0f, 0.0f);
+        uint32_t tick = 900000;
+        auto feed = [&](float rate_degs, int samples) {
+            for (int i = 0; i < samples; ++i) {
+                const Vec3 accel_body = earth_to_body(attitude, Vec3{0.0f, 0.0f, 9.81f});
+                const Vec3 gyro_body = earth_to_body(attitude, Vec3{0.0f, 0.0f, rate_degs});
+                ImuSample s;
+                s.accel_mps2 = package_from_body(accel_body);
+                s.gyro_degs = package_from_body(gyro_body);
+                s.tick_100us = tick += 21;
+                estimator.add_sample(s);
+                const float dt = 21.0f * 1e-4f;
+                attitude = multiply(
+                    rotation_about(0.0f, 0.0f, 1.0f, rate_degs * kPi / 180.0f * dt), attitude);
+            }
+        };
+
+        feed(0.0f, 3000);
+        const float baseline = estimator.euler().yaw_deg;
+        feed(0.0f, 4760);
+        const float creep = std::fabs(estimator.euler().yaw_deg - baseline);
+        check(creep < 0.3f, "no creep while still", creep, 0.3f);
+
+        // A small head movement: a 12 deg/s half-second turn with smooth ramps.
+        for (int i = 0; i < 286; ++i) {
+            const float t = static_cast<float>(i) / 476.0f;
+            const float rate = 12.0f * std::sin(kPi * t / 0.6f);
+            feed(rate, 1);
+        }
+        const float moved = std::fabs(estimator.euler().yaw_deg - baseline);
+        std::printf("  registered movement: %.2f deg, drift correction: %.2f deg\n", moved,
+                    estimator.drift_correction_degs());
+        check(moved > 2.0f, "the movement registers", moved, 2.0f);
+
+        feed(0.0f, 4760);
+        const float held = std::fabs(estimator.euler().yaw_deg - baseline);
+        const float pull_back = std::fabs(held - moved);
+        check(pull_back < 0.4f, "movement is held afterwards", pull_back, 0.4f);
+    }
+
     std::printf("pose_selftest: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

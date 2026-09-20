@@ -41,7 +41,7 @@ struct Options {
     float fov = 46.0f;
     bool fov_explicit = false;
     bool no_imu = false;
-    bool freeze_still = true;
+    bool freeze_still = false;
     double seconds = 0.0;
     std::string log_path;
     std::string calibration_path;
@@ -177,7 +177,7 @@ void print_usage() {
         "  --fov DEG     virtual horizontal field of view (default 46)\n"
         "  --seconds N   exit after N seconds (0 = run until ESC)\n"
         "  --no-imu      run without head tracking (fixed camera)\n"
-        "  --freeze-still  hold the view steady while the head is still (default)\n"
+        "  --freeze-still  hard-freeze the view while still (default: absorb drift instead)\n"
         "  --no-freeze-still  always follow the raw head pose\n"
         "  --log FILE     append a diagnostic CSV (elapsed, gyro, bias, pose, still)\n"
         "  --calibration FILE  sensor-to-head calibration (default config/orientation.json)\n"
@@ -686,9 +686,10 @@ int main(int argc, char** argv) {
             } else {
                 const gt::Vec3 bias = imu.gyro_bias_degs();
                 std::printf(
-                    "[%.0fs] fps=%.1f  imu=%.1fHz (%s)  bias=(%+.2f,%+.2f,%+.2f)  yaw=%7.2f pitch=%6.2f roll=%6.2f\n",
+                    "[%.0fs] fps=%.1f  imu=%.1fHz (%s)  bias=(%+.2f,%+.2f,%+.2f) drift=%.2f  "
+                    "yaw=%7.2f pitch=%6.2f roll=%6.2f\n",
                     elapsed, fps, imu.sample_rate_hz(), imu.status().c_str(), bias.x, bias.y, bias.z,
-                    e.yaw_deg, e.pitch_deg, e.roll_deg);
+                    imu.drift_correction_degs(), e.yaw_deg, e.pitch_deg, e.roll_deg);
             }
             frames_at_stat = frames;
             next_stat += 1.0;

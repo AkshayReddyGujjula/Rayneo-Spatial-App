@@ -67,6 +67,10 @@ Vec3 ImuSource::last_gyro_degs() const {
                 gz_.load(std::memory_order_relaxed)};
 }
 
+float ImuSource::drift_correction_degs() const {
+    return drift_degs_.load(std::memory_order_relaxed);
+}
+
 std::string ImuSource::status() const {
     std::lock_guard<std::mutex> lock(status_mutex_);
     return status_;
@@ -151,6 +155,7 @@ void ImuSource::run() {
             by_.store(bias.y, std::memory_order_relaxed);
             bz_.store(bias.z, std::memory_order_relaxed);
             still_.store(estimator.still(), std::memory_order_relaxed);
+            drift_degs_.store(estimator.drift_correction_degs(), std::memory_order_relaxed);
 
             const char* phase = !estimator.bias_done() ? "hold still - calibrating"
                                                        : (estimator.still() ? "streaming (still)" : "streaming");

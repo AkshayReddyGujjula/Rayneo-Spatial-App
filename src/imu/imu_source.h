@@ -29,6 +29,7 @@ public:
     Vec3 last_gyro_degs() const;
     uint32_t last_tick() const { return last_tick_.load(std::memory_order_relaxed); }
     bool still() const { return still_.load(std::memory_order_relaxed); }
+    float drift_correction_degs() const;
     std::string status() const;
 
     void recenter() { recenter_request_.store(true, std::memory_order_relaxed); }
@@ -57,6 +58,7 @@ private:
     std::atomic<float> gz_{0.0f};
     std::atomic<uint32_t> last_tick_{0};
     std::atomic<bool> still_{false};
+    std::atomic<float> drift_degs_{0.0f};
     mutable std::mutex status_mutex_;
     std::string status_;
     bool freeze_when_still_ = false;
