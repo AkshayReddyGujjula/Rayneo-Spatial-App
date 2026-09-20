@@ -17,6 +17,11 @@ enum class CapturePollResult {
     Failed,
 };
 
+enum class CaptureBackend {
+    DesktopDuplication,
+    GdiFallback,
+};
+
 struct CapturedPointer {
     bool position_updated = false;
     bool visible = false;
@@ -39,17 +44,21 @@ struct CapturedDesktop {
 class DesktopDuplicator {
 public:
     bool initialize(ID3D11Device* device, ID3D11DeviceContext* context,
-                    const std::wstring& output_name, std::string& error);
+                    const std::wstring& output_name, std::string& error,
+                    bool force_gdi_fallback = false);
     CapturePollResult poll(CapturedDesktop& frame, std::string& error);
     void reset();
 
     const std::wstring& output_name() const { return output_name_; }
     uint64_t frames_captured() const { return frames_captured_; }
     uint64_t access_lost_count() const { return access_lost_count_; }
+    CaptureBackend backend() const { return backend_; }
 
 private:
     bool create_duplication(std::string& error);
     bool ensure_copy_texture(ID3D11Texture2D* source, std::string& error);
+    bool ensure_gdi_texture(std::string& error);
+    CapturePollResult poll_gdi(CapturedDesktop& frame, std::string& error);
 
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
@@ -61,6 +70,9 @@ private:
     uint32_t height_ = 0;
     uint64_t frames_captured_ = 0;
     uint64_t access_lost_count_ = 0;
+    RECT output_rect_{};
+    CaptureBackend backend_ = CaptureBackend::DesktopDuplication;
+    bool force_gdi_fallback_ = false;
 };
 
 }  // namespace gt

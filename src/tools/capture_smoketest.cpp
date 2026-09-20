@@ -50,6 +50,7 @@ int main() {
     }
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    bool dxgi_passed = false;
     while (std::chrono::steady_clock::now() < deadline) {
         gt::CapturedDesktop frame;
         const gt::CapturePollResult poll = capture.poll(frame, error);
@@ -58,7 +59,8 @@ int main() {
             std::printf("capture_smoketest: PASS (%ls, %ux%u, cursor=%s)\n",
                         output_description.DeviceName, frame.width, frame.height,
                         frame.pointer.visible ? "visible" : "separate cursor not visible");
-            return 0;
+            dxgi_passed = true;
+            break;
         }
         if (poll == gt::CapturePollResult::Failed) {
             std::printf("capture_smoketest: capture failed: %s\n", error.c_str());
@@ -66,6 +68,25 @@ int main() {
         }
         Sleep(10);
     }
-    std::printf("capture_smoketest: no desktop frame arrived within two seconds\n");
-    return 1;
+    if (!dxgi_passed) {
+        std::printf("capture_smoketest: no desktop frame arrived within two seconds\n");
+        return 1;
+    }
+
+    gt::DesktopDuplicator fallback;
+    if (!fallback.initialize(device.Get(), context.Get(), output_description.DeviceName, error,
+                             true)) {
+        std::printf("capture_smoketest: forced GDI fallback initialization failed: %s\n",
+                    error.c_str());
+        return 1;
+    }
+    gt::CapturedDesktop fallback_frame;
+    if (fallback.poll(fallback_frame, error) != gt::CapturePollResult::Frame ||
+        !fallback_frame.texture || fallback_frame.width == 0 || fallback_frame.height == 0) {
+        std::printf("capture_smoketest: forced GDI fallback failed: %s\n", error.c_str());
+        return 1;
+    }
+    std::printf("capture_smoketest: GDI fallback PASS (%ux%u)\n", fallback_frame.width,
+                fallback_frame.height);
+    return 0;
 }
