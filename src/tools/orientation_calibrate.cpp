@@ -250,29 +250,32 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (!wait_for_enter("Slowly turn your head LEFT, then return to centre. Do not tilt or nod.")) {
+    if (!wait_for_enter("Slowly turn your head LEFT about 30 degrees, then return to centre. "
+                        "Do not tilt or nod. Slow and smooth is fine.")) {
         return 2;
     }
     ready_countdown();
-    if (!capture_phase(device, gt::CalibrationPhase::Yaw, 4.5, yaw, csv, error)) {
+    if (!capture_phase(device, gt::CalibrationPhase::Yaw, 6.0, yaw, csv, error)) {
         std::printf("calibration failed: %s\n", error.c_str());
         return 1;
     }
 
-    if (!wait_for_enter("Slowly nod DOWN toward your chest, then return to centre. Do not tilt.")) {
+    if (!wait_for_enter("Slowly nod DOWN toward your chest, then return to centre. Do not tilt. "
+                        "A small nod is enough.")) {
         return 2;
     }
     ready_countdown();
-    if (!capture_phase(device, gt::CalibrationPhase::Nod, 4.5, nod, csv, error)) {
+    if (!capture_phase(device, gt::CalibrationPhase::Nod, 6.0, nod, csv, error)) {
         std::printf("calibration failed: %s\n", error.c_str());
         return 1;
     }
 
-    if (!wait_for_enter("Slowly tilt your head toward your RIGHT shoulder, then return to centre.")) {
+    if (!wait_for_enter("Slowly tilt your head toward your RIGHT shoulder as far as is "
+                        "comfortable, then return to centre. About 15-20 degrees is plenty.")) {
         return 2;
     }
     ready_countdown();
-    if (!capture_phase(device, gt::CalibrationPhase::Tilt, 4.5, tilt, csv, error)) {
+    if (!capture_phase(device, gt::CalibrationPhase::Tilt, 6.0, tilt, csv, error)) {
         std::printf("calibration failed: %s\n", error.c_str());
         return 1;
     }
