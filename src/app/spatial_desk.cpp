@@ -2,6 +2,8 @@
 #include "imu/orientation_calibration.h"
 #include "layout/layout.h"
 #include "render/renderer.h"
+#include "vdd/display_config.h"
+#include "vdd/vdd_client.h"
 
 #include <windows.h>
 
@@ -9,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cwctype>
 #include <cstring>
 #include <fstream>
 #include <filesystem>
@@ -24,10 +27,13 @@ struct MonitorEntry {
     RECT rect{};
     bool primary = false;
     std::wstring name;
+    std::wstring description;
+    bool glasses = false;
 };
 
 struct Options {
     int monitor = -1;
+    bool monitor_explicit = false;
     float fov = 46.0f;
     bool fov_explicit = false;
     bool no_imu = false;
@@ -36,6 +42,7 @@ struct Options {
     std::string log_path;
     std::string calibration_path;
     std::string layout_path;
+    bool virtual_displays = true;
 };
 
 struct AppState {
@@ -44,6 +51,20 @@ struct AppState {
 };
 
 AppState* g_app = nullptr;
+
+class UniqueHandle {
+public:
+    explicit UniqueHandle(HANDLE handle = nullptr) : handle_(handle) {}
+    ~UniqueHandle() {
+        if (handle_ != nullptr) CloseHandle(handle_);
+    }
+    UniqueHandle(const UniqueHandle&) = delete;
+    UniqueHandle& operator=(const UniqueHandle&) = delete;
+    HANDLE get() const { return handle_; }
+
+private:
+    HANDLE handle_ = nullptr;
+};
 
 BOOL CALLBACK monitor_enum_proc(HMONITOR handle, HDC, LPRECT, LPARAM data) {
     auto* list = reinterpret_cast<std::vector<MonitorEntry>*>(data);
@@ -55,6 +76,20 @@ BOOL CALLBACK monitor_enum_proc(HMONITOR handle, HDC, LPRECT, LPARAM data) {
         entry.rect = info.rcMonitor;
         entry.primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
         entry.name = info.szDevice;
+        DISPLAY_DEVICEW monitor{};
+        monitor.cb = sizeof(monitor);
+        if (EnumDisplayDevicesW(info.szDevice, 0, &monitor, 0)) {
+            entry.description = monitor.DeviceString;
+            std::wstring searchable = entry.description + L" " + monitor.DeviceID;
+            for (wchar_t& character : searchable) {
+                character = static_cast<wchar_t>(std::towlower(character));
+            }
+            const bool branded = searchable.find(L"smartglasses") != std::wstring::npos ||
+                                 searchable.find(L"rayneo") != std::wstring::npos;
+            const bool tcl_secondary = !entry.primary &&
+                                       searchable.find(L"tcl") != std::wstring::npos;
+            entry.glasses = branded || tcl_secondary;
+        }
         list->push_back(entry);
     }
     return TRUE;
@@ -94,7 +129,8 @@ void print_usage() {
         "  --no-freeze-still  always follow the raw head pose\n"
         "  --log FILE     append a diagnostic CSV (elapsed, gyro, bias, pose, still)\n"
         "  --calibration FILE  sensor-to-head calibration (default config/orientation.json)\n"
-        "  --layout FILE  screen layout (default config/layouts/default.json)\n");
+        "  --layout FILE  screen layout (default config/layouts/default.json)\n"
+        "  --no-virtual-displays  render labelled test screens without Parsec VDD\n");
 }
 
 bool parse_args(int argc, char** argv, Options& opt) {
@@ -102,6 +138,7 @@ bool parse_args(int argc, char** argv, Options& opt) {
         const char* a = argv[i];
         if (std::strcmp(a, "--monitor") == 0 && i + 1 < argc) {
             opt.monitor = std::atoi(argv[++i]);
+            opt.monitor_explicit = true;
         } else if (std::strcmp(a, "--fov") == 0 && i + 1 < argc) {
             opt.fov = static_cast<float>(std::atof(argv[++i]));
             opt.fov_explicit = true;
@@ -119,6 +156,8 @@ bool parse_args(int argc, char** argv, Options& opt) {
             opt.calibration_path = argv[++i];
         } else if (std::strcmp(a, "--layout") == 0 && i + 1 < argc) {
             opt.layout_path = argv[++i];
+        } else if (std::strcmp(a, "--no-virtual-displays") == 0) {
+            opt.virtual_displays = false;
         } else if (std::strcmp(a, "--help") == 0 || std::strcmp(a, "-h") == 0) {
             print_usage();
             return false;
@@ -175,6 +214,17 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    UniqueHandle instance(CreateMutexW(nullptr, FALSE, L"Local\\RayNeoSpatialDesk"));
+    if (instance.get() == nullptr) {
+        std::printf("could not create the single-instance guard (Windows error %lu)\n",
+                    GetLastError());
+        return 1;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        std::printf("spatial_desk is already running\n");
+        return 1;
+    }
+
     std::array<float, 9> sensor_to_head;
     if (!opt.no_imu) {
         std::string calibration_error;
@@ -195,6 +245,26 @@ int main(int argc, char** argv) {
         opt.fov = layout.fov_deg;
     }
 
+    gt::VddClient vdd;
+    std::vector<gt::ConfiguredDisplay> virtual_displays;
+    if (opt.virtual_displays) {
+        std::string vdd_error;
+        if (!vdd.connect(layout.screens.size(), vdd_error) ||
+            !gt::configure_virtual_displays(vdd.display_indices(), 1920, 1080, 120,
+                                            virtual_displays, vdd_error)) {
+            std::printf("virtual display startup failed: %s\n", vdd_error.c_str());
+            std::printf("install the signed Parsec VDD, use Windows Extend mode, or pass "
+                        "--no-virtual-displays for the renderer-only diagnostic\n");
+            return 1;
+        }
+        std::printf("created %zu virtual displays (Parsec VDD version %d)\n",
+                    virtual_displays.size(), vdd.driver_version());
+        for (const auto& display : virtual_displays) {
+            std::printf("  VDD[%d] %dx%d@%dHz at (%d,%d)\n", display.driver_index,
+                        display.width, display.height, display.refresh_hz, display.x, display.y);
+        }
+    }
+
     enable_dpi_awareness();
 
     std::vector<MonitorEntry> monitors;
@@ -203,12 +273,26 @@ int main(int argc, char** argv) {
     int selected = -1;
     for (size_t i = 0; i < monitors.size(); ++i) {
         const auto& m = monitors[i];
-        std::printf("  [%zu] %ls %dx%d%s\n", i, m.name.c_str(), m.rect.right - m.rect.left,
-                    m.rect.bottom - m.rect.top, m.primary ? " (primary)" : "");
+        std::printf("  [%zu] %ls %ls %dx%d%s%s\n", i, m.name.c_str(), m.description.c_str(),
+                    m.rect.right - m.rect.left, m.rect.bottom - m.rect.top,
+                    m.primary ? " (primary)" : "", m.glasses ? " (RayNeo)" : "");
     }
-    if (opt.monitor >= 0 && opt.monitor < static_cast<int>(monitors.size())) {
+    if (opt.monitor_explicit) {
+        if (opt.monitor < 0 || opt.monitor >= static_cast<int>(monitors.size())) {
+            std::printf("invalid monitor index %d; choose one of the indices listed above\n",
+                        opt.monitor);
+            return 2;
+        }
         selected = opt.monitor;
     } else {
+        for (size_t i = 0; i < monitors.size(); ++i) {
+            if (monitors[i].glasses) {
+                selected = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+    if (selected < 0) {
         for (size_t i = 0; i < monitors.size(); ++i) {
             if (!monitors[i].primary) {
                 selected = static_cast<int>(i);
@@ -317,17 +401,45 @@ int main(int argc, char** argv) {
                 layout_time_error.clear();
                 gt::Layout candidate;
                 std::string reload_error;
-                if (gt::load_layout(opt.layout_path, candidate, reload_error) &&
-                    renderer.set_layout(candidate, reload_error)) {
+                const size_t previous_display_count = layout.screens.size();
+                bool displays_changed = false;
+                bool reload_ok = gt::load_layout(opt.layout_path, candidate, reload_error);
+                if (reload_ok && opt.virtual_displays) {
+                    displays_changed = candidate.screens.size() != previous_display_count;
+                    reload_ok = vdd.resize(candidate.screens.size(), reload_error) &&
+                                gt::configure_virtual_displays(
+                                    vdd.display_indices(), 1920, 1080, 120, virtual_displays,
+                                    reload_error);
+                }
+                if (reload_ok) {
+                    reload_ok = renderer.set_layout(candidate, reload_error);
+                }
+                if (reload_ok) {
                     layout = std::move(candidate);
                     if (!opt.fov_explicit) {
                         opt.fov = layout.fov_deg;
                     }
                     std::printf("reloaded layout (%zu screens)\n", layout.screens.size());
                 } else {
+                    if (opt.virtual_displays && displays_changed) {
+                        std::string rollback_error;
+                        if (!vdd.resize(previous_display_count, rollback_error) ||
+                            !gt::configure_virtual_displays(vdd.display_indices(), 1920, 1080, 120,
+                                                            virtual_displays, rollback_error)) {
+                            std::printf("virtual display rollback failed: %s\n",
+                                        rollback_error.c_str());
+                            state.quit = true;
+                        }
+                    }
                     std::printf("layout reload ignored: %s\n", reload_error.c_str());
                 }
             }
+        }
+
+        if (opt.virtual_displays && vdd.consecutive_keepalive_failures() >= 5) {
+            std::printf("Parsec VDD keepalive failed repeatedly; exiting before its watchdog "
+                        "removes the desktops\n");
+            state.quit = true;
         }
 
         const gt::Quat head = opt.no_imu ? gt::Quat{} : imu.orientation();
@@ -378,6 +490,7 @@ int main(int argc, char** argv) {
     if (!opt.no_imu) {
         imu.stop();
     }
+    vdd.disconnect();
     g_app = nullptr;
     renderer.shutdown();
     DestroyWindow(hwnd);
