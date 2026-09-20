@@ -1,5 +1,10 @@
 #pragma once
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
@@ -43,6 +48,12 @@ struct CapturedDesktop {
 
 class DesktopDuplicator {
 public:
+    DesktopDuplicator() = default;
+    ~DesktopDuplicator();
+
+    DesktopDuplicator(const DesktopDuplicator&) = delete;
+    DesktopDuplicator& operator=(const DesktopDuplicator&) = delete;
+
     bool initialize(ID3D11Device* device, ID3D11DeviceContext* context,
                     const std::wstring& output_name, std::string& error,
                     bool force_gdi_fallback = false);
@@ -58,6 +69,7 @@ private:
     bool create_duplication(std::string& error);
     bool ensure_copy_texture(ID3D11Texture2D* source, std::string& error);
     bool ensure_gdi_texture(std::string& error);
+    void destroy_gdi_surface();
     CapturePollResult poll_gdi(CapturedDesktop& frame, std::string& error);
 
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
@@ -73,6 +85,19 @@ private:
     RECT output_rect_{};
     CaptureBackend backend_ = CaptureBackend::DesktopDuplication;
     bool force_gdi_fallback_ = false;
+    bool have_desktop_texture_ = false;
+
+    HDC gdi_desktop_dc_ = nullptr;
+    HDC gdi_memory_dc_ = nullptr;
+    HBITMAP gdi_bitmap_ = nullptr;
+    HGDIOBJ gdi_previous_bitmap_ = nullptr;
+    void* gdi_pixels_ = nullptr;
+    uint32_t gdi_surface_width_ = 0;
+    uint32_t gdi_surface_height_ = 0;
+    bool gdi_cursor_valid_ = false;
+    bool gdi_cursor_showing_ = false;
+    LONG gdi_cursor_x_ = 0;
+    LONG gdi_cursor_y_ = 0;
 };
 
 }  // namespace gt

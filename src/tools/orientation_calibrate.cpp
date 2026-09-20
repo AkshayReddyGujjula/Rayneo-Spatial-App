@@ -62,6 +62,9 @@ bool parse_args(int argc, char** argv, Options& options) {
     return true;
 }
 
+// Locate the repository root by walking up from the executable until a config
+// directory is found, so nested build directories keep working. Falls back to
+// the historical "two levels below the root" assumption if no marker is found.
 std::string default_output_path() {
     std::wstring executable(32768, L'\0');
     const DWORD length = GetModuleFileNameW(nullptr, executable.data(),
@@ -70,9 +73,23 @@ std::string default_output_path() {
         return "config/orientation.json";
     }
     executable.resize(length);
-    return (std::filesystem::path(executable).parent_path().parent_path() / "config" /
-            "orientation.json")
-        .string();
+    const std::filesystem::path executable_directory =
+        std::filesystem::path(executable).parent_path();
+    for (std::filesystem::path candidate = executable_directory;; candidate = candidate.parent_path()) {
+        std::error_code exists_error;
+        if (std::filesystem::exists(candidate / "config" / "layouts" / "default.json",
+                                    exists_error)) {
+            return (candidate / "config" / "orientation.json").string();
+        }
+        exists_error.clear();
+        if (std::filesystem::exists(candidate / "config", exists_error)) {
+            return (candidate / "config" / "orientation.json").string();
+        }
+        if (candidate == candidate.parent_path()) {
+            break;
+        }
+    }
+    return (executable_directory.parent_path() / "config" / "orientation.json").string();
 }
 
 uint64_t now_us() {
