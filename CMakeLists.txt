@@ -95,3 +95,10 @@ add_test(NAME vdd_selftest COMMAND vdd_selftest)
 
 add_executable(capture_smoketest src/tools/capture_smoketest.cpp)
 target_link_libraries(capture_smoketest PRIVATE rayneo_capture)
+
+add_executable(view_selftest
+  src/tools/view_selftest.cpp
+  src/render/camera.cpp
+)
+target_link_libraries(view_selftest PRIVATE rayneo_core rayneo_layout)
+add_test(NAME view_selftest COMMAND view_selftest "${CMAKE_SOURCE_DIR}/scratch")
