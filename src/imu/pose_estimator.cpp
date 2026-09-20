@@ -57,6 +57,9 @@ void PoseEstimator::configure(const Config& cfg) {
     stillness_degs_ = 0.0f;
     q_ref_ = Quat{};
     q_frozen_ = Quat{};
+    drift_correction_ = Quat{};
+    q_prev_live_ = Quat{};
+    have_prev_live_ = false;
     have_ref_ = false;
     frozen_ = false;
     initialized_ = false;
@@ -167,6 +170,8 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
             have_tick_ = false;
             have_ref_ = false;
             initialized_ = false;
+            have_prev_live_ = false;
+            drift_correction_ = Quat{};
             fused_ = 0;
         }
         return false;
@@ -196,6 +201,7 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
         q_ref_ = filter_.orientation();
         have_ref_ = true;
         q_frozen_ = q_ref_;
+        have_prev_live_ = false;
     }
 
     const Vec3 corrected{raw.x - bias_degs_.x, raw.y - bias_degs_.y, raw.z - bias_degs_.z};
@@ -205,6 +211,26 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
     gyro.z *= kRadPerDeg;
 
     filter_.update(gyro, map_accel(sample.accel_mps2), map_mag(sample.mag_ut), cfg_.mag_weight, dt);
+
+    if (!cfg_.freeze_when_still) {
+        // Drift absorption: while the head is still, fold a small fraction of each
+        // incremental rotation into a correction subtracted from the published pose.
+        // Deliberate movements raise the stillness value and pause the absorption,
+        // so they are preserved - unlike the hard freeze, which discarded every
+        // movement below its release threshold.
+        const Quat live = filter_.orientation();
+        if (have_prev_live_ && still_ && cfg_.drift_tau_s > 0.0f) {
+            const Quat increment = quat_multiply(live, quat_conjugate(q_prev_live_));
+            float fraction = dt / cfg_.drift_tau_s;
+            if (fraction > 1.0f) {
+                fraction = 1.0f;
+            }
+            drift_correction_ =
+                quat_multiply(quat_scaled(increment, fraction), drift_correction_);
+        }
+        q_prev_live_ = live;
+        have_prev_live_ = true;
+    }
 
     if (!have_ref_) {
         q_ref_ = filter_.orientation();
@@ -219,10 +245,21 @@ void PoseEstimator::recenter() {
     have_ref_ = true;
     q_frozen_ = q_ref_;
     frozen_ = false;
+    drift_correction_ = Quat{};
+    have_prev_live_ = false;
+}
+
+float PoseEstimator::drift_correction_degs() const {
+    const Quat n = quat_normalize(drift_correction_);
+    const float sin_half = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+    return 2.0f * std::atan2(sin_half, std::fabs(n.w)) * 180.0f / kPi;
 }
 
 Quat PoseEstimator::published_orientation() const {
-    return frozen_ ? q_frozen_ : filter_.orientation();
+    if (frozen_) {
+        return q_frozen_;
+    }
+    return quat_multiply(quat_conjugate(drift_correction_), filter_.orientation());
 }
 
 Euler PoseEstimator::euler() const {
