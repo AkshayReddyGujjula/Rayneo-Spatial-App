@@ -1,28 +1,23 @@
 #include "render/camera.h"
 
 namespace gt {
-namespace {
-
-constexpr float kPi = 3.14159265358979323846f;
-
-float to_radians(float degrees) {
-    return degrees * kPi / 180.0f;
-}
-
-}  // namespace
-
 Euler camera_applied_euler(const Quat& head_relative, const CameraSigns& signs) {
-    Euler e = quat_to_euler(head_relative);
-    e.yaw_deg *= signs.yaw;
-    e.pitch_deg *= signs.pitch;
-    e.roll_deg *= signs.roll;
-    return e;
+    const Euler e = quat_to_euler(head_relative);
+    Euler applied;
+    applied.yaw_deg = e.yaw_deg * signs.yaw;
+    applied.pitch_deg = e.roll_deg * signs.pitch;
+    applied.roll_deg = e.pitch_deg * signs.roll;
+    return applied;
 }
 
 DirectX::XMMATRIX camera_view_matrix(const Quat& head_relative, const CameraSigns& signs) {
-    const Euler e = camera_applied_euler(head_relative, signs);
-    const DirectX::XMMATRIX camera = DirectX::XMMatrixRotationRollPitchYaw(
-        to_radians(e.pitch_deg), to_radians(e.yaw_deg), to_radians(e.roll_deg));
+    // Head axes are X=right, Y=forward, Z=up. Render axes are X=right,
+    // Y=up, Z=forward. That basis swap is a reflection, so axial quaternion
+    // components transform as det(B)*B*v: (x,y,z) -> (-x,-z,-y).
+    const DirectX::XMVECTOR render_quaternion = DirectX::XMQuaternionNormalize(
+        DirectX::XMVectorSet(signs.pitch * head_relative.x, signs.yaw * head_relative.z,
+                             signs.roll * head_relative.y, head_relative.w));
+    const DirectX::XMMATRIX camera = DirectX::XMMatrixRotationQuaternion(render_quaternion);
     return DirectX::XMMatrixInverse(nullptr, camera);
 }
 

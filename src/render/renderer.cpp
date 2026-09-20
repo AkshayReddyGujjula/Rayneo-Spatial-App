@@ -260,6 +260,8 @@ void Renderer::shutdown() {
     vertex_buffer_.Reset();
     constant_buffer_.Reset();
     rasterizer_.Reset();
+    depth_state_.Reset();
+    depth_disabled_state_.Reset();
     context_.Reset();
     device_.Reset();
 }

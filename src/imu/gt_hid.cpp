@@ -79,6 +79,11 @@ bool GtHidDevice::open_first() {
     if (devices.empty()) {
         return false;
     }
+    for (const HidDeviceInfo& info : devices) {
+        if (info.usage_page == 0xFF00 && info.usage == 1 && open(info.path)) {
+            return true;
+        }
+    }
     return open(devices.front().path);
 }
 
@@ -93,7 +98,7 @@ bool GtHidDevice::write_report(const uint8_t* data, size_t length) {
     if (device_ == nullptr) {
         return false;
     }
-    return hid_write(device_, data, length) >= 0;
+    return hid_write(device_, data, length) == static_cast<int>(length);
 }
 
 int GtHidDevice::read_report(uint8_t* data, size_t length, int timeout_ms) {

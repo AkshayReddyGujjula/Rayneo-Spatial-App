@@ -37,15 +37,40 @@ float max_abs(const Vec3& v) {
 
 void PoseEstimator::configure(const Config& cfg) {
     cfg_ = cfg;
+    filter_.reset();
     filter_.set_beta(cfg.beta);
+    bias_sum_still_ = Vec3{};
+    bias_sum_all_ = Vec3{};
+    bias_degs_ = Vec3{};
+    settle_count_ = 0;
+    still_count_ = 0;
+    all_count_ = 0;
+    phase_samples_ = 0;
+    bias_done_ = false;
+    have_tick_ = false;
+    last_tick_ = 0;
+    fast_ema_ = Vec3{};
+    dev_ema_ = Vec3{};
+    ema_ready_ = false;
+    still_ = false;
+    still_time_ = 0.0f;
+    stillness_degs_ = 0.0f;
+    q_ref_ = Quat{};
+    q_frozen_ = Quat{};
+    have_ref_ = false;
+    frozen_ = false;
+    initialized_ = false;
+    fused_ = 0;
 }
 
 Vec3 PoseEstimator::map_gyro(const Vec3& v) const {
     if (!cfg_.map_package_axes) {
         return v;
     }
-    // Package -> body frame of the official RayNeo legacy fusion: [x, -z, y].
-    return Vec3{v.x, -v.z, v.y};
+    const auto& m = cfg_.sensor_to_head;
+    return Vec3{m[0] * v.x + m[1] * v.y + m[2] * v.z,
+                m[3] * v.x + m[4] * v.y + m[5] * v.z,
+                m[6] * v.x + m[7] * v.y + m[8] * v.z};
 }
 
 Vec3 PoseEstimator::map_accel(const Vec3& v) const {
@@ -153,6 +178,8 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
             frozen_ = true;
         }
     } else if (frozen_) {
+        const Quat held_relative = quat_multiply(q_frozen_, quat_conjugate(q_ref_));
+        q_ref_ = quat_multiply(quat_conjugate(held_relative), filter_.orientation());
         frozen_ = false;
     }
 

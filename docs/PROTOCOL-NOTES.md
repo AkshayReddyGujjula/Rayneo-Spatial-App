@@ -100,24 +100,21 @@ Three different frames meet in this project and mixing them up produces chaos
 3. **Render frame** - Y up, left-handed (DirectXMath default `XMMatrixPerspectiveFovLH`).
 
 **Rule:** never feed the fused quaternion into the renderer as if it lived in the render
-frame. The camera pose is the head-relative rotation conjugated by the earth->render basis:
-`camera = C^T * R(q_rel) * C`, with `C` mapping earth X -> render +Z, earth Y -> render -X,
-earth Z -> render +Y (`det(C) = -1` supplies the right-handed-earth / left-handed-render
-reflection), and `q_rel = q * q_ref^-1` - the relative rotation expressed in the EARTH frame.
+frame. After orientation calibration, head coordinates are X=right, Y=forward, Z=up.
+Direct3D render coordinates are X=right, Y=up, Z=forward. The camera pose is the
+head-relative rotation conjugated by that head->render basis, and
+`q_rel = q * q_ref^-1` is the relative rotation expressed in the earth frame.
 
 Using the body-frame order `q_ref^-1 * q` instead mixes yaw into pitch/roll whenever the head
 was tilted when it was recentered: measured leakage was up to 16 deg of lost pan and 26-34 deg
 of spurious tilt at a 30 deg tilt / 90 deg yaw, and it reproduced the observed hand-turn log
 (yaw 57 / pitch -15 / roll -7) to 0.2 deg. `pose_selftest.exe` locks the corrected behaviour in.
 
-The code implements the conjugation via euler extraction plus
-`XMMatrixRotationRollPitchYaw(pitch, yaw, roll)` with the fixed sign triple `(-1, +1, -1)`.
-That combination is algebraically identical to the conjugation above (verified numerically to
-2e-6 deg over 20,000 orientations). Note `XMMatrixRotationRollPitchYaw` composes
-`Rz(roll) * Rx(pitch) * Ry(yaw)`, which is NOT the inverse of a ZYX extraction - the exactness
-comes from the basis change, not from the names of the arguments. The signs are therefore
-load-bearing: they are not cosmetic direction switches, and flipping any one of them mirrors
-the world by up to 180 deg.
+The basis swap is a reflection. Quaternion axial components therefore transform as
+`(x,y,z) -> (-x,-z,-y)`, represented by `CameraSigns(-1,-1,-1)`. The renderer builds its
+camera matrix directly from that transformed quaternion, avoiding Euler reconstruction and
+its combined-rotation ordering hazards. `camera_selftest.exe` verifies the exact basis
+transform over 200 combined orientations (maximum vector error below `2e-5`) in addition to
+the anatomical single-axis cases.
 
-`camera_selftest.exe` verifies the pipeline offline: yaw input must move a world point
-horizontally, pitch vertically, roll about the view axis, with no cross-coupling.
+The diagnostic Euler labels are turn/nod/tilt only; the view matrix itself remains quaternion-exact.

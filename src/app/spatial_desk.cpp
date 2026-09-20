@@ -1,4 +1,5 @@
 #include "imu/imu_source.h"
+#include "imu/orientation_calibration.h"
 #include "render/renderer.h"
 
 #include <windows.h>
@@ -9,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -30,6 +32,7 @@ struct Options {
     bool freeze_still = true;
     double seconds = 0.0;
     std::string log_path;
+    std::string calibration_path;
 };
 
 struct AppState {
@@ -86,7 +89,8 @@ void print_usage() {
         "  --no-imu      run without head tracking (fixed camera)\n"
         "  --freeze-still  hold the view steady while the head is still (default)\n"
         "  --no-freeze-still  always follow the raw head pose\n"
-        "  --log FILE     append a diagnostic CSV (elapsed, gyro, bias, pose, still)\n");
+        "  --log FILE     append a diagnostic CSV (elapsed, gyro, bias, pose, still)\n"
+        "  --calibration FILE  sensor-to-head calibration (default config/orientation.json)\n");
 }
 
 bool parse_args(int argc, char** argv, Options& opt) {
@@ -106,6 +110,8 @@ bool parse_args(int argc, char** argv, Options& opt) {
             opt.seconds = std::atof(argv[++i]);
         } else if (std::strcmp(a, "--log") == 0 && i + 1 < argc) {
             opt.log_path = argv[++i];
+        } else if (std::strcmp(a, "--calibration") == 0 && i + 1 < argc) {
+            opt.calibration_path = argv[++i];
         } else if (std::strcmp(a, "--help") == 0 || std::strcmp(a, "-h") == 0) {
             print_usage();
             return false;
@@ -130,12 +136,43 @@ void enable_dpi_awareness() {
     SetProcessDPIAware();
 }
 
+std::string default_calibration_path() {
+    std::wstring executable(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, executable.data(),
+                                            static_cast<DWORD>(executable.size()));
+    if (length == 0 || length >= executable.size()) {
+        return "config/orientation.json";
+    }
+    executable.resize(length);
+    const std::filesystem::path executable_path(executable);
+    return (executable_path.parent_path().parent_path() / "config" / "orientation.json").string();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     Options opt;
     if (!parse_args(argc, argv, opt)) {
         return 2;
+    }
+    if (opt.calibration_path.empty()) {
+        opt.calibration_path = default_calibration_path();
+    }
+    if (!std::isfinite(opt.fov) || opt.fov < 20.0f || opt.fov > 150.0f ||
+        !std::isfinite(opt.seconds) || opt.seconds < 0.0) {
+        std::printf("invalid arguments: fov must be 20..150 degrees and seconds must be non-negative\n");
+        return 2;
+    }
+
+    std::array<float, 9> sensor_to_head;
+    if (!opt.no_imu) {
+        std::string calibration_error;
+        if (!gt::load_orientation_calibration(opt.calibration_path, sensor_to_head, calibration_error)) {
+            std::printf("orientation calibration required: %s (%s)\n", opt.calibration_path.c_str(),
+                        calibration_error.c_str());
+            std::printf("run orientation_calibrate.exe while wearing the glasses, then start spatial_desk again\n");
+            return 1;
+        }
     }
 
     enable_dpi_awareness();
@@ -207,6 +244,8 @@ int main(int argc, char** argv) {
     state.imu = opt.no_imu ? nullptr : &imu;
     g_app = &state;
     if (!opt.no_imu) {
+        imu.set_sensor_to_head(sensor_to_head);
+        std::printf("loaded orientation calibration: %s\n", opt.calibration_path.c_str());
         imu.set_freeze_when_still(opt.freeze_still);
         imu.start();
     }

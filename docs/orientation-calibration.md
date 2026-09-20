@@ -26,9 +26,10 @@ axis:
 | nod down/up (pitch)   | right | `r_B = C [1,0,0]` |
 | tilt right/left (roll)| forward | `f_B = C [0,1,0]` |
 
-The head frame is right-handed, `right x forward = up` (`u_B = r_B x f_B`). The matrix
-`M` whose **rows** are `(u_B, r_B, f_B)` maps body -> head (`v_head = M v_B`, head
-coordinates ordered `(up,right,forward)`); it equals `Cᵀ` up to that row ordering.
+The head frame is right-handed, `right x forward = up` (`u_B = r_B x f_B`). Madgwick is
+Z-up, so head vectors must use the canonical coordinate order **(right, forward, up)**.
+The matrix `M` whose rows are `(r_B, f_B, u_B)` maps body -> head
+(`v_head = M v_B`) and equals `Cᵀ`.
 Folding in the repo's package mapping `P = [[1,0,0],[0,0,-1],[0,1,0]]` gives the
 bakeable **sensor -> head** matrix
 
@@ -127,7 +128,7 @@ calibrate(samples_by_phase):
     # ---- least-squares orthonormal basis
     u_est = normalize(up_g + up_yaw)                 # average two independent up estimates
     [u,r,f] = build_basis(u_est, right_nod, fwd_tilt)
-    M = rows(u, r, f)                                # body -> head
+    M = rows(r, f, u)                                # body -> head; Z remains up
     A = M * P                                        # sensor -> head  (P = [x,-z,y])
     emit LOG(A, M, diagnostics)
 
@@ -202,21 +203,21 @@ One stable, greppable format. `[cal]` prefix on every line.
 [cal] check handedness value=0.02 limit=15.00 PASS
 [cal] result ok
 [cal] head_basis_B up=(+0.00006 -0.04359 +0.99905) right=(+0.79861 +0.60128 +0.02619) forward=(-0.60185 +0.79785 +0.03485)
-[cal] sensor_to_head A rows:
-[cal]   { +0.00006f, +0.99905f, +0.04359f},
+[cal] sensor_to_head A rows (right, forward, up):
 [cal]   { +0.79861f, +0.02619f, -0.60128f},
 [cal]   { -0.60185f, +0.03485f, -0.79785f},
+[cal]   { +0.00006f, +0.99905f, +0.04359f},
 [cal] bake_block begin
 [cal] // head-alignment calibration, run YYYY-MM-DD, device <serial>, mag off
 [cal] // head axes in the mapped package frame B (after [x,-z,y]); right x forward = up
 [cal] constexpr float kUpB[3]      = {+0.00006f, -0.04359f, +0.99905f};
 [cal] constexpr float kRightB[3]   = {+0.79861f, +0.60128f, +0.02619f};
 [cal] constexpr float kForwardB[3] = {-0.60185f, +0.79785f, +0.03485f};
-[cal] // sensor -> head, row-major (apply to RAW 99 65 vectors, incl. the [x,-z,y] fold)
+[cal] // sensor -> head, row-major (right, forward, up); apply to raw 99 65 vectors
 [cal] constexpr float kSensorToHead[9] = {
-[cal]     +0.00006f, +0.99905f, +0.04359f,
 [cal]     +0.79861f, +0.02619f, -0.60128f,
 [cal]     -0.60185f, +0.03485f, -0.79785f,
+[cal]     +0.00006f, +0.99905f, +0.04359f,
 [cal] };
 [cal] bake_block end
 [cal] summary msg="calibration ok - paste bake_block into src/imu/pose_estimator.cpp"
@@ -226,10 +227,10 @@ One stable, greppable format. `[cal]` prefix on every line.
 
 ---
 
-## 5. Where to apply the constants in the repo
+## 5. Runtime integration
 
-1. **Feed head-frame data.** In `src/imu/pose_estimator.cpp`, replace the axis swap in
-   `map_gyro/map_accel/map_mag` (currently `{v.x, -v.z, v.y}`) with `kSensorToHead`:
+1. **Feed head-frame data.** `PoseEstimator::Config::sensor_to_head` is applied by
+   `map_gyro/map_accel/map_mag`:
 
    ```cpp
    Vec3 PoseEstimator::map_gyro(const Vec3& v) const {
@@ -242,8 +243,8 @@ One stable, greppable format. `[cal]` prefix on every line.
        };
    }
    ```
-   (add `float sensor_to_head[9]` to `Config`, default `{1,0,0, 0,0,-1, 0,1,0}` = the old
-   behaviour). `map_accel` and `map_mag` already delegate to the same mapping.
+   The default `{1,0,0, 0,0,-1, 0,1,0}` is the old uncalibrated package mapping.
+   `spatial_desk` requires a valid calibration file before it starts IMU tracking.
 
    The `kUpB/kRightB/kForwardB` vectors are informational; `kSensorToHead` is what the code
    needs. `kSensorToHead = M * P` exactly.
@@ -261,13 +262,14 @@ One stable, greppable format. `[cal]` prefix on every line.
    out.pitch_deg = signs.pitch * e.roll_deg;   // nod   (about head right)
    out.roll_deg  = signs.roll  * e.pitch_deg;  // tilt  (about head forward)
    ```
-   Calibration removes the *cross-coupling*; what remains is a pure relabel + sign. The
-   four sign combinations are already live-switchable in `spatial_desk` (`I/K/L`) and
-   checked by `camera_selftest.exe` - run that once on the device (or on the recorded
-   CSV through the estimator) and record the winning `CameraSigns` as the new defaults.
+   Calibration removes the cross-coupling. The verified default camera signs are
+   `(-1,-1,-1)` for turn, nod, and tilt respectively, and `camera_selftest.exe` locks the
+   mapping with assertions. The unsafe live `I/K/L` sign toggles are intentionally absent.
 
-The whole thing is backward compatible: with the default identity-ish `sensor_to_head`
-the pipeline behaves exactly as today.
+Run `build\orientation_calibrate.exe` while wearing the glasses. It records the four phases,
+validates the result, and atomically replaces `config\orientation.json` only after success.
+`spatial_desk.exe` loads that file by default, resolved relative to the executable rather
+than the current working directory.
 
 ---
 
@@ -334,9 +336,9 @@ the last run:
 Worked-example bake block produced by the prototype (identical to the doc example above):
 
 ```
-{ +0.00006f, +0.99905f, +0.04359f},
 { +0.79861f, +0.02619f, -0.60128f},
 { -0.60185f, +0.03485f, -0.79785f},
+{ +0.00006f, +0.99905f, +0.04359f},
 ```
 
 **Conclusion.** The procedure recovers the mounting alignment to well under 1° under the
@@ -348,7 +350,10 @@ with the validation gates above.
 
 ## 9. Files
 
-- `scratch/CALIBRATION-DESIGN.md` - this document.
+- `docs/orientation-calibration.md` - canonical design and runtime contract.
+- `src/imu/orientation_calibration.cpp` - validated C++ implementation.
+- `src/tools/orientation_calibrate.cpp` - guided live capture tool.
+- `src/tools/orientation_calibration_selftest.cpp` - deterministic regression tests.
 - `scratch/calib_design.py` - prototype + Monte-Carlo validation (run:
   `C:\Python314\python.exe scratch\calib_design.py`).
 - `scratch/calib_run_output.txt` - captured prototype output (if present).

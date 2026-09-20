@@ -171,6 +171,34 @@ int main() {
         check(drift_deg_per_s < 0.01f, "residual yaw rate small", drift_deg_per_s, 0.01f);
     }
 
+    std::printf("pose_selftest: reconfigure must reset all estimator state\n");
+    {
+        PoseEstimator estimator;
+        PoseEstimator::Config cfg;
+        cfg.settle_samples = 0;
+        cfg.bias_samples = 1;
+        cfg.bias_timeout_samples = 10;
+        cfg.still_hold_s = 0.0f;
+        estimator.configure(cfg);
+        ImuSample sample;
+        sample.accel_mps2 = package_from_body(Vec3{0.0f, 0.0f, 9.81f});
+        sample.gyro_degs = Vec3{0.2f, -0.1f, 0.3f};
+        sample.tick_100us = 1000;
+        estimator.add_sample(sample);
+        sample.tick_100us += 21;
+        estimator.add_sample(sample);
+        check(estimator.bias_done(), "test setup reaches calibrated state", estimator.bias_done() ? 1.0f : 0.0f,
+              1.0f);
+        estimator.configure(PoseEstimator::Config{});
+        const Vec3 reset_bias = estimator.gyro_bias_degs();
+        check(!estimator.bias_done() && estimator.samples_fused() == 0,
+              "configure clears calibration and fused count", static_cast<float>(estimator.samples_fused()),
+              0.0f);
+        check(std::fabs(reset_bias.x) < 1e-6f && std::fabs(reset_bias.y) < 1e-6f &&
+                  std::fabs(reset_bias.z) < 1e-6f,
+              "configure clears learned bias", reset_bias.x, 1e-6f);
+    }
+
     std::printf("pose_selftest: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

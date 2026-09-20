@@ -17,6 +17,14 @@ staying fixed in space. The most likely cause is the **never-measured sensor-to-
 alignment** (see §7), and the repo now contains a validated design to measure it
 (`docs/orientation-calibration.md`). Everything needed to reproduce, diagnose and continue is below.
 
+**Codex continuation, 2026-09-20:** the guided calibration is now implemented as
+`orientation_calibrate.exe`, persists a validated proper rotation to `config/orientation.json`,
+and is required by `spatial_desk` before IMU tracking starts. The design's row-order bug was
+corrected: head coordinates are `(right, forward, up)`, keeping gravity on Madgwick `+Z`.
+The camera now applies the exact quaternion basis transform rather than rebuilding combined
+motion through Euler angles. These changes pass offline regressions but still require the live
+worn-glasses acceptance test in §7.
+
 ---
 
 ## 1. The goal (user's words, condensed)
@@ -156,12 +164,11 @@ HID (475 Hz) -> gt_protocol decode -> PoseEstimator -> ImuSource (worker thread)
   (`q_ref^-1 * q`) mixed yaw into pitch/roll whenever the head was tilted at recenter
   (measured: up to 16° lost pan, 26-34° spurious tilt; reproduced the user's hand-turn log within
   0.2°). `pose_selftest.exe` locks the correct behaviour in.
-* **Camera**: `camera_view_matrix` extracts ZYX euler angles and rebuilds with
-  `XMMatrixRotationRollPitchYaw(pitch, yaw, roll)` and the fixed sign triple **(-1, +1, -1)**.
-  That is algebraically identical to the exact conjugation `C^T * R(q_rel) * C` where C maps
-  earth X → render +Z, earth Y → render -X, earth Z → render +Y (`det(C) = -1` supplies the
-  RH-earth/LH-render reflection). Verified to 2e-6° over 20,000 random orientations.
-  **The signs are load-bearing**: flipping any one of them mirrors the world by up to 180°.
+* **Camera**: after calibration, head axes are X=right, Y=forward, Z=up. The render basis is
+  X=right, Y=up, Z=forward, so quaternion axial components transform as `(-x,-z,-y)` with
+  the fixed sign triple **(-1, -1, -1)**. `camera_view_matrix` uses the transformed quaternion
+  directly; `camera_selftest` verifies the exact combined-orientation basis transform.
+  **The signs are load-bearing**: flipping any one mirrors the world.
   (An earlier build exposed them as live I/K/L toggles - that was removed, correctly.)
 * **Freeze-when-still** (default ON): while the head is judged still, the published pose is frozen
   (masks residual drift entirely); it releases as soon as real motion is detected.

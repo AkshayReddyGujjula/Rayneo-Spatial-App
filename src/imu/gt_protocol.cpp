@@ -1,6 +1,7 @@
 #include "imu/gt_protocol.h"
 
 #include <cstring>
+#include <cmath>
 
 namespace gt {
 namespace {
@@ -58,7 +59,6 @@ Report decode_report(const uint8_t* data, size_t length) {
         return r;
     }
     if (data[1] == kTagImu && length >= kReportLength) {
-        r.kind = ReportKind::Imu;
         r.imu.accel_mps2 = read_vec3(data + 4);
         r.imu.gyro_degs = read_vec3(data + 16);
         r.imu.temp_c = read_f32(data + 28);
@@ -66,6 +66,13 @@ Report decode_report(const uint8_t* data, size_t length) {
         r.imu.mag_ut.y = read_f32(data + 36);
         r.imu.tick_100us = read_u32(data + 40);
         r.imu.mag_ut.z = read_f32(data + 52);
+        const auto finite_vec = [](const Vec3& value) {
+            return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+        };
+        if (finite_vec(r.imu.accel_mps2) && finite_vec(r.imu.gyro_degs) &&
+            finite_vec(r.imu.mag_ut) && std::isfinite(r.imu.temp_c)) {
+            r.kind = ReportKind::Imu;
+        }
     }
     return r;
 }

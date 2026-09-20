@@ -3,6 +3,8 @@
 #include "imu/fusion.h"
 #include "imu/gt_protocol.h"
 
+#include <array>
+
 namespace gt {
 
 class PoseEstimator {
@@ -22,6 +24,11 @@ public:
         float bias_adapt_tau_s = 3.0f;
         bool freeze_when_still = false;
         bool map_package_axes = true;
+        std::array<float, 9> sensor_to_head{
+            1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, -1.0f,
+            0.0f, 1.0f, 0.0f,
+        };
     };
 
     PoseEstimator() = default;

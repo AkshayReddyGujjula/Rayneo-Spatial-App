@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
 project(rayneo_spatial LANGUAGES CXX)
 
+enable_testing()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -19,6 +21,7 @@ add_library(rayneo_core STATIC
   src/imu/gt_protocol.cpp
   src/imu/gt_hid.cpp
   src/imu/fusion.cpp
+  src/imu/orientation_calibration.cpp
   src/imu/pose_estimator.cpp
 )
 target_include_directories(rayneo_core PUBLIC src)
@@ -40,6 +43,19 @@ add_executable(camera_selftest
   src/render/camera.cpp
 )
 target_link_libraries(camera_selftest PRIVATE rayneo_core)
+add_test(NAME camera_selftest COMMAND camera_selftest)
 
 add_executable(pose_selftest src/tools/pose_selftest.cpp)
 target_link_libraries(pose_selftest PRIVATE rayneo_core)
+add_test(NAME pose_selftest COMMAND pose_selftest)
+
+add_executable(orientation_calibration_selftest src/tools/orientation_calibration_selftest.cpp)
+target_link_libraries(orientation_calibration_selftest PRIVATE rayneo_core)
+add_test(NAME orientation_calibration_selftest COMMAND orientation_calibration_selftest)
+
+add_executable(orientation_calibrate src/tools/orientation_calibrate.cpp)
+target_link_libraries(orientation_calibrate PRIVATE rayneo_core)
+
+add_executable(protocol_selftest src/tools/protocol_selftest.cpp)
+target_link_libraries(protocol_selftest PRIVATE rayneo_core)
+add_test(NAME protocol_selftest COMMAND protocol_selftest)

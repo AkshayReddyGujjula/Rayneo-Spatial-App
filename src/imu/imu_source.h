@@ -4,6 +4,7 @@
 #include "imu/pose_estimator.h"
 
 #include <atomic>
+#include <array>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -32,6 +33,7 @@ public:
 
     void recenter() { recenter_request_.store(true, std::memory_order_relaxed); }
     void set_freeze_when_still(bool enabled) { freeze_when_still_ = enabled; }
+    void set_sensor_to_head(const std::array<float, 9>& matrix) { sensor_to_head_ = matrix; }
 
 private:
     void run();
@@ -45,6 +47,7 @@ private:
     std::atomic<float> qx_{0.0f};
     std::atomic<float> qy_{0.0f};
     std::atomic<float> qz_{0.0f};
+    std::atomic<uint64_t> pose_sequence_{0};
     std::atomic<double> sample_rate_hz_{0.0};
     std::atomic<float> bx_{0.0f};
     std::atomic<float> by_{0.0f};
@@ -57,6 +60,11 @@ private:
     mutable std::mutex status_mutex_;
     std::string status_;
     bool freeze_when_still_ = false;
+    std::array<float, 9> sensor_to_head_{
+        1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, -1.0f,
+        0.0f, 1.0f, 0.0f,
+    };
 };
 
 }  // namespace gt
