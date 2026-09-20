@@ -344,6 +344,84 @@ bool extract_axis(const CalibrationPhaseData& phase, const Vec3& bias_body, floa
 
 }  // namespace
 
+bool analyze_motion_phase(const CalibrationPhaseData& phase, const Vec3& bias_body,
+                          float command_sign, CalibrationAxisDiagnostics& diagnostics,
+                          std::string& code, std::string& message) {
+    if (phase.samples.size() < 100) {
+        code = "TOO_FEW_SAMPLES";
+        message = "this step did not record enough IMU samples - try it again";
+        return false;
+    }
+    if (!valid_samples(phase)) {
+        code = "INVALID_SAMPLE";
+        message = "the IMU stream contained a non-finite sensor value";
+        return false;
+    }
+    return extract_axis(phase, bias_body, command_sign, diagnostics, code, message);
+}
+
+Vec3 estimate_still_bias(const CalibrationPhaseData& still, float& rms_degs) {
+    std::vector<Vec3> still_gyro;
+    still_gyro.reserve(still.samples.size());
+    for (const ImuSample& sample : still.samples) {
+        still_gyro.push_back(package_to_body(sample.gyro_degs));
+    }
+    rms_degs = std::numeric_limits<float>::max();
+    if (still_gyro.empty()) {
+        return Vec3{};
+    }
+
+    // A worn head is never perfectly motionless, and users settle a moment
+    // after pressing Enter, so take the quietest contiguous 1.5 s window.
+    constexpr float kQuietWindowSeconds = 1.5f;
+    std::vector<float> dt(still_gyro.size(), 1.0f / 476.0f);
+    for (size_t i = 1; i < dt.size(); ++i) {
+        dt[i] = sample_dt(still.samples[i - 1], still.samples[i]);
+    }
+
+    size_t best_start = 0;
+    size_t best_end = 0;
+    float best_rms = std::numeric_limits<float>::max();
+    size_t left = 0;
+    float window_seconds = 0.0f;
+    Vec3 window_sum;
+    float window_square_sum = 0.0f;
+    for (size_t right = 0; right < still_gyro.size(); ++right) {
+        window_seconds += dt[right];
+        window_sum = add(window_sum, still_gyro[right]);
+        window_square_sum += dot(still_gyro[right], still_gyro[right]);
+        while (left < right && window_seconds - dt[left] >= kQuietWindowSeconds) {
+            window_seconds -= dt[left];
+            window_sum = subtract(window_sum, still_gyro[left]);
+            window_square_sum -= dot(still_gyro[left], still_gyro[left]);
+            ++left;
+        }
+        if (window_seconds >= kQuietWindowSeconds) {
+            const float count = static_cast<float>(right - left + 1);
+            const Vec3 window_mean = scale(window_sum, 1.0f / count);
+            const float variance =
+                std::max(0.0f, window_square_sum / count - dot(window_mean, window_mean));
+            const float rms = std::sqrt(variance);
+            if (rms < best_rms) {
+                best_rms = rms;
+                best_start = left;
+                best_end = right + 1;
+            }
+        }
+    }
+    if (best_end <= best_start) {
+        rms_degs = std::numeric_limits<float>::max();
+        return Vec3{};
+    }
+
+    Vec3 bias_sum;
+    for (size_t i = best_start; i < best_end; ++i) {
+        bias_sum = add(bias_sum, still_gyro[i]);
+    }
+    rms_degs = best_rms;
+    return scale(bias_sum, 1.0f / static_cast<float>(best_end - best_start));
+}
+
 Vec3 apply_sensor_to_head(const std::array<float, 9>& matrix, const Vec3& value) {
     return Vec3{matrix[0] * value.x + matrix[1] * value.y + matrix[2] * value.z,
                 matrix[3] * value.x + matrix[4] * value.y + matrix[5] * value.z,
@@ -370,23 +448,22 @@ OrientationCalibrationResult calibrate_orientation(const CalibrationPhaseData& s
         return fail("STILL_TOO_SHORT", "hold still for the full three-second calibration window");
     }
 
-    std::vector<Vec3> still_gyro;
     std::vector<Vec3> still_accel;
-    still_gyro.reserve(still.samples.size());
     still_accel.reserve(still.samples.size());
     for (const ImuSample& sample : still.samples) {
-        still_gyro.push_back(package_to_body(sample.gyro_degs));
         still_accel.push_back(package_to_body(sample.accel_mps2));
     }
-    const Vec3 bias_body = mean(still_gyro);
-    float still_variance = 0.0f;
-    for (const Vec3& gyro : still_gyro) {
-        const Vec3 d = subtract(gyro, bias_body);
-        still_variance += dot(d, d);
-    }
-    const float still_rms = std::sqrt(still_variance / static_cast<float>(still_gyro.size()));
+    float still_rms = 0.0f;
+    const Vec3 bias_body = estimate_still_bias(still, still_rms);
     if (still_rms > 1.5f) {
-        return fail("HOLD_STILL", "not enough stillness detected - hold still and try again");
+        char text[192];
+        std::snprintf(text, sizeof(text),
+                      "the glasses measured %.2f deg/s of head movement at best (limit 1.5) - rest "
+                      "your head back and hold still for the whole window",
+                      still_rms);
+        OrientationCalibrationResult failed = fail("HOLD_STILL", text);
+        failed.still_gyro_rms_degs = still_rms;
+        return failed;
     }
     const Vec3 up_accel = normalized(mean(still_accel));
     if (norm(up_accel) < 0.9f) {
@@ -398,9 +475,9 @@ OrientationCalibrationResult calibrate_orientation(const CalibrationPhaseData& s
     result.still_gyro_rms_degs = still_rms;
     std::string code;
     std::string message;
-    if (!extract_axis(yaw, bias_body, +1.0f, result.yaw, code, message) ||
-        !extract_axis(nod, bias_body, -1.0f, result.nod, code, message) ||
-        !extract_axis(tilt, bias_body, +1.0f, result.tilt, code, message)) {
+    if (!analyze_motion_phase(yaw, bias_body, +1.0f, result.yaw, code, message) ||
+        !analyze_motion_phase(nod, bias_body, -1.0f, result.nod, code, message) ||
+        !analyze_motion_phase(tilt, bias_body, +1.0f, result.tilt, code, message)) {
         result.code = code;
         result.message = message;
         return result;
