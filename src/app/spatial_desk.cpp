@@ -1,3 +1,4 @@
+#include "capture/desktop_duplication.h"
 #include "imu/imu_source.h"
 #include "imu/orientation_calibration.h"
 #include "layout/layout.h"
@@ -7,6 +8,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -15,6 +17,8 @@
 #include <cstring>
 #include <fstream>
 #include <filesystem>
+#include <memory>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -112,6 +116,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                 std::printf("  recentered\n");
             }
             return 0;
+        case WM_SETCURSOR:
+            if (LOWORD(lparam) == HTCLIENT) {
+                SetCursor(nullptr);
+                return TRUE;
+            }
+            break;
         default:
             break;
     }
@@ -192,6 +202,36 @@ std::string default_repo_path(const std::filesystem::path& relative) {
     executable.resize(length);
     const std::filesystem::path executable_path(executable);
     return (executable_path.parent_path().parent_path() / relative).string();
+}
+
+bool bind_desktop_captures(
+    gt::Renderer& renderer, const gt::Layout& layout,
+    const std::vector<gt::ConfiguredDisplay>& displays,
+    std::vector<std::unique_ptr<gt::DesktopDuplicator>>& captures, std::string& error) {
+    if (layout.screens.size() != displays.size()) {
+        error = "capture binding requires one virtual display per layout screen";
+        return false;
+    }
+    std::vector<size_t> logical_order(layout.screens.size());
+    std::iota(logical_order.begin(), logical_order.end(), 0);
+    std::sort(logical_order.begin(), logical_order.end(), [&](size_t left, size_t right) {
+        return layout.screens[left].vdd_index < layout.screens[right].vdd_index;
+    });
+
+    std::vector<std::unique_ptr<gt::DesktopDuplicator>> candidate(layout.screens.size());
+    for (size_t rank = 0; rank < logical_order.size(); ++rank) {
+        const size_t screen_index = logical_order[rank];
+        auto duplicator = std::make_unique<gt::DesktopDuplicator>();
+        if (!duplicator->initialize(renderer.device(), renderer.context(),
+                                    displays[rank].device_name, error)) {
+            error = "capture binding for screen '" + layout.screens[screen_index].id +
+                    "' failed: " + error;
+            return false;
+        }
+        candidate[screen_index] = std::move(duplicator);
+    }
+    captures = std::move(candidate);
+    return true;
 }
 
 }  // namespace
@@ -350,6 +390,15 @@ int main(int argc, char** argv) {
     }
     std::printf("loaded layout: %s (%zu screens)\n", opt.layout_path.c_str(), layout.screens.size());
 
+    std::vector<std::unique_ptr<gt::DesktopDuplicator>> captures;
+    if (opt.virtual_displays &&
+        !bind_desktop_captures(renderer, layout, virtual_displays, captures, error)) {
+        std::printf("desktop capture startup failed: %s\n", error.c_str());
+        renderer.shutdown();
+        DestroyWindow(hwnd);
+        return 1;
+    }
+
     gt::ImuSource imu;
     AppState state;
     state.imu = opt.no_imu ? nullptr : &imu;
@@ -377,6 +426,7 @@ int main(int argc, char** argv) {
     std::error_code layout_time_error;
     auto layout_write_time = std::filesystem::last_write_time(opt.layout_path, layout_time_error);
     double next_layout_check = 0.5;
+    double next_capture_error_log = 0.0;
 
     while (!state.quit) {
         MSG message;
@@ -403,30 +453,53 @@ int main(int argc, char** argv) {
                 std::string reload_error;
                 const size_t previous_display_count = layout.screens.size();
                 bool displays_changed = false;
+                bool renderer_changed = false;
+                std::vector<std::unique_ptr<gt::DesktopDuplicator>> candidate_captures;
                 bool reload_ok = gt::load_layout(opt.layout_path, candidate, reload_error);
                 if (reload_ok && opt.virtual_displays) {
                     displays_changed = candidate.screens.size() != previous_display_count;
-                    reload_ok = vdd.resize(candidate.screens.size(), reload_error) &&
-                                gt::configure_virtual_displays(
-                                    vdd.display_indices(), 1920, 1080, 120, virtual_displays,
-                                    reload_error);
+                    if (displays_changed) {
+                        reload_ok = vdd.resize(candidate.screens.size(), reload_error) &&
+                                    gt::configure_virtual_displays(
+                                        vdd.display_indices(), 1920, 1080, 120, virtual_displays,
+                                        reload_error);
+                    }
                 }
                 if (reload_ok) {
                     reload_ok = renderer.set_layout(candidate, reload_error);
+                    renderer_changed = reload_ok;
+                }
+                if (reload_ok && opt.virtual_displays) {
+                    reload_ok = bind_desktop_captures(renderer, candidate, virtual_displays,
+                                                      candidate_captures, reload_error);
                 }
                 if (reload_ok) {
                     layout = std::move(candidate);
+                    if (opt.virtual_displays) captures = std::move(candidate_captures);
                     if (!opt.fov_explicit) {
                         opt.fov = layout.fov_deg;
                     }
                     std::printf("reloaded layout (%zu screens)\n", layout.screens.size());
                 } else {
+                    if (renderer_changed) {
+                        std::string renderer_rollback_error;
+                        if (!renderer.set_layout(layout, renderer_rollback_error)) {
+                            std::printf("renderer layout rollback failed: %s\n",
+                                        renderer_rollback_error.c_str());
+                            state.quit = true;
+                        }
+                    }
                     if (opt.virtual_displays && displays_changed) {
                         std::string rollback_error;
                         if (!vdd.resize(previous_display_count, rollback_error) ||
                             !gt::configure_virtual_displays(vdd.display_indices(), 1920, 1080, 120,
                                                             virtual_displays, rollback_error)) {
                             std::printf("virtual display rollback failed: %s\n",
+                                        rollback_error.c_str());
+                            state.quit = true;
+                        } else if (!bind_desktop_captures(renderer, layout, virtual_displays,
+                                                          captures, rollback_error)) {
+                            std::printf("desktop capture rollback failed: %s\n",
                                         rollback_error.c_str());
                             state.quit = true;
                         }
@@ -440,6 +513,56 @@ int main(int argc, char** argv) {
             std::printf("Parsec VDD keepalive failed repeatedly; exiting before its watchdog "
                         "removes the desktops\n");
             state.quit = true;
+        }
+
+        for (size_t screen_index = 0; screen_index < captures.size(); ++screen_index) {
+            gt::CapturedDesktop captured;
+            std::string capture_error;
+            const gt::CapturePollResult result = captures[screen_index]->poll(captured, capture_error);
+            if (result == gt::CapturePollResult::Frame && captured.texture) {
+                if (!renderer.set_screen_texture(screen_index, captured.texture.Get(), capture_error)) {
+                    std::printf("desktop texture update failed: %s\n", capture_error.c_str());
+                    state.quit = true;
+                }
+                gt::CursorUpdate cursor;
+                cursor.position_updated = captured.pointer.position_updated;
+                cursor.visible = captured.pointer.visible;
+                cursor.x = captured.pointer.x;
+                cursor.y = captured.pointer.y;
+                cursor.desktop_width = captured.width;
+                cursor.desktop_height = captured.height;
+                cursor.shape_updated = captured.pointer.shape_updated;
+                cursor.shape_width = captured.pointer.shape.Width;
+                cursor.shape_height = captured.pointer.shape.Height;
+                cursor.shape_pitch = captured.pointer.shape.Pitch;
+                cursor.shape_pixels = captured.pointer.pixels.data();
+                cursor.shape_bytes = captured.pointer.pixels.size();
+                switch (captured.pointer.shape.Type) {
+                    case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR:
+                        cursor.mode = gt::CursorShapeMode::Color;
+                        break;
+                    case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR:
+                        cursor.mode = gt::CursorShapeMode::MaskedColor;
+                        break;
+                    case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME:
+                        cursor.mode = gt::CursorShapeMode::Monochrome;
+                        break;
+                    default:
+                        cursor.shape_updated = false;
+                        break;
+                }
+                if ((cursor.position_updated || cursor.shape_updated) &&
+                    !renderer.update_screen_cursor(screen_index, cursor, capture_error)) {
+                    std::printf("desktop cursor update failed: %s\n", capture_error.c_str());
+                    state.quit = true;
+                }
+            } else if (result == gt::CapturePollResult::Failed) {
+                if (elapsed >= next_capture_error_log) {
+                    std::printf("desktop capture failed for screen '%s': %s\n",
+                                layout.screens[screen_index].id.c_str(), capture_error.c_str());
+                    next_capture_error_log = elapsed + 1.0;
+                }
+            }
         }
 
         const gt::Quat head = opt.no_imu ? gt::Quat{} : imu.orientation();
@@ -490,6 +613,7 @@ int main(int argc, char** argv) {
     if (!opt.no_imu) {
         imu.stop();
     }
+    captures.clear();
     vdd.disconnect();
     g_app = nullptr;
     renderer.shutdown();

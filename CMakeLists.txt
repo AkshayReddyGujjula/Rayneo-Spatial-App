@@ -32,6 +32,12 @@ add_library(rayneo_vdd STATIC
 target_include_directories(rayneo_vdd PUBLIC src)
 target_link_libraries(rayneo_vdd PUBLIC setupapi cfgmgr32)
 
+add_library(rayneo_capture STATIC
+  src/capture/desktop_duplication.cpp
+)
+target_include_directories(rayneo_capture PUBLIC src)
+target_link_libraries(rayneo_capture PUBLIC d3d11 dxgi)
+
 add_library(rayneo_core STATIC
   src/imu/gt_protocol.cpp
   src/imu/gt_hid.cpp
@@ -51,7 +57,7 @@ add_executable(spatial_desk
   src/render/camera.cpp
   src/render/renderer.cpp
 )
-target_link_libraries(spatial_desk PRIVATE rayneo_core rayneo_layout rayneo_vdd d3d11 dxgi d3dcompiler user32 gdi32)
+target_link_libraries(spatial_desk PRIVATE rayneo_core rayneo_layout rayneo_vdd rayneo_capture d3d11 dxgi d3dcompiler user32 gdi32)
 
 add_executable(camera_selftest
   src/tools/camera_selftest.cpp
@@ -82,3 +88,6 @@ add_test(NAME layout_selftest COMMAND layout_selftest)
 add_executable(vdd_selftest src/tools/vdd_selftest.cpp)
 target_link_libraries(vdd_selftest PRIVATE rayneo_vdd)
 add_test(NAME vdd_selftest COMMAND vdd_selftest)
+
+add_executable(capture_smoketest src/tools/capture_smoketest.cpp)
+target_link_libraries(capture_smoketest PRIVATE rayneo_capture)

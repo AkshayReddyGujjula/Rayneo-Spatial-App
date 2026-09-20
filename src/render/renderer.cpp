@@ -4,6 +4,7 @@
 #include <DirectXMath.h>
 #include <d3dcompiler.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -28,6 +29,12 @@ cbuffer Transform : register(b0) {
     float4x4 g_view_proj;
 };
 
+cbuffer CursorInfo : register(b1) {
+    float4 g_cursor_rect;
+    uint g_cursor_mode;
+    float3 g_cursor_padding;
+};
+
 struct VSInput {
     float3 pos : POSITION;
     float4 color : COLOR;
@@ -41,6 +48,7 @@ struct PSInput {
 };
 
 Texture2D g_texture : register(t0);
+Texture2D g_desktop : register(t1);
 SamplerState g_sampler : register(s0);
 
 PSInput vs_main(VSInput input) {
@@ -54,7 +62,38 @@ PSInput vs_main(VSInput input) {
 float4 ps_main(PSInput input) : SV_TARGET {
     return g_texture.Sample(g_sampler, input.uv) * input.color;
 }
+
+float4 ps_cursor(PSInput input) : SV_TARGET {
+    float4 cursor = g_texture.Sample(g_sampler, input.uv);
+    float2 desktop_uv = g_cursor_rect.xy + input.uv * g_cursor_rect.zw;
+    float4 desktop = g_desktop.Sample(g_sampler, desktop_uv);
+    if (g_cursor_mode == 0) {
+        return cursor;
+    }
+    if (g_cursor_mode == 1) {
+        if (cursor.a < 0.5f) {
+            return float4(cursor.rgb, 1.0f);
+        }
+        uint3 background = (uint3)round(saturate(desktop.rgb) * 255.0f);
+        uint3 mask = (uint3)round(saturate(cursor.rgb) * 255.0f);
+        return float4((float3)(background ^ mask) / 255.0f, 1.0f);
+    }
+    float and_mask = cursor.r >= 0.5f ? 1.0f : 0.0f;
+    float xor_mask = cursor.g >= 0.5f ? 1.0f : 0.0f;
+    float3 composed = desktop.rgb * and_mask;
+    composed = xor_mask > 0.5f ? 1.0f - composed : composed;
+    return float4(composed, 1.0f);
+}
 )";
+
+struct CursorConstants {
+    float u;
+    float v;
+    float width;
+    float height;
+    uint32_t mode;
+    float padding[3];
+};
 
 std::wstring widen(const std::string& text) {
     if (text.empty()) {
@@ -159,6 +198,100 @@ bool create_label_texture(ID3D11Device* device, const ScreenLayout& screen,
     return ok;
 }
 
+bool create_cursor_texture(ID3D11Device* device, const CursorUpdate& update,
+                           ComPtr<ID3D11Texture2D>& texture,
+                           ComPtr<ID3D11ShaderResourceView>& view, uint32_t& visible_height,
+                           std::string& error) {
+    if (update.shape_width == 0 || update.shape_height == 0 || update.shape_pitch == 0 ||
+        update.shape_pixels == nullptr || update.shape_bytes == 0) {
+        error = "cursor shape metadata is incomplete";
+        return false;
+    }
+
+    D3D11_TEXTURE2D_DESC description{};
+    description.Width = update.shape_width;
+    description.Height = update.shape_height;
+    description.MipLevels = 1;
+    description.ArraySize = 1;
+    description.SampleDesc.Count = 1;
+    description.Usage = D3D11_USAGE_IMMUTABLE;
+    description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA data{};
+    std::vector<uint32_t> monochrome;
+
+    if (update.mode == CursorShapeMode::Monochrome) {
+        if ((update.shape_height % 2) != 0) {
+            error = "monochrome cursor mask height must contain equal AND and XOR halves";
+            return false;
+        }
+        visible_height = update.shape_height / 2;
+        const size_t required = static_cast<size_t>(update.shape_pitch) * update.shape_height;
+        if (update.shape_bytes < required) {
+            error = "monochrome cursor buffer is shorter than its pitch and height";
+            return false;
+        }
+        description.Height = visible_height;
+        description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        monochrome.resize(static_cast<size_t>(description.Width) * visible_height);
+        for (uint32_t y = 0; y < visible_height; ++y) {
+            const uint8_t* and_row = update.shape_pixels + static_cast<size_t>(y) * update.shape_pitch;
+            const uint8_t* xor_row =
+                update.shape_pixels + static_cast<size_t>(y + visible_height) * update.shape_pitch;
+            for (uint32_t x = 0; x < description.Width; ++x) {
+                const uint8_t bit = static_cast<uint8_t>(0x80u >> (x % 8));
+                const uint8_t and_value = (and_row[x / 8] & bit) != 0 ? 255 : 0;
+                const uint8_t xor_value = (xor_row[x / 8] & bit) != 0 ? 255 : 0;
+                monochrome[static_cast<size_t>(y) * description.Width + x] =
+                    0xFF000000u | (static_cast<uint32_t>(xor_value) << 8) | and_value;
+            }
+        }
+        data.pSysMem = monochrome.data();
+        data.SysMemPitch = description.Width * 4;
+    } else {
+        visible_height = update.shape_height;
+        const size_t required = static_cast<size_t>(update.shape_pitch) * update.shape_height;
+        if (update.shape_bytes < required || update.shape_pitch < update.shape_width * 4) {
+            error = "colour cursor buffer is shorter than its BGRA pitch and height";
+            return false;
+        }
+        description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        data.pSysMem = update.shape_pixels;
+        data.SysMemPitch = update.shape_pitch;
+    }
+
+    texture.Reset();
+    view.Reset();
+    HRESULT result = device->CreateTexture2D(&description, &data, &texture);
+    if (SUCCEEDED(result)) result = device->CreateShaderResourceView(texture.Get(), nullptr, &view);
+    if (FAILED(result)) {
+        error = "failed to create the desktop cursor texture";
+        texture.Reset();
+        return false;
+    }
+    return true;
+}
+
+Vertex interpolate_cursor_vertex(const std::array<ScreenGeometryVertex, 6>& quad, float screen_u,
+                                 float screen_v, float cursor_u, float cursor_v) {
+    const ScreenGeometryVertex& bottom_left = quad[0];
+    const ScreenGeometryVertex& bottom_right = quad[1];
+    const ScreenGeometryVertex& top_right = quad[2];
+    const ScreenGeometryVertex& top_left = quad[5];
+    const float top_weight = 1.0f - screen_v;
+    const float bottom_weight = screen_v;
+    const float left_weight = 1.0f - screen_u;
+    const float right_weight = screen_u;
+    const auto component = [&](float ScreenGeometryVertex::*member) {
+        const float top = top_left.*member * left_weight + top_right.*member * right_weight;
+        const float bottom =
+            bottom_left.*member * left_weight + bottom_right.*member * right_weight;
+        return (top * top_weight + bottom * bottom_weight) * 0.9995f;
+    };
+    return Vertex{component(&ScreenGeometryVertex::x), component(&ScreenGeometryVertex::y),
+                  component(&ScreenGeometryVertex::z), 1.0f, 1.0f, 1.0f, 1.0f, cursor_u,
+                  cursor_v};
+}
+
 }  // namespace
 
 bool Renderer::init(HWND hwnd, uint32_t width, uint32_t height, std::string& error) {
@@ -231,6 +364,7 @@ bool Renderer::init(HWND hwnd, uint32_t width, uint32_t height, std::string& err
 
     ComPtr<ID3DBlob> vs_blob;
     ComPtr<ID3DBlob> ps_blob;
+    ComPtr<ID3DBlob> cursor_ps_blob;
     ComPtr<ID3DBlob> errors;
     hr = D3DCompile(kShaderSource, std::strlen(kShaderSource), "scene.hlsl", nullptr, nullptr, "vs_main",
                     "vs_5_0", 0, 0, &vs_blob, &errors);
@@ -244,10 +378,20 @@ bool Renderer::init(HWND hwnd, uint32_t width, uint32_t height, std::string& err
         error = errors ? static_cast<const char*>(errors->GetBufferPointer()) : "pixel shader compile failed";
         return false;
     }
+    hr = D3DCompile(kShaderSource, std::strlen(kShaderSource), "scene.hlsl", nullptr, nullptr,
+                    "ps_cursor", "ps_5_0", 0, 0, &cursor_ps_blob, &errors);
+    if (FAILED(hr)) {
+        error = errors ? static_cast<const char*>(errors->GetBufferPointer())
+                       : "cursor shader compile failed";
+        return false;
+    }
     if (FAILED(device_->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr,
                                            &vertex_shader_)) ||
         FAILED(device_->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr,
-                                          &pixel_shader_))) {
+                                          &pixel_shader_)) ||
+        FAILED(device_->CreatePixelShader(cursor_ps_blob->GetBufferPointer(),
+                                          cursor_ps_blob->GetBufferSize(), nullptr,
+                                          &cursor_pixel_shader_))) {
         error = "shader creation failed";
         return false;
     }
@@ -273,6 +417,11 @@ bool Renderer::init(HWND hwnd, uint32_t width, uint32_t height, std::string& err
         error = "vertex buffer creation failed";
         return false;
     }
+    vb_desc.ByteWidth = 8 * 6 * sizeof(Vertex);
+    if (FAILED(device_->CreateBuffer(&vb_desc, nullptr, &cursor_vertex_buffer_))) {
+        error = "cursor vertex buffer creation failed";
+        return false;
+    }
 
     D3D11_SAMPLER_DESC sampler_desc{};
     sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -292,6 +441,11 @@ bool Renderer::init(HWND hwnd, uint32_t width, uint32_t height, std::string& err
     cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     if (FAILED(device_->CreateBuffer(&cb_desc, nullptr, &constant_buffer_))) {
         error = "constant buffer creation failed";
+        return false;
+    }
+    cb_desc.ByteWidth = sizeof(CursorConstants);
+    if (FAILED(device_->CreateBuffer(&cb_desc, nullptr, &cursor_constant_buffer_))) {
+        error = "cursor constant buffer creation failed";
         return false;
     }
 
@@ -317,6 +471,27 @@ bool Renderer::init(HWND hwnd, uint32_t width, uint32_t height, std::string& err
     depth_desc_state.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
     if (FAILED(device_->CreateDepthStencilState(&depth_desc_state, &depth_disabled_state_))) {
         error = "depth-disabled stencil state creation failed";
+        return false;
+    }
+    depth_desc_state.DepthEnable = TRUE;
+    depth_desc_state.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    depth_desc_state.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+    if (FAILED(device_->CreateDepthStencilState(&depth_desc_state, &cursor_depth_state_))) {
+        error = "cursor depth state creation failed";
+        return false;
+    }
+
+    D3D11_BLEND_DESC blend{};
+    blend.RenderTarget[0].BlendEnable = TRUE;
+    blend.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    blend.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    blend.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    if (FAILED(device_->CreateBlendState(&blend, &cursor_blend_state_))) {
+        error = "cursor blend state creation failed";
         return false;
     }
     return set_layout(default_layout(), error);
@@ -347,7 +522,8 @@ bool Renderer::set_layout(const Layout& layout, std::string& error) {
     for (const ScreenLayout& screen : layout.screens) {
         ScreenDraw draw;
         draw.vertex_start = static_cast<UINT>(vertices.size());
-        if (!create_label_texture(device_.Get(), screen, draw.texture)) {
+        draw.layout = screen;
+        if (!create_label_texture(device_.Get(), screen, draw.label_texture)) {
             error = "failed to create label texture for screen '" + screen.id + "'";
             return false;
         }
@@ -383,6 +559,47 @@ bool Renderer::set_layout(const Layout& layout, std::string& error) {
     return true;
 }
 
+bool Renderer::set_screen_texture(size_t screen_index, ID3D11ShaderResourceView* texture,
+                                  std::string& error) {
+    if (screen_index >= screen_draws_.size()) {
+        error = "screen texture index is out of range";
+        return false;
+    }
+    screen_draws_[screen_index].live_texture = texture;
+    return true;
+}
+
+bool Renderer::update_screen_cursor(size_t screen_index, const CursorUpdate& update,
+                                    std::string& error) {
+    if (screen_index >= screen_draws_.size()) {
+        error = "screen cursor index is out of range";
+        return false;
+    }
+    ScreenDraw& screen = screen_draws_[screen_index];
+    if (update.position_updated) {
+        if (update.desktop_width == 0 || update.desktop_height == 0) {
+            error = "cursor position update requires non-zero desktop dimensions";
+            return false;
+        }
+        screen.cursor_visible = update.visible;
+        screen.cursor_x = update.x;
+        screen.cursor_y = update.y;
+        screen.desktop_width = update.desktop_width;
+        screen.desktop_height = update.desktop_height;
+    }
+    if (update.shape_updated) {
+        uint32_t visible_height = 0;
+        if (!create_cursor_texture(device_.Get(), update, screen.cursor_texture,
+                                   screen.cursor_view, visible_height, error)) {
+            return false;
+        }
+        screen.cursor_width = update.shape_width;
+        screen.cursor_height = visible_height;
+        screen.cursor_mode = update.mode;
+    }
+    return true;
+}
+
 void Renderer::shutdown() {
     if (context_) {
         context_->ClearState();
@@ -394,12 +611,17 @@ void Renderer::shutdown() {
     depth_texture_.Reset();
     vertex_shader_.Reset();
     pixel_shader_.Reset();
+    cursor_pixel_shader_.Reset();
     input_layout_.Reset();
     vertex_buffer_.Reset();
+    cursor_vertex_buffer_.Reset();
     constant_buffer_.Reset();
+    cursor_constant_buffer_.Reset();
     rasterizer_.Reset();
     depth_state_.Reset();
     depth_disabled_state_.Reset();
+    cursor_depth_state_.Reset();
+    cursor_blend_state_.Reset();
     sampler_.Reset();
     white_texture_.Reset();
     screen_draws_.clear();
@@ -455,14 +677,94 @@ void Renderer::render(const Quat& head, float fov_horizontal_deg, float time_s) 
     context_->Draw(line_vertex_count_, 0);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     for (const ScreenDraw& screen : screen_draws_) {
-        ID3D11ShaderResourceView* texture[] = {screen.texture.Get()};
+        ID3D11ShaderResourceView* texture[] = {
+            screen.live_texture ? screen.live_texture.Get() : screen.label_texture.Get()};
         context_->PSSetShaderResources(0, 1, texture);
         context_->Draw(6, screen.vertex_start);
+    }
+
+    std::vector<Vertex> cursor_vertices;
+    std::vector<size_t> cursor_screens;
+    cursor_vertices.reserve(screen_draws_.size() * 6);
+    cursor_screens.reserve(screen_draws_.size());
+    for (size_t index = 0; index < screen_draws_.size(); ++index) {
+        const ScreenDraw& screen = screen_draws_[index];
+        if (!screen.cursor_visible || !screen.cursor_view || !screen.live_texture ||
+            screen.desktop_width == 0 || screen.desktop_height == 0 ||
+            screen.cursor_width == 0 || screen.cursor_height == 0) {
+            continue;
+        }
+        const float left = static_cast<float>(screen.cursor_x) / screen.desktop_width;
+        const float top = static_cast<float>(screen.cursor_y) / screen.desktop_height;
+        const float right = static_cast<float>(screen.cursor_x + static_cast<int>(screen.cursor_width)) /
+                            screen.desktop_width;
+        const float bottom =
+            static_cast<float>(screen.cursor_y + static_cast<int>(screen.cursor_height)) /
+            screen.desktop_height;
+        const float clipped_left = std::clamp(left, 0.0f, 1.0f);
+        const float clipped_top = std::clamp(top, 0.0f, 1.0f);
+        const float clipped_right = std::clamp(right, 0.0f, 1.0f);
+        const float clipped_bottom = std::clamp(bottom, 0.0f, 1.0f);
+        if (clipped_left >= clipped_right || clipped_top >= clipped_bottom) continue;
+
+        const float cursor_u0 = (clipped_left - left) / (right - left);
+        const float cursor_v0 = (clipped_top - top) / (bottom - top);
+        const float cursor_u1 = (clipped_right - left) / (right - left);
+        const float cursor_v1 = (clipped_bottom - top) / (bottom - top);
+        const auto quad = make_screen_quad(screen.layout);
+        const Vertex top_left = interpolate_cursor_vertex(quad, clipped_left, clipped_top,
+                                                           cursor_u0, cursor_v0);
+        const Vertex top_right = interpolate_cursor_vertex(quad, clipped_right, clipped_top,
+                                                            cursor_u1, cursor_v0);
+        const Vertex bottom_right = interpolate_cursor_vertex(
+            quad, clipped_right, clipped_bottom, cursor_u1, cursor_v1);
+        const Vertex bottom_left = interpolate_cursor_vertex(quad, clipped_left, clipped_bottom,
+                                                              cursor_u0, cursor_v1);
+        cursor_vertices.insert(cursor_vertices.end(), {bottom_left, bottom_right, top_right,
+                                                       bottom_left, top_right, top_left});
+        cursor_screens.push_back(index);
+    }
+    if (!cursor_vertices.empty()) {
+        D3D11_MAPPED_SUBRESOURCE cursor_mapped{};
+        if (SUCCEEDED(context_->Map(cursor_vertex_buffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
+                                    &cursor_mapped))) {
+            std::memcpy(cursor_mapped.pData, cursor_vertices.data(),
+                        cursor_vertices.size() * sizeof(Vertex));
+            context_->Unmap(cursor_vertex_buffer_.Get(), 0);
+            ID3D11Buffer* cursor_buffers[] = {cursor_vertex_buffer_.Get()};
+            context_->IASetVertexBuffers(0, 1, cursor_buffers, &stride, &offset);
+            context_->PSSetShader(cursor_pixel_shader_.Get(), nullptr, 0);
+            context_->OMSetDepthStencilState(cursor_depth_state_.Get(), 0);
+            const float blend_factor[4] = {};
+            context_->OMSetBlendState(cursor_blend_state_.Get(), blend_factor, 0xFFFFFFFFu);
+            ID3D11Buffer* cursor_constants[] = {cursor_constant_buffer_.Get()};
+            context_->PSSetConstantBuffers(1, 1, cursor_constants);
+            for (size_t cursor_index = 0; cursor_index < cursor_screens.size(); ++cursor_index) {
+                const ScreenDraw& screen = screen_draws_[cursor_screens[cursor_index]];
+                CursorConstants constants{};
+                constants.u = static_cast<float>(screen.cursor_x) / screen.desktop_width;
+                constants.v = static_cast<float>(screen.cursor_y) / screen.desktop_height;
+                constants.width = static_cast<float>(screen.cursor_width) / screen.desktop_width;
+                constants.height = static_cast<float>(screen.cursor_height) / screen.desktop_height;
+                constants.mode = static_cast<uint32_t>(screen.cursor_mode);
+                context_->UpdateSubresource(cursor_constant_buffer_.Get(), 0, nullptr, &constants,
+                                            0, 0);
+                ID3D11ShaderResourceView* textures[] = {screen.cursor_view.Get(),
+                                                        screen.live_texture.Get()};
+                context_->PSSetShaderResources(0, 2, textures);
+                context_->Draw(6, static_cast<UINT>(cursor_index * 6));
+            }
+            ID3D11ShaderResourceView* unbound[] = {nullptr, nullptr};
+            context_->PSSetShaderResources(0, 2, unbound);
+            context_->OMSetBlendState(nullptr, blend_factor, 0xFFFFFFFFu);
+        }
     }
 
     DirectX::XMStoreFloat4x4(&matrix, DirectX::XMMatrixTranspose(projection));
     context_->UpdateSubresource(constant_buffer_.Get(), 0, nullptr, &matrix, 0, 0);
     context_->OMSetDepthStencilState(depth_disabled_state_.Get(), 0);
+    context_->PSSetShader(pixel_shader_.Get(), nullptr, 0);
+    context_->IASetVertexBuffers(0, 1, buffers, &stride, &offset);
     context_->PSSetShaderResources(0, 1, white);
     context_->Draw(6, crosshair_vertex_start_);
 }
