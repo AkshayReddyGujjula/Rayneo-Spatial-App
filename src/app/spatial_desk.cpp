@@ -228,6 +228,10 @@ bool bind_desktop_captures(
                     "' failed: " + error;
             return false;
         }
+        if (duplicator->backend() == gt::CaptureBackend::GdiFallback) {
+            std::printf("  screen '%s': DXGI unavailable, using CPU GDI capture fallback\n",
+                        layout.screens[screen_index].id.c_str());
+        }
         candidate[screen_index] = std::move(duplicator);
     }
     captures = std::move(candidate);
