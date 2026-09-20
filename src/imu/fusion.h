@@ -23,7 +23,7 @@ Quat quat_normalize(const Quat& q);
 Quat quat_twist_about(const Quat& q, float axis_x, float axis_y, float axis_z);
 // Exact rotation by the given fraction of q's angle (stays a unit rotation for
 // any fraction, unlike a linear interpolation).
-Quat quat_scaled(const Quat& q, float fraction);
+
 // Rotation magnitude of a quaternion in degrees (0..180).
 float quat_angle_degs(const Quat& q);
 Euler quat_to_euler(const Quat& q);
