@@ -324,9 +324,13 @@ int main() {
     }
 
     // --- 7: breathing while still -------------------------------------------
-    std::printf("\n-- scenario 7: breathing sway 0.3 deg/s @ 0.25 Hz, hold still 30 s --\n");
+    std::printf("\n-- scenario 7: breathing sway 0.3 deg/s @ 0.25 Hz + 0.5 deg/s bias, still 30 s --\n");
     {
-        HeadSim sim = make_sim(0xC0FFEE07u);
+        // The sway alone can never push the envelope past its own 0.19 deg amplitude,
+        // so the check was vacuous. A residual bias is present too (as on a real worn
+        // head): if the periodic sway starves the stillness detection, the bias is
+        // never adapted and creeps into a large envelope, which the check must catch.
+        HeadSim sim = make_sim(0xC0FFEE07u, 0.5f);
         sim.sway = true;
         float lo = 1e9f;
         float hi = -1e9f;
@@ -408,13 +412,99 @@ int main() {
         // the post-recenter transient is expected to be a few degrees before the bias
         // adaptation converges - what matters is that it converges and does not
         // accumulate, which the settled check below and the pan cycles verify.
-        check(max_abs_yaw < 4.0f, "recentred pose never runs away", max_abs_yaw, 4.0f);
+        check(max_abs_yaw < 2.0f, "recentred pose never runs away", max_abs_yaw, 2.0f);
         // This harness random-walks its bias far faster than a real gyro drifts (the
         // steadier case in scenario 6 settles at ~0.017 deg/s), so the bound here is
         // deliberately loose: its job is to catch a runaway or a stuck adaptation,
         // not to model thermal drift.
         check(settled_drift < 0.5f, "recentred pose stops creeping once settled", settled_drift,
               0.5f);
+    }
+
+    // --- 10: moving wearer with residual bias -------------------------------
+    std::printf("\n-- scenario 10: 1.5 deg/s yaw bias + 0.5 s zero-net wiggle every 5 s, 10 min --\n");
+    {
+        HeadSim sim = make_sim(0xC0FFEE10u, 1.5f);  // bias at the documented band limit
+        // A wearer who is never still for the 8 s the escape path needs: every 5 s a
+        // 0.5 s zero-net wiggle (one full sine cycle, so the net yaw is zero) resets
+        // the stillness timer, so the pre-fix adaptation never opens and the 1.5 deg/s
+        // bias creeps the published yaw unchecked.
+        float prev = sim.yaw();
+        float unwrapped = 0.0f;
+        auto advance = [&](const Vec3& omega) {
+            sim.step(omega);
+            const float y = sim.yaw();
+            float d = y - prev;
+            if (d > 180.0f) {
+                d -= 360.0f;
+            }
+            if (d < -180.0f) {
+                d += 360.0f;
+            }
+            unwrapped += d;
+            prev = y;
+        };
+        const int wiggle_samples = static_cast<int>(std::lround(0.5f * kRateHz));
+        const int hold_samples = static_cast<int>(std::lround(4.5f * kRateHz));
+        std::printf("  cumulative yaw drift per minute (deg):");
+        for (int minute = 0; minute < 10; ++minute) {
+            for (int cycle = 0; cycle < 12; ++cycle) {  // 12 x 5 s = 60 s
+                for (int i = 0; i < wiggle_samples; ++i) {
+                    const float t = static_cast<float>(i) / kRateHz;
+                    advance(Vec3{0.0f, 0.0f, 30.0f * std::sin(2.0f * kPi * t / 0.5f)});
+                }
+                for (int i = 0; i < hold_samples; ++i) {
+                    advance(Vec3{});
+                }
+            }
+            std::printf(" %.1f", unwrapped);
+        }
+        std::printf("\n");
+        const float drift = std::fabs(unwrapped);
+        std::printf("  total unwrapped yaw drift after 10 min: %.1f deg (%.1f deg/min)\n", drift,
+                    drift / 10.0f);
+        print_bias(sim, "at end");
+        // The bound encodes a settled property, not an aspiration: a bias at the very
+        // top of the documented band produces a bounded SETTLING transient (the
+        // per-minute figures rise, then plateau and hold), never an unbounded creep.
+        // The pre-fix code locked adaptation out entirely here and rotated the
+        // workspace at the full 90 deg/min. The residual measured on the glasses in
+        // the field is ~0.065 deg/s, twenty times smaller than this worst case.
+        check(drift < 40.0f, "band-limit bias settles to a bounded offset, no runaway", drift, 40.0f);
+    }
+
+    // --- 11: sustained slow pan ---------------------------------------------
+    std::printf("\n-- scenario 11: sustained slow pan 1.0 deg/s for 20 s (20 deg), then 10 s hold --\n");
+    {
+        HeadSim sim = make_sim(0xC0FFEE11u);
+        // A constant 1 deg/s plateau (0.5 s cosine ramps): peak*(ramp+sustain) = 1*20
+        // = 20 deg commanded. A steady 1 deg/s yaw looks like a bias to a
+        // variation-only stillness test, so the adaptation folds the far end of the
+        // pan into the estimate instead of publishing it.
+        sim.move(1.0f, 0.5f, 19.5f, Vec3{0.0f, 0.0f, 1.0f});
+        const float y_stop = sim.yaw();
+        const float registered = y_stop / 20.0f * 100.0f;
+        std::printf("  registered yaw %.4f deg (%.1f%% of the commanded 20 deg)\n", y_stop, registered);
+        print_bias(sim, "after pan");
+        sim.hold(10.0f);
+        const float y_after = sim.yaw();
+        const float sink = std::fabs(y_after - y_stop);
+        std::printf("  after a 10 s hold: yaw %.4f deg (moved %.4f deg since the pan stopped)\n", y_after,
+                    sink);
+        // Known, physical limitation (see AGENTS.md): with the magnetometer disabled, a
+        // perfectly steady slow rotation and a yaw bias are the SAME measurement, so a
+        // 20 s unbroken 1.0 deg/s yaw cannot be distinguished from a 1.0 deg/s bias.
+        // Given that choice this estimator favours bias correction, because a permanent
+        // creep damages every session while a slow pan merely loses travel. What must
+        // hold regardless is asserted here: no runaway, and no permanent offset.
+        std::printf("  note: a steady 20 s rotation is indistinguishable from a bias without a\n");
+        std::printf("        magnetometer; the estimator bounds the damage instead of tracking it\n");
+        check(y_stop < 20.0f, "sustained slow pan is absorbed, never amplified", y_stop, 20.0f);
+        // The contract is about where the pose ENDS UP, not about the path: unwinding
+        // an absorbed rotation during the hold is expected (the estimate that absorbed
+        // it is released again), whereas a permanent displacement is the defect class
+        // the field bug produced. Assert the net offset, print the path for context.
+        check(std::fabs(y_after) < 1.0f, "the slow pan leaves no net offset", std::fabs(y_after), 1.0f);
     }
 
     std::printf("\npose_scenarios: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);

@@ -99,7 +99,59 @@ message must be reproducible from the test output.
 
 ---
 
-## 5. Test map and how to run
+## 5. Drift, bias and the yaw ambiguity (read before touching the estimator)
+
+The estimator has exactly **one** mechanism for steady error: the gyro-bias adaptation. Drift
+absorption is opt-in. The parameters are not arbitrary - each one was chosen against a measured
+failure, and the trade-offs below are **physical**, not implementation bugs. Do not "fix" them by
+loosening them; if you change one, re-measure all of the scenarios and update this table.
+
+| Parameter | Value | Why this value |
+|---|---|---|
+| `adapt_rate_cap_degs` | 1.5 | Must cover the whole documented bias band. At 0.5 a 1.5 deg/s bias failed the rate gate, and because a moving wearer never accumulates 8 s of unbroken stillness the escape never opened either: the workspace rotated at the full 90 deg/min with the estimate frozen. |
+| `bias_slew_degs_per_s` | 0.15 | Bounds how fast the estimate may move, so a *sustained* deliberate rotation cannot be folded in wholesale. Raising it to 0.5 immediately regressed the pan-and-return scenarios (0.09 -> -0.36 deg) and the 20-cycle accumulation (1.14 -> 4.02 deg). |
+| `motion_holdoff_s` | 1.0 | Long enough to skip the ramp/settle of a deliberate movement, short enough that correction resumes promptly. Raising it to 2.0 hurts every ordinary movement (pan-and-return -0.36, small moves -0.44, accumulation 4.02 deg). |
+| `bias_adapt_fast_tau_s` | 1.0 | Used while the raw rate is inside the band: converges a real bias within a few seconds. |
+| `bias_adapt_slow_tau_s` | 10 | Used by the escape path only. |
+| `drift_rate_cap_degs` | 0 | Absorption off: it was the source of the 3.87 deg/min workspace rotation. |
+
+**The ambiguity, stated plainly.** With the magnetometer disabled there is *no* absolute heading
+reference, so a steady 1.0 deg/s yaw rotation and a 1.0 deg/s yaw bias are the *same measurement*.
+`pose_scenarios` scenario 6 ("a steady 0.5 deg/s rate for 30 s is a bias - absorb it") and scenario 11
+("a steady 1.0 deg/s rate for 20 s is motion - keep it") are therefore contradictory by construction;
+no estimator can satisfy both. This project favours **bias correction**, because a permanent creep
+damages every session while a slow pan merely loses travel. Scenario 11 asserts the contract that
+must hold regardless: the pan is never amplified, and it leaves no net offset.
+
+**Measured envelopes (RelWithDebInfo, all eight suites green):**
+
+| Behaviour | Measured |
+|---|---|
+| Pan-and-return +/-120 deg | 100% registered, residual < 0.05 deg |
+| Slow pan (10 deg at 0.5 deg/s) | 96% registered |
+| Pan-and-return +/-30/60 deg | 0.09 / 0.04 deg residual |
+| 20 pan-and-settle cycles, 0.10 deg/s residual | 1.14 deg accumulated offset |
+| Band-limit bias (1.5 deg/s) with a moving wearer | 34.6 deg total settling, then plateaus (pre-fix: 90 deg/min, unbounded) |
+| Sustained 20 s / 1.0 deg/s rotation (ambiguous case) | 2.9 deg registered, 0.3 deg net offset (see above) |
+| Absorption enabled, 20 pan cycles | 2.66 deg offset (leak off: 3.12) - bounded by leak + clamp |
+
+**Lessons from this round, in the order they were learned:**
+1. A safety mechanism that is never *released* becomes a permanent error (bug 6).
+2. Removing one mechanism's authority exposes the next one's limits - the pan loss only became
+   visible (scenario 11) after absorption was disabled.
+3. Fixing a lock-out by widening a gate can silently trade it for over-absorption somewhere else;
+   the fix must be measured against *all* scenarios, not just the failing one.
+4. A new algorithm is not "better" just because it fixes the case it targeted: the episode-gated
+   scheme fixed scenario 11 and broke scenarios 6, 7 and the pan-and-settle accumulation, and was
+   reverted. Keep the older, measured behaviour unless the replacement wins everywhere.
+5. A plausible-looking regression test can encode a contradiction. Scenario 10 and scenario 11
+   are the same measurement with opposite labels - that is a fact about the sensor, and it belongs
+   in the output, not hidden behind a loosened limit.
+6. Test assertions must name the property that matters: "sink during the hold" flagged an absorbed
+   rotation unwinding (expected) instead of a permanent offset (the actual defect), so it was
+   re-expressed as the net offset.
+
+## 6. Test map and how to run
 
 Private build directory per agent (never share `build/`, and never use `--preset default` when other
 agents may be building — it uses the shared `build/`):
@@ -129,7 +181,7 @@ Every fix MUST come with a regression test that fails without it. Synthetic IMU 
 
 ---
 
-## 6. Traps that have already cost time
+## 7. Traps that have already cost time
 
 - **hidapi write return**: never compare to `length`; use `send_command_verified` when a command must
   actually be confirmed.
@@ -147,7 +199,18 @@ Every fix MUST come with a regression test that fails without it. Synthetic IMU 
 
 ---
 
-## 7. Definition of done for any change
+- **File locking on Desktop**: `LNK1168` (cannot open exe), `LNK1201` (program database) and
+  `C1083`/`C1041` (obj/pdb) errors here are a file scanner, not a code problem. `del` the exe and
+  pdb and relink, or configure a build directory outside the Desktop tree
+  (`-B C:/Users/aksha/AppData/Local/Temp/rayneo-build`), which has never failed.
+- **Windows PowerShell 5.1 quoting in patch scripts**: a double backslash inside a single-quoted
+  string is literal, so writing a C++ `\n` through `\\n` in a patch script produces a *literal*
+  backslash-n in the output (this defect shipped twice). Verify by reading the compiled string back
+  out of the test output.
+- **Never trust a redirected build**: `cmake --build ... > nul` hides `FAILED:` lines and you end up
+  testing stale binaries whose assertions no longer match the source. Always let the build print.
+
+## 8. Definition of done for any change
 
 1. Builds clean under `/W4 /permissive-` (no new warnings).
 2. All eight test suites pass, and the change's own regression test fails without the change.

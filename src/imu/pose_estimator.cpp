@@ -45,6 +45,7 @@ void PoseEstimator::configure(const Config& cfg) {
     still_count_ = 0;
     phase_samples_ = 0;
     bias_done_ = false;
+    time_s_ = 0.0f;
     have_tick_ = false;
     last_tick_ = 0;
     fast_ema_ = Vec3{};
@@ -164,6 +165,8 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
         }
         still_since_motion_s_ += dt;
     }
+    time_s_ += dt;
+
     const float raw_rate_magnitude = max_abs(fast_ema_);
     // Every gate is on the RAW rate: the corrected rate is a lag test (a slowly
     // ramping rotation keeps lagging the estimate by less than the cap), which is
@@ -225,16 +228,19 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
     }
 
     if (adapt_eligible) {
-        // The escape path corrects slowly: it exists so a stale estimate can never
-        // lock the estimator out, not to track motion.
-        const float tau = (slow_enough || !escape) ? cfg_.bias_adapt_tau_s : cfg_.bias_adapt_slow_tau_s;
+        // Escape corrects slowly (it only exists so a stale estimate can never lock
+        // the estimator out); a clearly bias-sized rate converges briskly.
+        const float tau = slow_enough ? cfg_.bias_adapt_fast_tau_s : cfg_.bias_adapt_slow_tau_s;
         const float k = dt / tau;
-        bias_degs_.x += (fast_ema_.x - bias_degs_.x) * k;
-        bias_degs_.y += (fast_ema_.y - bias_degs_.y) * k;
-        bias_degs_.z += (fast_ema_.z - bias_degs_.z) * k;
-        bias_degs_.x = std::max(-cfg_.bias_limit_degs, std::min(cfg_.bias_limit_degs, bias_degs_.x));
-        bias_degs_.y = std::max(-cfg_.bias_limit_degs, std::min(cfg_.bias_limit_degs, bias_degs_.y));
-        bias_degs_.z = std::max(-cfg_.bias_limit_degs, std::min(cfg_.bias_limit_degs, bias_degs_.z));
+        const float max_step = cfg_.bias_slew_degs_per_s * dt;
+        const float targets[3] = {fast_ema_.x, fast_ema_.y, fast_ema_.z};
+        float* values[3] = {&bias_degs_.x, &bias_degs_.y, &bias_degs_.z};
+        for (int axis = 0; axis < 3; ++axis) {
+            float step = (targets[axis] - *values[axis]) * k;
+            step = std::max(-max_step, std::min(max_step, step));
+            const float value = *values[axis] + step;
+            *values[axis] = std::max(-cfg_.bias_limit_degs, std::min(cfg_.bias_limit_degs, value));
+        }
     }
 
     if (!initialized_) {
@@ -272,20 +278,23 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
         }
         q_prev_live_ = live;
         have_prev_live_ = true;
+    }
 
-        if (adapt_eligible) {
-            if (cfg_.drift_leak_tau_s > 0.0f) {
-                float scale = 1.0f - dt / cfg_.drift_leak_tau_s;
-                if (scale < 0.0f) {
-                    scale = 0.0f;
-                }
-                drift_correction_ = quat_scaled(drift_correction_, scale);
+    // The correction must never become a permanent workspace rotation, so it bleeds
+    // back toward identity and is hard-clamped. This applies regardless of the
+    // freeze mode: it is a safety property of the correction itself.
+    if (adapt_eligible) {
+        if (cfg_.drift_leak_tau_s > 0.0f) {
+            float scale = 1.0f - dt / cfg_.drift_leak_tau_s;
+            if (scale < 0.0f) {
+                scale = 0.0f;
             }
-            const float correction_deg = quat_angle_degs(drift_correction_);
-            if (correction_deg > cfg_.drift_limit_degs) {
-                drift_correction_ =
-                    quat_scaled(drift_correction_, cfg_.drift_limit_degs / correction_deg);
-            }
+            drift_correction_ = quat_scaled(drift_correction_, scale);
+        }
+        const float correction_deg = quat_angle_degs(drift_correction_);
+        if (correction_deg > cfg_.drift_limit_degs) {
+            drift_correction_ =
+                quat_scaled(drift_correction_, cfg_.drift_limit_degs / correction_deg);
         }
     }
 

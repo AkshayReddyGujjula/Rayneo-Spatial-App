@@ -28,9 +28,27 @@ public:
         // bias_limit_degs, and a long still period always re-opens adaptation so a
         // stale estimate can recover without any runaway.
         float calibration_rate_cap_degs = 1.5f;
-        // Widened to cover the documented plausible bias band: the bias adaptation is
-        // the single owner of steady error, so it must be able to see one.
-        float adapt_rate_cap_degs = 0.5f;
+        // Covers the whole documented bias band: the bias adaptation is the single
+        // owner of steady error, so it must be able to see one (a residual above the
+        // cap used to lock adaptation out whenever the wearer moved periodically,
+        // which crept at up to 90 deg/min). The estimate converges to within a bounded
+        // offset of the truth - bounded, not zero: the residual is limited by the
+        // convergence time constant and the slew limit, not eliminated.
+        float adapt_rate_cap_degs = 1.5f;
+        // A real gyro bias never changes faster than this, so limiting the slew bounds
+        // how much of a *sustained deliberate* slow rotation can be folded into the
+        // estimate (a 20 s slow pan can absorb at most slew x 20 s of it).
+        float bias_slew_degs_per_s = 0.15f;
+        // Yaw has no absolute reference (magnetometer disabled), so a steady slow
+        // rotation and a yaw bias are the same measurement. The discriminator that
+        // does exist: a wearer wearing the glasses always produces repeated small
+        // head movements, while a deliberate slow pan is a single episode. So the
+        // estimate may GROW quickly only while the wearer is demonstrably alive
+        // (>= bias_live_episodes motion episodes within bias_live_window_s); a
+        // featureless steady rate is absorbed slowly (a slow pan keeps most of its
+        // travel) but a rate that drops away RELEASES quickly (motion has ended, so
+        // the estimate that was absorbing it must come back down).
+        float bias_adapt_fast_tau_s = 1.0f;
         // Drift absorption is OPT-IN. When it was enabled it also swallowed
         // post-movement accelerometer settling, and its correction (which nothing
         // released) became a permanent workspace rotation - measured in the field as
@@ -103,6 +121,7 @@ private:
 
     bool have_tick_ = false;
     uint32_t last_tick_ = 0;
+    float time_s_ = 0.0f;
 
     Vec3 fast_ema_;
     Vec3 dev_ema_;

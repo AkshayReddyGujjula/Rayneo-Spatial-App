@@ -59,9 +59,12 @@ Quat quat_scaled(const Quat& q, float fraction) {
     if (sin_half < 1e-6f) {
         return Quat{};
     }
-    const float angle = 2.0f * std::atan2(sin_half, n.w);
+    // q and -q describe the same rotation; normalise the hemisphere first,
+    // otherwise the angle comes out as 360 - theta and the result is wrong.
+    const float sign = n.w < 0.0f ? -1.0f : 1.0f;
+    const float angle = 2.0f * std::atan2(sin_half, std::fabs(n.w));
     const float scaled_half = 0.5f * angle * fraction;
-    const float scale = std::sin(scaled_half) / sin_half;
+    const float scale = sign * std::sin(scaled_half) / sin_half;
     return Quat{std::cos(scaled_half), n.x * scale, n.y * scale, n.z * scale};
 }
 
