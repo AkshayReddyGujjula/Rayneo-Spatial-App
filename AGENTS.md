@@ -48,12 +48,25 @@ calibration), `gt_imu_probe.exe` (protocol probe), plus the test binaries below.
    removes steady error. Drift absorption (subtracting a correction from the published pose) is
    **opt-in and disabled by default** (`drift_rate_cap_degs = 0`). Reason: a correction that nothing
    releases becomes a permanent workspace rotation (see bug 6). If it is ever re-enabled it must keep
-   the leak (`drift_leak_tau_s`) and the hard clamp (`drift_limit_degs`).
+   the leak (`drift_leak_tau_s`) and the hard clamp (`drift_limit_degs`). The published pose is
+   **always live**: every sample integrates the corrected gyro, and there is no freeze, deadband,
+   snap or retroactive quaternion fix anywhere in the estimator.
 5. **The bias is bounded.** `bias_limit_degs = 1.5` (the documented plausible bias band) is clamped
    after every adaptation and after calibration. Nothing in the estimator may be able to spin away.
-6. **Stale estimates must always be able to recover.** After `adapt_escape_s` without motion the
-   adaptation re-opens even if the rate gate would block it. Any change to the gates must preserve
-   that property (a stale estimate that locks adaptation out produces an unbounded creep).
+6. **Stale estimates must always be able to recover - and must not leave a reverse slide.** A
+   residual the routine update cannot explain (larger than `adapt_residual_cap_degs`) accumulates
+   rest time across rest windows; after `adapt_escape_s` of accumulated rest the slow escape may
+   follow it. When the escape opens it snapshots the pre-escape bias, and if the observed rate then
+   returns within `escape_return_tol_degs` of that snapshot for `escape_return_dwell_s`, the bias
+   rolls back to the snapshot in one step - an ambiguous slow turn therefore cannot produce a
+   post-stop reverse slide. Rollback confirmation accumulates only during dwell-qualified rest;
+   crossing the snapshot band while either the gyro or accelerometer reports motion must reset it.
+   While an escape excursion is armed the fast routine update must NOT be
+   allowed to undo it (that unwind is the slide this guard prevents); the excursion ends only via
+   the rollback or by the escape itself converging on the persistent rate. A rate that persists (the
+   residual never returns) is a genuine bias change and is kept. Keep both halves: a stale estimate
+   that locks adaptation out produces unbounded creep, while an escape that unwinds after the wearer
+   stops is the reverse slide this guard exists to prevent.
 7. **Config paths are discovered, not assumed.** `repo_root_from_executable()` walks parent
    directories looking for `config/layouts/default.json`; do not reintroduce fixed `../..` depths.
 8. **The app never renders onto a display it captures.** Parsec/VDD screens are excluded from the
@@ -68,13 +81,15 @@ calibration), `gt_imu_probe.exe` (protocol probe), plus the test binaries below.
 | 1 | "Monitors spinning around me while the crosshair stays centred" | The Z-up fused quaternion was fed to a Y-up renderer as if the frames matched, so head **yaw acted as a roll** | Exact quaternion basis transform in `camera.cpp`; `camera_selftest` |
 | 2 | World swung/tumbled when turning with a tilted head | Relative rotation built in the **body** frame instead of the earth frame | `q * conj(q_ref)`; `pose_selftest` tilted-recenter case |
 | 3 | "It spins even when I'm still" (slow creep) | The refinement gate used the *corrected* signal, so a large initial bias error kept it closed forever (up to 379 deg/min in simulation) | Variation-based stillness, rate caps, still-gated calibration, continuous adaptation |
-| 4 | Micro head movements felt unregistered, then jumped | A hard **freeze while still** discarded everything below its release threshold | Replaced with drift absorption (now opt-in, see 6) |
+| 4 | Micro head movements felt unregistered, then jumped | A hard **freeze while still** discarded everything below its release threshold | Freeze removed entirely: the pose path is always live and rest only gates *adaptation*. `pose_scenarios` scenario 12 publishes >=90% of 0.5/1.0/2.0 deg adjustments with no sample step > 0.05 deg |
 | 5 | Centre screen off-centre after panning out and back | The bias adaptation gated on the **raw** rate with a 5 deg/s cap, so the slow ramp/settle of a deliberate pan was absorbed into the bias | Raw-rate gates (calibration 1.5, adaptation 0.5 deg/s), post-motion hold-off, deviation gate on the absorption |
 | 6 | The whole workspace slowly rotated until the left screen was almost centred (~10 min) | The drift **correction** and the bias adaptation removed the same error; the correction (owning the integral) was never released, and it also swallowed post-pan accelerometer settling (3.87 deg/min measured in the field) | Single owner (bias); absorption off by default; leak (tau 20 s) + 2 deg clamp if re-enabled |
 | 7 | Gating bug: my "corrected-rate" gate was mathematically a *lag* test; a gently ramping rotation passed it, inflated the bias, then locked adaptation out (runaway to -117 deg) | Gate on RAW rate, hard bias clamp, escape valve |
 | 8 | Calibration tool aborted at stream-on although the glasses had accepted the command | hidapi on Windows returns `length + 1` for a successful write to this device; the code compared it to `length` | `write_report` returns the raw value; command flows use `send_command_verified` (waits for the `99 c8` ack) |
 | 9 | Calibration could not complete ("SMALL_EXCURSION", "HOLD_STILL") | 25 deg excursion gate + 5 deg/s motion detection + a motionless-window still requirement that a worn head cannot satisfy; failures also hid their own diagnostics | 12 deg excursion, 2.5 deg/s detection, quietest-1.5-s still window, diagnostics populated on failure, per-step retries |
 | 10 | Capture policy implemented nowhere, GDI fallback churning objects, transient errors killing the app, VDD rollback gaps | See `docs/PROTOCOL-NOTES.md`; fixed in commit `caeef11` |
+| 11 | Sub-degree head adjustments disappeared or arrived as a snap, and a slow steady turn left a visible reverse slide as soon as it stopped | The pose froze while "still"; the escape then released the absorbed rate with the fast tau once the raw rate dropped, unwinding the published turn | Always-live pose path; routine updates bounded by `adapt_residual_cap_degs`; escape snapshot + guarded rollback (`pose_scenarios` 11/12/13, `pose_selftest` contiguous-calibration and accel-blocked-rest cases) |
+| 12 | A moving rate crossing or an IMU packet gap could validate stale rest state | Rollback dwell did not require qualified rest; a >=50 ms sample gap preserved calibration/rest/absorption history | Rollback dwell is rest-gated and resets on motion; gaps invalidate the startup window, rest dwell, rollback dwell and prior live increment (`pose_scenarios` 14 and timestamp-gap selftest) |
 
 **Standing lesson:** the IMU path is where the subtle bugs live. Every gating change must be
 accompanied by a synthetic scenario that fails before and passes after, and every claim in a commit
@@ -88,8 +103,11 @@ message must be reproducible from the test output.
   (71 uT dominated by one axis) and feeding it caused a constant ~4.8 deg/s yaw spin; the official
   RayNeo runtime does not use it either. Consequence: with no absolute heading reference a *steady*
   slow yaw rotation is physically indistinguishable from a yaw bias. Every yaw gate is therefore a
-  trade-off; the current choice favours stability (slow steady pans may lose part of their travel).
-  `R` / Ctrl+Alt+R recenters.
+  trade-off; the current choice favours the wearer's pan: the escape is slow enough that a 20 s /
+  1.0 deg/s turn keeps >=80% of its travel, and its snapshot rollback removes the small absorbed
+  part when the turn stops (no reverse slide). A genuinely stale estimate therefore converges over
+  tens of seconds, not seconds. Startup tracking stays closed until one valid bias window is
+  available; `R` / Ctrl+Alt+R recenters after an unavoidable ambiguous ultra-slow turn.
 - **Bias band.** The estimator assumes |bias| <= 1.5 deg/s. A larger true bias cannot be corrected and
   would show as creep; better to recalibrate.
 - **Virtual displays need the signed Parsec VDD driver**, which is not installed by default. Without
@@ -102,38 +120,63 @@ message must be reproducible from the test output.
 ## 5. Drift, bias and the yaw ambiguity (read before touching the estimator)
 
 The estimator has exactly **one** mechanism for steady error: the gyro-bias adaptation. Drift
-absorption is opt-in. The parameters are not arbitrary - each one was chosen against a measured
-failure, and the trade-offs below are **physical**, not implementation bugs. Do not "fix" them by
-loosening them; if you change one, re-measure all of the scenarios and update this table.
+absorption is opt-in and the published pose is always live. The parameters are not arbitrary - each
+one was chosen against a measured failure, and the trade-offs below are **physical**, not
+implementation bugs. Do not "fix" them by loosening them; if you change one, re-measure all of the
+scenarios and update this table.
 
 | Parameter | Value | Why this value |
 |---|---|---|
-| `adapt_rate_cap_degs` | 1.5 | Must cover the whole documented bias band. At 0.5 a 1.5 deg/s bias failed the rate gate, and because a moving wearer never accumulates 8 s of unbroken stillness the escape never opened either: the workspace rotated at the full 90 deg/min with the estimate frozen. |
-| `bias_slew_degs_per_s` | 0.15 | Bounds how fast the estimate may move, so a *sustained* deliberate rotation cannot be folded in wholesale. Raising it to 0.5 immediately regressed the pan-and-return scenarios (0.09 -> -0.36 deg) and the 20-cycle accumulation (1.14 -> 4.02 deg). |
-| `motion_holdoff_s` | 1.0 | Long enough to skip the ramp/settle of a deliberate movement, short enough that correction resumes promptly. Raising it to 2.0 hurts every ordinary movement (pan-and-return -0.36, small moves -0.44, accumulation 4.02 deg). |
-| `bias_adapt_fast_tau_s` | 1.0 | Used while the raw rate is inside the band: converges a real bias within a few seconds. |
-| `bias_adapt_slow_tau_s` | 10 | Used by the escape path only. |
+| `warmup_s` | 4.0 | Live startup logs show the GT bias still settling after 2 s. Nothing reaches the rest detector or fusion during this discard period (a floor: `settle_samples` still applies). |
+| `calibration_window_s` / `bias_samples` | 1.0 s / 600 | One *contiguous* high-confidence rest window. At ~476 Hz the 600-sample floor is binding (~1.26 s). A window broken by motion is discarded outright: a contaminated startup bias used to gate out the very adaptation that could correct it. |
+| `calibration_timeout_s` | 10 | Diagnostic epoch only: on timeout the app keeps waiting and tracking stays closed. Publishing from a zero/fragmented bias caused visible startup settling, so invalid data is never accepted merely to start sooner. |
+| `rest_gyro_dev_degs` / `rest_accel_dev_mps2` | 0.5 / 0.5 | Enter gates for continuous rest. Deviation is the Euclidean vector magnitude, so a proper sensor-to-head rotation cannot change the classification. The accelerometer half stops a quiet gyro on a shaken package from counting as rest. |
+| `motion_dev_threshold_degs` / `motion_accel_dev_mps2` | 1.0 / 1.0 | Exit gates: crossing either resets the rest dwell and starts the motion hold-off. |
+| `still_hold_s` | 0.5 | Continuous dwell. Between the enter and exit gates the dwell neither advances nor resets, so a mild periodic tremor can still accumulate rest. |
+| `dev_ema_tau_s` | 0.5 | The raw deviation has to be smoothed: unfiltered it flickers on gyro noise and the dwell would never complete. |
+| `adapt_residual_cap_degs` | 0.35 | Routine adaptation may only chase a residual this close to the estimate. The tighter 0.2 value failed the breathing-plus-bias envelope; larger errors go through the guarded slow escape. A steady yaw inside this band remains physically ambiguous without an absolute heading reference. |
+| `bias_slew_degs_per_s` | 0.15 | Bounds how fast the estimate may move, so no update path can jump it. |
+| `motion_holdoff_s` | 1.0 | Long enough to skip the ramp/settle of a deliberate movement, short enough that correction resumes promptly. |
+| `bias_adapt_fast_tau_s` | 1.0 | Used by the routine residual update. |
+| `adapt_escape_s` | 8 | Accumulated rest (across separate rest windows) with an unexplained residual before the slow escape opens; a wearer who moves periodically can no longer lock a stale estimate out. |
+| `bias_adapt_slow_tau_s` | 40 | The escape must be slow enough that a 20 s / 1.0 deg/s ambiguous turn keeps >=80% of its travel (scenario 11). Cost: a genuinely stale runtime estimate converges over tens of seconds, not seconds. |
+| `escape_return_tol_degs` / `escape_return_dwell_s` | 0.2 / 0.2 | The rollback trigger: the observed rate must return to the pre-escape snapshot's band for a continuous, dwell-qualified rest interval. Motion resets confirmation. While the excursion is armed the routine update is blocked, so the estimate can only return to the snapshot through this one-step rollback, not through a tau-1 unwind. |
 | `drift_rate_cap_degs` | 0 | Absorption off: it was the source of the 3.87 deg/min workspace rotation. |
 
 **The ambiguity, stated plainly.** With the magnetometer disabled there is *no* absolute heading
 reference, so a steady 1.0 deg/s yaw rotation and a 1.0 deg/s yaw bias are the *same measurement*.
-`pose_scenarios` scenario 6 ("a steady 0.5 deg/s rate for 30 s is a bias - absorb it") and scenario 11
-("a steady 1.0 deg/s rate for 20 s is motion - keep it") are therefore contradictory by construction;
-no estimator can satisfy both. This project favours **bias correction**, because a permanent creep
-damages every session while a slow pan merely loses travel. Scenario 11 asserts the contract that
-must hold regardless: the pan is never amplified, and it leaves no net offset.
+`pose_scenarios` scenario 6 ("a steady 0.5 deg/s rate for 30 s is a bias") and scenario 11 ("a
+steady 1.0 deg/s rate for 20 s is motion") are therefore contradictory by construction; no estimator
+can satisfy both. This design favours the pan, because the escape is deliberately slow: scenario 11
+asserts that at least 80% of the 20 s turn is published, that post-stop reverse motion stays below
+0.25 deg (the snapshot rollback), and that the final offset stays bounded. Scenario 13 asserts the
+other half: a persistent +1.0 deg/s bias step is learned (not rolled back) and the pose stops
+creeping once it converges.
 
-**Measured envelopes (RelWithDebInfo, all eight suites green):**
+**Measured envelopes (RelWithDebInfo, 2026-09-21).** The assertion is the enforced contract; the
+measured value is printed by the current tests and must be refreshed whenever estimator constants
+change.
 
-| Behaviour | Measured |
-|---|---|
-| Pan-and-return +/-120 deg | 100% registered, residual < 0.05 deg |
-| Slow pan (10 deg at 0.5 deg/s) | 96% registered |
-| Pan-and-return +/-30/60 deg | 0.09 / 0.04 deg residual |
-| 20 pan-and-settle cycles, 0.10 deg/s residual | 1.14 deg accumulated offset |
-| Band-limit bias (1.5 deg/s) with a moving wearer | 34.6 deg total settling, then plateaus (pre-fix: 90 deg/min, unbounded) |
-| Sustained 20 s / 1.0 deg/s rotation (ambiguous case) | 2.9 deg registered, 0.3 deg net offset (see above) |
-| Absorption enabled, 20 pan cycles | 2.66 deg offset (leak off: 3.12) - bounded by leak + clamp |
+| Behaviour | Measured | Assertion |
+|---|---:|---:|
+| Always-live micro adjustments, 0.5/1.0/2.0 deg (scenario 12) | 98.8% / 99.5% / 99.7% outbound; max sample step 0.0216 deg | >= 90% outbound and return; step < 0.05 deg |
+| 1.0 deg/s for 20 s then hold (scenario 11) | 89.0% at stop; 0.125 deg reverse; 2.318 deg final offset; rollback fired | >= 80%; reverse < 0.25 deg; offset < 4 deg; rollback |
+| Genuine +1.0 deg/s bias step (scenario 13) | estimate 0.915 after 90 s; zero rollbacks; last-10-s drift 1.153 deg | > 0.7; zero rollbacks; drift < 3.0 deg |
+| Pan-and-return +/-60 deg (scenarios 1/2) | +0.061 / -0.160 deg final yaw | abs(final) < 0.3 deg |
+| Slow pan 10 deg at 2 deg/s (scenario 4) | 99.9% registered | >= 80% |
+| Fast pan 120 deg at 120 deg/s (scenario 5) | 100.0% registered | >= 95% |
+| Residual 0.5 deg/s bias, 30 s (scenario 6) | 0.028 deg published drift | < 0.5 deg |
+| Breathing + 0.5 deg/s bias, 30 s (scenario 7) | 0.232 deg half-envelope | < 0.4 deg |
+| Band-limit 1.5 deg/s bias, moving wearer (scenario 10) | 28.9 deg bounded final offset | < 40 deg (pre-fix: 90 deg/min, unbounded) |
+| 20 pan-and-settle cycles, 0.10 deg/s residual | 0.052 deg offset | < 2.0 deg |
+| Absorption enabled (opt-in), 20 pan cycles | 1.727 deg with leak; 2.049 deg without | < 3.5 / 5.0 deg |
+| Fragmented startup quiet (`pose_selftest`) | no completion, bias stays 0; one contiguous window completes and matches the truth |
+| Timeout with only fragments | tracking stays closed, `calibrated()` false, bias stays 0; a later contiguous window completes |
+| Accel shake 4 m/s^2 @ 2 Hz with a quiet gyro | rest blocked while shaking, returns after it stops |
+| Bias clamp | abs(bias) <= 1.5 deg/s at startup and after runtime adaptation |
+| Moving crossing of the escape snapshot band (scenario 14) | zero rollbacks; persistent estimate survives |
+| >=50 ms IMU gap during startup | pre-gap and post-gap samples never form one calibration window |
+| Diagonal 0.3/0.3/0.3 deg/s residual for 5 s | bias norm < 0.1 deg/s (vector gate, not per-axis gate) |
 
 **Lessons from this round, in the order they were learned:**
 1. A safety mechanism that is never *released* becomes a permanent error (bug 6).
@@ -150,6 +193,19 @@ must hold regardless: the pan is never amplified, and it leaves no net offset.
 6. Test assertions must name the property that matters: "sink during the hold" flagged an absorbed
    rotation unwinding (expected) instead of a permanent offset (the actual defect), so it was
    re-expressed as the net offset.
+7. A guard that reacts to the *return* of a signal, not just its presence, can tell an episodic
+   rotation from a persistent bias: snapshot the state before acting and roll back only after the
+   observed rate has returned to the snapshot's band for a confirmation dwell.
+8. A frozen pose hides sub-degree motion entirely. Always-live integration plus a rest detector that
+   gates *adaptation only* is strictly better for micro-adjustments (scenario 12).
+9. Calibration should discard data rather than use bad data: wait for one contiguous window even
+   across diagnostic timeouts. Publishing from zero or averaging fragments can bake visible startup
+   drift into the single bias owner.
+10. "Locally bounded" is a property of the update, not just of the clamp: only chasing residuals
+    close to the current estimate keeps a deliberate slow yaw out of the bias while still tracking
+    thermal drift.
+11. Rest evidence is invalid across missing samples or detected motion. Reset qualification and
+    rollback confirmation at those boundaries; never stitch apparently quiet fragments together.
 
 ## 6. Test map and how to run
 
@@ -168,8 +224,8 @@ Run inside the MSVC environment: `call "C:\Program Files (x86)\Microsoft Visual 
 | Suite | Covers |
 |---|---|
 | `camera_selftest` | Frame conversion, the sign triple, single-axis and combined orientation cases |
-| `pose_selftest` | Tilted-recenter coupling, contaminated calibration, reconfigure resets, swing/twist helpers, drift-absorption behaviour, 20-cycle pan-and-settle accumulation |
-| `pose_scenarios` | Nine synthetic worn-head scenarios through the real estimator: pan-and-return both ways, small moves, slow and fast pans, residual bias, breathing, diagonal, recenter |
+| `pose_selftest` | Tilted-recenter coupling, contiguous-vs-fragmented startup calibration and its timeout, accelerometer-blocked rest, bias clamp, reconfigure resets, swing/twist helpers, drift-absorption behaviour, 20-cycle pan-and-settle accumulation |
+| `pose_scenarios` | Fourteen synthetic worn-head scenarios through the real estimator: pan-and-return both ways, small moves, slow and fast pans, residual bias, breathing, diagonal, recenter, the 1.0 deg/s ambiguous turn and its rollback guard (11), always-live micro adjustments (12), persistent bias step (13), and motion-gated rollback crossing (14) |
 | `orientation_calibration_selftest` | Guided-calibration maths, rejection gates, file round-trip, version handling |
 | `protocol_selftest` | 66/99 framing and `99 65` decoding |
 | `layout_selftest` | Layout parsing/validation, geometry, capture-policy constraints |

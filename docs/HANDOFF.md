@@ -25,6 +25,13 @@ The camera now applies the exact quaternion basis transform rather than rebuildi
 motion through Euler angles. These changes pass offline regressions but still require the live
 worn-glasses acceptance test in §7.
 
+**Codex continuation, 2026-09-21:** the hard freeze-when-still path was removed after the user
+confirmed that it discarded sub-degree head adjustments. Pose integration is now always live;
+gyro bias is the sole steady-error owner. Startup uses a 4 s discard followed by one contiguous
+rest-qualified bias window, and runtime recovery uses gyro-plus-accelerometer rest detection with
+a guarded slow escape/rollback. All eight offline suites pass; this revision still needs the next
+worn-glasses acceptance run before it is packaged as the daily-use app.
+
 ---
 
 ## 1. The goal (user's words, condensed)
@@ -147,18 +154,20 @@ HID (475 Hz) -> gt_protocol decode -> PoseEstimator -> ImuSource (worker thread)
 
 * **Filter**: own Madgwick implementation (`fusion.cpp`); quaternion is **sensor → earth**, earth is
   right-handed with **Z up** (the filter's gravity reference is +Z).
-* **Axis mapping**: package → body uses `[x, -z, y]` (from RayNeo's legacy fusion docs) so that the
-  resting accelerometer reads ≈ +Z. **ASSUMED**, never verified for the GT (see §7 hypothesis 1).
+* **Axis mapping**: package → head comes only from the proper rotation measured by
+  `orientation_calibrate.exe` and loaded from `config/orientation.json`. Do not reintroduce the
+  legacy hard-coded `[x, -z, y]` assumption.
 * **Bias handling** (this is what killed the "creeps while still" complaint):
-  - settle 150 samples, then average **600 samples that pass a stillness test**, with a fallback
-    after 4000 samples.
-  - stillness is measured from **signal variation** (per-axis EMA deviation vs a fast EMA,
-    threshold 1.2 deg/s, hysteresis 2.0), never from the absolute value - otherwise a stale bias
-    looks like motion and the estimator can never correct itself (this was the old catch-22: a
-    simulated 6.3 deg/s error left the old gate closed forever → 379 deg/min spin).
-  - plus a **rate cap** (5 deg/s): a constant rotation looks "still" to a variation test, but a real
-    bias is never that large.
-  - after calibration, the bias keeps adapting toward the fast EMA (tau 3 s) whenever eligible.
+  - discard the first 4 s, then average one **contiguous** high-confidence rest window of at least
+    600 samples (~1.26 s at 476 Hz). Motion discards the whole candidate; diagnostic timeouts never
+    open tracking with an unqualified estimate.
+  - rest uses smoothed gyro deviation **and** accelerometer deviation, a 0.5 s dwell and a 1 s
+    post-motion hold-off. Rest gates bias adaptation only; it never gates pose integration.
+  - routine adaptation may chase only a <=0.35 deg/s residual. A larger residual must persist for
+    8 s of accumulated rest before the tau-40 s escape follows it. The estimate is always clamped
+    to +-1.5 deg/s.
+  - escape snapshots the prior bias. If the measured rate later returns to that snapshot band, it
+    rolls back so an ambiguous slow turn is not unwound after the head stops.
 * **Recenter** (`R` key): `q_ref = current`, and all published poses are relative to it.
 * **Relative rotation is EARTH-frame**: `q_rel = q * q_ref^-1`. The body-frame order
   (`q_ref^-1 * q`) mixed yaw into pitch/roll whenever the head was tilted at recenter
@@ -170,9 +179,9 @@ HID (475 Hz) -> gt_protocol decode -> PoseEstimator -> ImuSource (worker thread)
   directly; `camera_selftest` verifies the exact combined-orientation basis transform.
   **The signs are load-bearing**: flipping any one mirrors the world.
   (An earlier build exposed them as live I/K/L toggles - that was removed, correctly.)
-* **Freeze-when-still** (default ON): while the head is judged still, the published pose is frozen
-  (masks residual drift entirely); it releases as soon as real motion is detected.
-  `--no-freeze-still` shows the raw pose.
+* **Always-live pose**: freeze-when-still was removed because it suppressed micro-movements and
+  released them as jumps. `--freeze-still` and `--no-freeze-still` are obsolete compatibility
+  flags; both are accepted and ignored.
 * **Renderer**: D3D11 device, `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT`, 2 buffers,
   flip-discard, `SetMaximumFrameLatency(1)`, vsync `Present(1,0)`. Explicit depth-stencil states;
   the crosshair (head-locked) is drawn with depth disabled. Scene: grid (LINELIST) + 4 quads

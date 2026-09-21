@@ -51,7 +51,6 @@ struct Options {
     float fov = 46.0f;
     bool fov_explicit = false;
     bool no_imu = false;
-    bool freeze_still = false;
     double seconds = 0.0;
     std::string log_path;
     std::string calibration_path;
@@ -190,9 +189,10 @@ void print_usage() {
         "  --fov DEG     virtual horizontal field of view (default 46)\n"
         "  --seconds N   exit after N seconds (0 = run until ESC)\n"
         "  --no-imu      run without head tracking (fixed camera)\n"
-        "  --freeze-still  hard-freeze the view while still (default: absorb drift instead)\n"
-        "  --no-freeze-still  always follow the raw head pose\n"
-        "  --log FILE     append a diagnostic CSV (elapsed, gyro, bias, view pose, still)\n"
+        "  --freeze-still / --no-freeze-still  obsolete, accepted and ignored (the pose path\n"
+        "                is always live; the gyro bias owns steady error)\n"
+        "  --log FILE     append a diagnostic CSV (elapsed, gyro, bias, view pose, rest,\n"
+        "                adaptation state, corrected rate, escape rollbacks)\n"
         "  --calibration FILE  sensor-to-head calibration (default config/orientation.json)\n"
         "  --layout FILE  screen layout (default config/layouts/default.json)\n"
         "  --no-virtual-displays  render labelled test screens without Parsec VDD\n"
@@ -211,10 +211,9 @@ bool parse_args(int argc, char** argv, Options& opt) {
             opt.fov_explicit = true;
         } else if (std::strcmp(a, "--no-imu") == 0) {
             opt.no_imu = true;
-        } else if (std::strcmp(a, "--freeze-still") == 0) {
-            opt.freeze_still = true;
-        } else if (std::strcmp(a, "--no-freeze-still") == 0) {
-            opt.freeze_still = false;
+        } else if (std::strcmp(a, "--freeze-still") == 0 ||
+                   std::strcmp(a, "--no-freeze-still") == 0) {
+            std::printf("note: %s is obsolete and ignored; the pose path is always live\n", a);
         } else if (std::strcmp(a, "--seconds") == 0 && i + 1 < argc) {
             opt.seconds = std::atof(argv[++i]);
         } else if (std::strcmp(a, "--log") == 0 && i + 1 < argc) {
@@ -542,7 +541,6 @@ int main(int argc, char** argv) {
     if (!opt.no_imu) {
         imu.set_sensor_to_head(sensor_to_head);
         std::printf("loaded orientation calibration: %s\n", opt.calibration_path.c_str());
-        imu.set_freeze_when_still(opt.freeze_still);
         imu.start();
     }
 
@@ -558,7 +556,8 @@ int main(int argc, char** argv) {
         diagnostics.open(opt.log_path, std::ios::out | std::ios::app);
         if (diagnostics.is_open() && write_header) {
             diagnostics << "elapsed_s,tick_100us,gx_raw,gy_raw,gz_raw,bias_x,bias_y,bias_z,"
-                           "view_yaw_deg,view_pitch_deg,view_roll_deg,still\n";
+                           "view_yaw_deg,view_pitch_deg,view_roll_deg,still,"
+                           "rest,adapt_state,corrected_rate_degs,escape_rollbacks\n";
         }
     }
     int log_rows = 0;
@@ -809,9 +808,12 @@ int main(int argc, char** argv) {
             const gt::Vec3 g = imu.last_gyro_degs();
             const gt::Vec3 b = imu.gyro_bias_degs();
             char row[256];
-            std::snprintf(row, sizeof(row), "%.3f,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d\n",
-                          elapsed, imu.last_tick(), g.x, g.y, g.z, b.x, b.y, b.z, le.yaw_deg, le.pitch_deg,
-                          le.roll_deg, imu.still() ? 1 : 0);
+            std::snprintf(row, sizeof(row),
+                          "%.3f,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%.3f,%u\n",
+                          elapsed, imu.last_tick(), g.x, g.y, g.z, b.x, b.y, b.z, le.yaw_deg,
+                          le.pitch_deg, le.roll_deg, imu.still() ? 1 : 0, imu.rest() ? 1 : 0,
+                          imu.adapt_state(), imu.corrected_rate_degs(),
+                          static_cast<unsigned>(imu.escape_rollbacks()));
             diagnostics << row;
             if (++log_rows % 120 == 0) {
                 diagnostics.flush();
@@ -827,9 +829,11 @@ int main(int argc, char** argv) {
                 const gt::Vec3 bias = imu.gyro_bias_degs();
                 std::printf(
                     "[%.0fs] fps=%.1f  imu=%.1fHz (%s)  bias=(%+.2f,%+.2f,%+.2f) drift=%.2f  "
-                    "yaw=%7.2f pitch=%6.2f roll=%6.2f\n",
+                    "rest=%d adapt=%d corr=%.2f rollbacks=%u  yaw=%7.2f pitch=%6.2f roll=%6.2f\n",
                     elapsed, fps, imu.sample_rate_hz(), imu.status().c_str(), bias.x, bias.y, bias.z,
-                    imu.drift_correction_degs(), e.yaw_deg, e.pitch_deg, e.roll_deg);
+                    imu.drift_correction_degs(), imu.rest() ? 1 : 0, imu.adapt_state(),
+                    imu.corrected_rate_degs(), static_cast<unsigned>(imu.escape_rollbacks()),
+                    e.yaw_deg, e.pitch_deg, e.roll_deg);
             }
             frames_at_stat = frames;
             next_stat += 1.0;

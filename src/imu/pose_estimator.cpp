@@ -1,5 +1,6 @@
 #include "imu/pose_estimator.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace gt {
@@ -26,11 +27,17 @@ Quat accel_align_quat(const Vec3& accel) {
     return Quat{std::cos(theta * 0.5f), (a.y / axis_norm) * s, (-a.x / axis_norm) * s, 0.0f};
 }
 
-float max_abs(const Vec3& v) {
-    const float ax = std::fabs(v.x);
-    const float ay = std::fabs(v.y);
-    const float az = std::fabs(v.z);
-    return ax > ay ? (ax > az ? ax : az) : (ay > az ? ay : az);
+float vec_norm(const Vec3& v) {
+    return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
+Vec3 vec_sub(const Vec3& a, const Vec3& b) {
+    return Vec3{a.x - b.x, a.y - b.y, a.z - b.z};
+}
+
+Vec3 clamp_bias(const Vec3& v, float limit) {
+    return Vec3{std::max(-limit, std::min(limit, v.x)), std::max(-limit, std::min(limit, v.y)),
+                std::max(-limit, std::min(limit, v.z))};
 }
 
 }  // namespace
@@ -39,30 +46,46 @@ void PoseEstimator::configure(const Config& cfg) {
     cfg_ = cfg;
     filter_.reset();
     filter_.set_beta(cfg.beta);
-    bias_sum_still_ = Vec3{};
-    bias_degs_ = Vec3{};
-    settle_count_ = 0;
-    still_count_ = 0;
-    phase_samples_ = 0;
+
+    warmup_samples_ = 0;
+    calibration_phase_s_ = 0.0f;
+    calibration_run_s_ = 0.0f;
+    calibration_run_samples_ = 0;
+    calibration_sum_ = Vec3{};
     bias_done_ = false;
+    calibrated_ = false;
+
+    bias_degs_ = Vec3{};
     time_s_ = 0.0f;
     have_tick_ = false;
     last_tick_ = 0;
-    fast_ema_ = Vec3{};
-    dev_ema_ = Vec3{};
-    ema_ready_ = false;
+
+    gyro_lpf_ = Vec3{};
+    gyro_dev_ema_ = Vec3{};
+    accel_lpf_ = Vec3{};
+    accel_dev_ema_ = Vec3{};
+    rest_lpf_ready_ = false;
+    rest_now_ = false;
     still_ = false;
     still_time_ = 0.0f;
     stillness_degs_ = 0.0f;
+    accel_dev_mps2_ = 0.0f;
     holdoff_s_ = 0.0f;
-    still_since_motion_s_ = 0.0f;
+
+    adapt_state_ = BiasAdaptState::calibrating;
+    escape_dwell_s_ = 0.0f;
+    escape_open_ = false;
+    escape_armed_ = false;
+    escape_snapshot_ = Vec3{};
+    escape_return_dwell_s_ = 0.0f;
+    escape_rollbacks_ = 0;
+    corrected_rate_degs_ = 0.0f;
+
     q_ref_ = Quat{};
-    q_frozen_ = Quat{};
     drift_correction_ = Quat{};
     q_prev_live_ = Quat{};
     have_prev_live_ = false;
     have_ref_ = false;
-    frozen_ = false;
     initialized_ = false;
     fused_ = 0;
 }
@@ -85,19 +108,129 @@ Vec3 PoseEstimator::map_mag(const Vec3& v) const {
     return map_gyro(v);
 }
 
-bool PoseEstimator::add_sample(const ImuSample& sample) {
-    if (settle_count_ < cfg_.settle_samples) {
-        ++settle_count_;
-        return false;
+// Continuous, VQF-inspired rest detection. Both the gyro and the accelerometer
+// are low-passed; the deviations of the raw signals from those references are
+// themselves smoothed (the gyro here is noisy enough that an unfiltered
+// deviation would flicker). Rest requires BOTH deviations below the enter gates
+// continuously for the dwell; a motion excursion on EITHER signal resets the
+// dwell. In the hysteresis band between the gates the dwell neither advances
+// nor resets, so a mild periodic tremor can still accumulate toward rest while
+// a genuine excursion cannot.
+void PoseEstimator::update_rest_detector(const Vec3& raw, const Vec3& accel, float dt) {
+    if (!rest_lpf_ready_) {
+        gyro_lpf_ = raw;
+        accel_lpf_ = accel;
+        gyro_dev_ema_ = Vec3{};
+        accel_dev_ema_ = Vec3{};
+        stillness_degs_ = 0.0f;
+        accel_dev_mps2_ = 0.0f;
+        still_time_ = 0.0f;
+        rest_lpf_ready_ = true;
+        rest_now_ = true;
+        still_ = cfg_.still_hold_s <= 0.0f;
+        holdoff_s_ = 0.0f;
+        return;
     }
 
+    const float gyro_alpha = dt / (cfg_.fast_ema_tau_s + dt);
+    gyro_lpf_.x += (raw.x - gyro_lpf_.x) * gyro_alpha;
+    gyro_lpf_.y += (raw.y - gyro_lpf_.y) * gyro_alpha;
+    gyro_lpf_.z += (raw.z - gyro_lpf_.z) * gyro_alpha;
+    const Vec3 gyro_dev{std::fabs(raw.x - gyro_lpf_.x), std::fabs(raw.y - gyro_lpf_.y),
+                        std::fabs(raw.z - gyro_lpf_.z)};
+
+    const float accel_alpha = dt / (cfg_.accel_lpf_tau_s + dt);
+    accel_lpf_.x += (accel.x - accel_lpf_.x) * accel_alpha;
+    accel_lpf_.y += (accel.y - accel_lpf_.y) * accel_alpha;
+    accel_lpf_.z += (accel.z - accel_lpf_.z) * accel_alpha;
+    const Vec3 accel_dev{std::fabs(accel.x - accel_lpf_.x), std::fabs(accel.y - accel_lpf_.y),
+                         std::fabs(accel.z - accel_lpf_.z)};
+
+    const float dev_alpha = dt / (cfg_.dev_ema_tau_s + dt);
+    gyro_dev_ema_.x += (gyro_dev.x - gyro_dev_ema_.x) * dev_alpha;
+    gyro_dev_ema_.y += (gyro_dev.y - gyro_dev_ema_.y) * dev_alpha;
+    gyro_dev_ema_.z += (gyro_dev.z - gyro_dev_ema_.z) * dev_alpha;
+    accel_dev_ema_.x += (accel_dev.x - accel_dev_ema_.x) * dev_alpha;
+    accel_dev_ema_.y += (accel_dev.y - accel_dev_ema_.y) * dev_alpha;
+    accel_dev_ema_.z += (accel_dev.z - accel_dev_ema_.z) * dev_alpha;
+
+    // Euclidean magnitudes are invariant under the calibrated sensor-to-head
+    // rotation. A componentwise maximum would make the same physical diagonal
+    // motion look quieter merely because it was split across sensor axes.
+    stillness_degs_ = vec_norm(gyro_dev_ema_);
+    accel_dev_mps2_ = vec_norm(accel_dev_ema_);
+    const bool quiet = stillness_degs_ < cfg_.rest_gyro_dev_degs &&
+                       accel_dev_mps2_ < cfg_.rest_accel_dev_mps2;
+    const bool motion = stillness_degs_ > cfg_.motion_dev_threshold_degs ||
+                        accel_dev_mps2_ > cfg_.motion_accel_dev_mps2;
+    rest_now_ = quiet;
+    if (motion) {
+        still_time_ = 0.0f;
+        still_ = false;
+        holdoff_s_ = cfg_.motion_holdoff_s;
+    } else {
+        if (quiet) {
+            still_time_ += dt;
+            if (still_time_ >= cfg_.still_hold_s) {
+                still_ = true;
+            }
+        }
+        if (holdoff_s_ > 0.0f) {
+            holdoff_s_ = std::max(0.0f, holdoff_s_ - dt);
+        }
+    }
+}
+
+// Move the estimate toward `target` with the given first-order gain, bounded by
+// `max_step` and hard-clamped to the documented bias band. Every runtime update
+// goes through here, so no path can jump the estimate.
+void PoseEstimator::step_bias(const Vec3& target, float k, float max_step) {
+    const float targets[3] = {target.x, target.y, target.z};
+    float* values[3] = {&bias_degs_.x, &bias_degs_.y, &bias_degs_.z};
+    for (int axis = 0; axis < 3; ++axis) {
+        float step = (targets[axis] - *values[axis]) * k;
+        step = std::max(-max_step, std::min(max_step, step));
+        const float value = *values[axis] + step;
+        *values[axis] = std::max(-cfg_.bias_limit_degs, std::min(cfg_.bias_limit_degs, value));
+    }
+}
+
+void PoseEstimator::finish_calibration() {
+    const float n = static_cast<float>(calibration_run_samples_);
+    bias_degs_ = clamp_bias(
+        Vec3{calibration_sum_.x / n, calibration_sum_.y / n, calibration_sum_.z / n},
+        cfg_.bias_limit_degs);
+    calibrated_ = true;
+    bias_done_ = true;
+    calibration_run_s_ = 0.0f;
+    calibration_run_samples_ = 0;
+    calibration_sum_ = Vec3{};
+
+    // Restart the fusion from a clean, gravity-aligned state.
+    filter_.reset();
+    have_tick_ = false;
+    have_ref_ = false;
+    initialized_ = false;
+    have_prev_live_ = false;
+    drift_correction_ = Quat{};
+    fused_ = 0;
+
+    escape_dwell_s_ = 0.0f;
+    escape_open_ = false;
+    escape_armed_ = false;
+    escape_return_dwell_s_ = 0.0f;
+    adapt_state_ = BiasAdaptState::idle;
+}
+
+bool PoseEstimator::add_sample(const ImuSample& sample) {
     if (!std::isfinite(sample.gyro_degs.x) || !std::isfinite(sample.gyro_degs.y) ||
         !std::isfinite(sample.gyro_degs.z) || !std::isfinite(sample.accel_mps2.x) ||
-        !std::isfinite(sample.accel_mps2.y) || !std::isfinite(sample.accel_mps2.z)) {
+        !std::isfinite(sample.accel_mps2.y) || !std::isfinite(sample.accel_mps2.z) ||
+        (cfg_.mag_weight > 0.0f &&
+         (!std::isfinite(sample.mag_ut.x) || !std::isfinite(sample.mag_ut.y) ||
+          !std::isfinite(sample.mag_ut.z)))) {
         return false;
     }
-
-    const Vec3 raw = sample.gyro_degs;
 
     float dt = 1.0f / 476.0f;
     const uint32_t tick = sample.tick_100us;
@@ -109,150 +242,168 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
         } else if (dt_candidate >= 0.05f) {
             // Samples were lost: skip this one and restart the interval rather than
             // integrating it with a substituted dt (which silently halves motion).
+            // The missing interval may contain arbitrary motion, so it also breaks
+            // startup calibration, rest qualification, rollback confirmation and
+            // drift-absorption continuity.
             last_tick_ = tick;
+            calibration_run_s_ = 0.0f;
+            calibration_run_samples_ = 0;
+            calibration_sum_ = Vec3{};
+            gyro_lpf_ = sample.gyro_degs;
+            gyro_dev_ema_ = Vec3{};
+            accel_lpf_ = sample.accel_mps2;
+            accel_dev_ema_ = Vec3{};
+            rest_lpf_ready_ = true;
+            rest_now_ = false;
+            still_ = false;
+            still_time_ = 0.0f;
+            holdoff_s_ = cfg_.motion_holdoff_s;
+            escape_return_dwell_s_ = 0.0f;
             have_prev_live_ = false;
             return false;
         }
     }
     last_tick_ = tick;
     have_tick_ = true;
-
-    if (!ema_ready_) {
-        fast_ema_ = raw;
-        dev_ema_ = Vec3{};
-        ema_ready_ = true;
-    } else {
-        const float af = dt / (cfg_.fast_ema_tau_s + dt);
-        fast_ema_.x += (raw.x - fast_ema_.x) * af;
-        fast_ema_.y += (raw.y - fast_ema_.y) * af;
-        fast_ema_.z += (raw.z - fast_ema_.z) * af;
-        const Vec3 dev{std::fabs(raw.x - fast_ema_.x), std::fabs(raw.y - fast_ema_.y),
-                       std::fabs(raw.z - fast_ema_.z)};
-        const float ad = dt / (cfg_.dev_ema_tau_s + dt);
-        dev_ema_.x += (dev.x - dev_ema_.x) * ad;
-        dev_ema_.y += (dev.y - dev_ema_.y) * ad;
-        dev_ema_.z += (dev.z - dev_ema_.z) * ad;
-    }
-    // Stillness is measured from how much the signal *varies*, never from its
-    // absolute value - otherwise a stale bias estimate would look like motion
-    // and the estimator could never correct itself.
-    stillness_degs_ = max_abs(dev_ema_);
-    if (!still_) {
-        if (stillness_degs_ < cfg_.still_dev_threshold_degs) {
-            still_time_ += dt;
-            if (still_time_ >= cfg_.still_hold_s) {
-                still_ = true;
-            }
-        } else {
-            // Decay rather than reset, so a periodic tremor (which dips below the
-            // enter threshold twice per cycle) can still accumulate stillness.
-            still_time_ = std::max(0.0f, still_time_ - dt);
-        }
-    } else if (stillness_degs_ > cfg_.motion_dev_threshold_degs) {
-        still_ = false;
-        still_time_ = 0.0f;
-    }
-
-    // Drive the refractory counters from the deviation LEVEL, not from the still
-    // flag: the flag flickers on noise, and resetting on every flicker would keep
-    // adaptation permanently gated off after any motion.
-    if (stillness_degs_ > cfg_.motion_dev_threshold_degs) {
-        holdoff_s_ = cfg_.motion_holdoff_s;
-        still_since_motion_s_ = 0.0f;
-    } else {
-        if (holdoff_s_ > 0.0f) {
-            holdoff_s_ -= dt;
-        }
-        still_since_motion_s_ += dt;
-    }
+    ++warmup_samples_;
     time_s_ += dt;
 
-    const float raw_rate_magnitude = max_abs(fast_ema_);
-    // Every gate is on the RAW rate: the corrected rate is a lag test (a slowly
-    // ramping rotation keeps lagging the estimate by less than the cap), which is
-    // how deliberate motion used to end up inside the bias.
-    const bool slow_enough = raw_rate_magnitude < cfg_.adapt_rate_cap_degs;
-    const bool escape = still_since_motion_s_ >= cfg_.adapt_escape_s;
-    // The still flag is sticky, so it can stay true through the settling tail of a
-    // movement; the absorption additionally requires a low *current* deviation so it
-    // does not inflate on accelerometer settle (the bias adaptation keeps its own
-    // rate and hold-off gates, which are enough there).
-    const bool calib_eligible = still_ && raw_rate_magnitude < cfg_.calibration_rate_cap_degs;
-    const bool adapt_eligible = still_ && holdoff_s_ <= 0.0f && (slow_enough || escape);
-    const bool absorb_eligible =
-        adapt_eligible && stillness_degs_ < cfg_.still_dev_threshold_degs;
+    // Multi-second sensor warmup: the first samples after stream-on are not
+    // trustworthy, so they never reach the rest detector or the fusion (the
+    // legacy sample floor is still honoured for older callers).
+    if (time_s_ < cfg_.warmup_s || warmup_samples_ < cfg_.settle_samples) {
+        return false;
+    }
+
+    const Vec3 raw = sample.gyro_degs;
+    update_rest_detector(raw, sample.accel_mps2, dt);
 
     if (!bias_done_) {
-        if (calib_eligible) {
-            ++still_count_;
-            bias_sum_still_.x += raw.x;
-            bias_sum_still_.y += raw.y;
-            bias_sum_still_.z += raw.z;
+        adapt_state_ = BiasAdaptState::calibrating;
+        // One contiguous, high-confidence rest window. Any sample that is not
+        // high-confidence rest discards the run outright: quiet fragments
+        // separated by motion are never stitched together into a bias.
+        const bool window_sample =
+            still_ && rest_now_ && holdoff_s_ <= 0.0f &&
+            stillness_degs_ < cfg_.calibration_gyro_dev_degs &&
+            accel_dev_mps2_ < cfg_.calibration_accel_dev_mps2;
+        if (window_sample) {
+            calibration_run_s_ += dt;
+            calibration_run_samples_ += 1;
+            calibration_sum_.x += raw.x;
+            calibration_sum_.y += raw.y;
+            calibration_sum_.z += raw.z;
+        } else {
+            calibration_run_s_ = 0.0f;
+            calibration_run_samples_ = 0;
+            calibration_sum_ = Vec3{};
         }
-        ++phase_samples_;
-        const bool enough_still = still_count_ >= cfg_.bias_samples;
-        const bool timed_out = phase_samples_ >= cfg_.bias_timeout_samples;
-        if (enough_still || timed_out) {
-            // Never fall back to the mean of moving samples: a contaminated bias
-            // would gate out the very adaptation that could correct it, leaving a
-            // permanent creep. If no still samples arrived, keep the current
-            // estimate and let the continuous adaptation do the work.
-            if (still_count_ > 0) {
-                const float n = static_cast<float>(still_count_);
-                bias_degs_ = Vec3{bias_sum_still_.x / n, bias_sum_still_.y / n, bias_sum_still_.z / n};
-                bias_degs_.x = std::max(-cfg_.bias_limit_degs, std::min(cfg_.bias_limit_degs, bias_degs_.x));
-                bias_degs_.y = std::max(-cfg_.bias_limit_degs, std::min(cfg_.bias_limit_degs, bias_degs_.y));
-                bias_degs_.z = std::max(-cfg_.bias_limit_degs, std::min(cfg_.bias_limit_degs, bias_degs_.z));
-            }
-            bias_done_ = true;
-            filter_.reset();
-            have_tick_ = false;
-            have_ref_ = false;
-            initialized_ = false;
-            have_prev_live_ = false;
-            drift_correction_ = Quat{};
-            fused_ = 0;
+        calibration_phase_s_ += dt;
+        const bool window_complete = calibration_run_samples_ >= 1 &&
+                                     calibration_run_samples_ >= cfg_.bias_samples &&
+                                     calibration_run_s_ >= cfg_.calibration_window_s;
+        if (window_complete) {
+            finish_calibration();
+        } else if (cfg_.calibration_timeout_s > 0.0f &&
+                   calibration_phase_s_ >= cfg_.calibration_timeout_s) {
+            // Never open tracking with an uncalibrated zero bias. Starting from
+            // that fallback produced several degrees of visible settling in the
+            // live logs. Reset only the diagnostic epoch and continue waiting for
+            // one valid contiguous window.
+            calibration_phase_s_ = 0.0f;
         }
         return false;
     }
 
-    if (cfg_.freeze_when_still && still_) {
-        if (!frozen_) {
-            q_frozen_ = filter_.orientation();
-            frozen_ = true;
+    // --- runtime bias ownership ------------------------------------------------
+    const float raw_rate_magnitude = vec_norm(gyro_lpf_);
+    const Vec3 residual = vec_sub(gyro_lpf_, bias_degs_);
+    const bool rest_eligible = still_ && rest_now_ && holdoff_s_ <= 0.0f;
+    const bool routine_eligible = rest_eligible && vec_norm(residual) <= cfg_.adapt_residual_cap_degs;
+
+    // Guarded escape rollback, checked before any adaptation this sample. Once
+    // the escape has moved the estimate away from its snapshot, a stable return
+    // of the observed rate into the snapshot's band means the escape was
+    // chasing an episodic rotation (an ambiguous slow turn) rather than a
+    // persistent bias: restore the snapshot and leave no post-stop reverse
+    // slide. The confirmation dwell rejects a transient pass through the band.
+    if (escape_open_ && escape_armed_) {
+        if (!rest_eligible) {
+            // Crossing the snapshot band during a real head movement is not
+            // evidence that the residual disappeared. Confirmation must be one
+            // continuous, qualified rest interval.
+            escape_return_dwell_s_ = 0.0f;
+        } else if (vec_norm(vec_sub(gyro_lpf_, escape_snapshot_)) <=
+                   cfg_.escape_return_tol_degs) {
+            escape_return_dwell_s_ += dt;
+            if (escape_return_dwell_s_ >= cfg_.escape_return_dwell_s) {
+                bias_degs_ = escape_snapshot_;
+                ++escape_rollbacks_;
+                escape_open_ = false;
+                escape_armed_ = false;
+                escape_dwell_s_ = 0.0f;
+                escape_return_dwell_s_ = 0.0f;
+                adapt_state_ = BiasAdaptState::idle;
+            }
+        } else {
+            escape_return_dwell_s_ = 0.0f;
         }
-    } else if (frozen_) {
-        const Quat held_relative = quat_multiply(q_frozen_, quat_conjugate(q_ref_));
-        q_ref_ = quat_multiply(quat_conjugate(held_relative), filter_.orientation());
-        frozen_ = false;
     }
 
-    if (adapt_eligible) {
-        // Escape corrects slowly (it only exists so a stale estimate can never lock
-        // the estimator out); a clearly bias-sized rate converges briskly.
-        const float tau = slow_enough ? cfg_.bias_adapt_fast_tau_s : cfg_.bias_adapt_slow_tau_s;
-        const float k = dt / tau;
-        const float max_step = cfg_.bias_slew_degs_per_s * dt;
-        const float targets[3] = {fast_ema_.x, fast_ema_.y, fast_ema_.z};
-        float* values[3] = {&bias_degs_.x, &bias_degs_.y, &bias_degs_.z};
-        for (int axis = 0; axis < 3; ++axis) {
-            float step = (targets[axis] - *values[axis]) * k;
-            step = std::max(-max_step, std::min(max_step, step));
-            const float value = *values[axis] + step;
-            *values[axis] = std::max(-cfg_.bias_limit_degs, std::min(cfg_.bias_limit_degs, value));
+    // While an escape excursion is armed the fast routine update is NOT allowed
+    // to undo it: that unwind is exactly the post-stop reverse slide the guard
+    // exists to prevent. The excursion is resolved either by the guarded
+    // rollback below (the observed rate returns to the snapshot band) or by the
+    // slow escape itself (the rate persists, so the estimate catches up to it).
+    const bool escape_excursion_active = escape_open_ && escape_armed_;
+
+    adapt_state_ = BiasAdaptState::idle;
+    if (routine_eligible && !escape_excursion_active) {
+        // Locally bounded routine update: the target sits at most
+        // `adapt_residual_cap_degs` away from the current estimate, so a
+        // deliberate slow yaw is never learned wholesale.
+        adapt_state_ = BiasAdaptState::routine;
+        step_bias(gyro_lpf_, dt / cfg_.bias_adapt_fast_tau_s, cfg_.bias_slew_degs_per_s * dt);
+        escape_dwell_s_ = 0.0f;
+        escape_open_ = false;
+        escape_armed_ = false;
+        escape_return_dwell_s_ = 0.0f;
+    } else if (rest_eligible) {
+        // An unexplained residual while at rest accumulates recovery time. The
+        // accumulation survives separate rest windows, so a wearer who moves
+        // periodically cannot lock a stale estimate out, and it is cleared only
+        // once the estimate explains the data again.
+        escape_dwell_s_ += dt;
+        if (escape_dwell_s_ >= cfg_.adapt_escape_s) {
+            adapt_state_ = BiasAdaptState::escape;
+            if (!escape_open_) {
+                escape_open_ = true;
+                escape_snapshot_ = bias_degs_;
+                escape_armed_ = false;
+                escape_return_dwell_s_ = 0.0f;
+            }
+            if (vec_norm(vec_sub(bias_degs_, escape_snapshot_)) >
+                cfg_.escape_excursion_min_degs) {
+                escape_armed_ = true;
+            }
+            // Deliberately slow (the slow tau): a 20 s ambiguous turn may give
+            // up only a small part of its travel while the escape watches, and
+            // the rollback above releases that part when the turn stops.
+            step_bias(gyro_lpf_, dt / cfg_.bias_adapt_slow_tau_s, cfg_.bias_slew_degs_per_s * dt);
         }
     }
 
+    // --- pose path: always live -----------------------------------------------
     if (!initialized_) {
         filter_.set_orientation(accel_align_quat(map_accel(sample.accel_mps2)));
         initialized_ = true;
         q_ref_ = filter_.orientation();
         have_ref_ = true;
-        q_frozen_ = q_ref_;
         have_prev_live_ = false;
     }
 
     const Vec3 corrected{raw.x - bias_degs_.x, raw.y - bias_degs_.y, raw.z - bias_degs_.z};
+    corrected_rate_degs_ = vec_norm(corrected);
     Vec3 gyro = map_gyro(corrected);
     gyro.x *= kRadPerDeg;
     gyro.y *= kRadPerDeg;
@@ -260,30 +411,23 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
 
     filter_.update(gyro, map_accel(sample.accel_mps2), map_mag(sample.mag_ut), cfg_.mag_weight, dt);
 
-    if (!cfg_.freeze_when_still) {
-        // Drift absorption: while the head is still, each *slow* incremental
-        // rotation is absorbed fully into a correction subtracted from the
-        // published pose. Deliberate movements exceed the rate gate (and the
-        // hold-off keeps their settling tail out), so they pass through untouched,
-        // while residual creep - a long run of sub-threshold increments - is
-        // cancelled instead of accumulating into a visible offset.
-        const Quat live = filter_.orientation();
-        // The absorption gates on its own (still + hold-off + a slow raw rate):
-        // rates this small are below anything a deliberate pan produces, so this
-        // never needs the escape window that the bias adaptation uses.
-        if (have_prev_live_ && absorb_eligible && cfg_.drift_rate_cap_degs > 0.0f &&
-            raw_rate_magnitude < cfg_.drift_rate_cap_degs) {
-            const Quat increment = quat_multiply(live, quat_conjugate(q_prev_live_));
-            drift_correction_ = quat_multiply(increment, drift_correction_);
-        }
-        q_prev_live_ = live;
-        have_prev_live_ = true;
+    // Drift absorption is opt-in: while the head is still, each *slow*
+    // incremental rotation is absorbed fully into a correction subtracted from
+    // the published pose. The pose itself is never frozen or snapped - every
+    // sample integrates the corrected gyro.
+    const Quat live = filter_.orientation();
+    const bool absorb_eligible = still_ && rest_now_ && holdoff_s_ <= 0.0f;
+    if (have_prev_live_ && absorb_eligible && cfg_.drift_rate_cap_degs > 0.0f &&
+        raw_rate_magnitude < cfg_.drift_rate_cap_degs) {
+        const Quat increment = quat_multiply(live, quat_conjugate(q_prev_live_));
+        drift_correction_ = quat_multiply(increment, drift_correction_);
     }
+    q_prev_live_ = live;
+    have_prev_live_ = true;
 
-    // The correction must never become a permanent workspace rotation, so it bleeds
-    // back toward identity and is hard-clamped. This applies regardless of the
-    // freeze mode: it is a safety property of the correction itself.
-    if (adapt_eligible) {
+    // The correction must never become a permanent workspace rotation, so it
+    // bleeds back toward identity and is hard-clamped.
+    if (absorb_eligible) {
         if (cfg_.drift_leak_tau_s > 0.0f) {
             float scale = 1.0f - dt / cfg_.drift_leak_tau_s;
             if (scale < 0.0f) {
@@ -312,8 +456,6 @@ void PoseEstimator::recenter() {
     // leave a jump equal to the old correction.
     q_ref_ = filter_.orientation();
     have_ref_ = true;
-    q_frozen_ = q_ref_;
-    frozen_ = false;
     drift_correction_ = Quat{};
     have_prev_live_ = false;
 }
@@ -323,9 +465,6 @@ float PoseEstimator::drift_correction_degs() const {
 }
 
 Quat PoseEstimator::published_orientation() const {
-    if (frozen_) {
-        return q_frozen_;
-    }
     return quat_multiply(quat_conjugate(drift_correction_), filter_.orientation());
 }
 
