@@ -39,7 +39,12 @@ public:
         // wearer to hold still until one valid window exists.
         float calibration_timeout_s = 10.0f;
         // High-confidence gates, tighter than the rest-detector enter gates.
-        float calibration_gyro_dev_degs = 0.25f;
+        // The GT's measured stationary gyro deviation is ~0.75 deg/s median
+        // and 1.37 deg/s at p99 (Euclidean EMA magnitude). This threshold is
+        // deliberately above that hardware noise floor; the separate runtime
+        // residual cap remains much tighter so this does not create a motion
+        // dead zone after startup.
+        float calibration_gyro_dev_degs = 1.5f;
         float calibration_accel_dev_mps2 = 0.3f;
         // Legacy floors kept for existing callers/tools: the warmup must also
         // consume this many samples, and the calibration window must also hold
@@ -54,8 +59,8 @@ public:
         // signal crossing an exit gate resets the dwell. Because the
         // accelerometer takes part, a quiet gyro on a shaken package is still
         // motion (and so blocks both adaptation and the calibration window).
-        float rest_gyro_dev_degs = 0.5f;
-        float motion_dev_threshold_degs = 1.0f;
+        float rest_gyro_dev_degs = 1.5f;
+        float motion_dev_threshold_degs = 3.0f;
         float rest_accel_dev_mps2 = 0.5f;
         float motion_accel_dev_mps2 = 1.0f;
         float still_hold_s = 0.5f;

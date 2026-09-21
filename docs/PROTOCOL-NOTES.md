@@ -96,8 +96,8 @@ Streaming persists after the host process exits; send `66 02` to stop it (or re-
   trade-off and the rollback motion gate (scenarios 11, 13 and 14).
 - **Rest detection:** the pose path is always live - every sample integrates the
   corrected gyro, and rest only gates *adaptation* (no freeze, deadband or snap).
-  Rest needs the gyro deviation below 0.5 deg/s AND the accelerometer deviation below
-  0.5 m/s^2 continuously for 0.5 s; crossing either exit gate (1.0) resets the dwell
+  Rest needs the gyro deviation below 1.5 deg/s AND the accelerometer deviation below
+  0.5 m/s^2 continuously for 0.5 s; crossing either exit gate (3.0 gyro / 1.0 accel) resets the dwell
   and starts a 1 s motion hold-off. A shaken package with a quiet gyro is therefore
   motion. The console and `--log` CSV expose this as `rest` (instantaneous),
   `still` (dwell-qualified), `adapt_state` (0 idle / 1 routine / 2 escape /
@@ -106,6 +106,11 @@ Streaming persists after the host process exits; send `66 02` to stop it (or re-
   so rotating between the calibrated sensor and head frames cannot change a gate result.
   An IMU timestamp gap >=50 ms invalidates the current calibration window, rest dwell,
   rollback dwell and drift-absorption increment.
+  The 1.5 deg/s gyro noise gate is measured rather than synthetic: the guided
+  worn-glasses still capture produced 0.75 deg/s median and 1.37 deg/s p99 EMA
+  deviation. The runtime bias update remains separately limited to a 0.35 deg/s
+  residual, so accepting real sensor noise at the rest detector does not grant the
+  bias estimator authority over ordinary head motion.
 - **Magnetometer: off by default.** In the test environment the field reads |B| ~= 71 uT
   dominated by the package X axis (laptop/desk interference; Earth's field here should be
   ~50 uT with a strong inclination). Feeding it into the filter produced a constant

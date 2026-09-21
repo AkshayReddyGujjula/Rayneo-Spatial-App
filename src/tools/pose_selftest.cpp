@@ -232,6 +232,49 @@ int main() {
         check(drift_deg_per_s < 0.01f, "residual yaw rate small", drift_deg_per_s, 0.01f);
     }
 
+    std::printf("pose_selftest: startup calibration accepts the measured GT stationary noise floor\n");
+    {
+        PoseEstimator estimator;
+        estimator.configure(PoseEstimator::Config{});
+
+        // Deterministic high-frequency noise matching the worn-glasses still
+        // capture (roughly 0.60/0.87/0.57 deg/s RMS). The previous 0.25 deg/s
+        // calibration gate rejected this forever, leaving the renderer on its
+        // identity pose even though the IMU stream was healthy.
+        const Vec3 true_bias{-0.04f, 0.30f, 0.42f};
+        uint32_t tick = 900000;
+        bool published = false;
+        for (int i = 0; i < 3333; ++i) {  // 7 s: warmup + dwell + bias window + margin
+            const float t = static_cast<float>(i) / 476.0f;
+            ImuSample s;
+            const Vec3 gravity_pkg = package_from_body(Vec3{0.0f, 0.0f, 9.81f});
+            s.accel_mps2 = Vec3{
+                gravity_pkg.x + 0.05f * std::sin(2.0f * kPi * 31.0f * t),
+                gravity_pkg.y + 0.03f * std::sin(2.0f * kPi * 29.0f * t),
+                gravity_pkg.z + 0.03f * std::sin(2.0f * kPi * 23.0f * t),
+            };
+            s.gyro_degs = Vec3{
+                true_bias.x + 0.85f * std::sin(2.0f * kPi * 37.0f * t),
+                true_bias.y + 1.23f * std::sin(2.0f * kPi * 43.0f * t),
+                true_bias.z + 0.80f * std::sin(2.0f * kPi * 53.0f * t),
+            };
+            s.tick_100us = tick += 21;
+            published = estimator.add_sample(s) || published;
+        }
+        const Vec3 bias = estimator.gyro_bias_degs();
+        const float err = std::sqrt((bias.x - true_bias.x) * (bias.x - true_bias.x) +
+                                    (bias.y - true_bias.y) * (bias.y - true_bias.y) +
+                                    (bias.z - true_bias.z) * (bias.z - true_bias.z));
+        std::printf("  calibrated=%d published=%d bias=(%.3f,%.3f,%.3f) error=%.4f dev=%.3f\n",
+                    estimator.calibrated() ? 1 : 0, published ? 1 : 0, bias.x, bias.y, bias.z,
+                    err, estimator.stillness_degs());
+        check(estimator.calibrated(), "realistic stationary noise completes startup calibration",
+              estimator.calibrated() ? 1.0f : 0.0f, 1.0f);
+        check(published, "pose publication opens after noisy calibration", published ? 1.0f : 0.0f,
+              1.0f);
+        check(err < 0.10f, "noisy calibration still estimates the true bias", err, 0.10f);
+    }
+
     std::printf("pose_selftest: reconfigure must reset all estimator state\n");
     {
         PoseEstimator estimator;

@@ -38,6 +38,8 @@ public:
     float corrected_rate_degs() const {
         return corrected_rate_degs_.load(std::memory_order_relaxed);
     }
+    float stillness_degs() const { return stillness_degs_.load(std::memory_order_relaxed); }
+    float accel_dev_mps2() const { return accel_dev_mps2_.load(std::memory_order_relaxed); }
     uint32_t escape_rollbacks() const {
         return escape_rollbacks_.load(std::memory_order_relaxed);
     }
@@ -75,6 +77,8 @@ private:
     std::atomic<bool> rest_{false};
     std::atomic<int> adapt_state_{static_cast<int>(BiasAdaptState::calibrating)};
     std::atomic<float> corrected_rate_degs_{0.0f};
+    std::atomic<float> stillness_degs_{0.0f};
+    std::atomic<float> accel_dev_mps2_{0.0f};
     std::atomic<uint32_t> escape_rollbacks_{0};
     std::atomic<bool> calibrated_{false};
     std::atomic<float> drift_degs_{0.0f};

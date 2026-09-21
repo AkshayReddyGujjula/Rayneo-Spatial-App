@@ -90,6 +90,7 @@ calibration), `gt_imu_probe.exe` (protocol probe), plus the test binaries below.
 | 10 | Capture policy implemented nowhere, GDI fallback churning objects, transient errors killing the app, VDD rollback gaps | See `docs/PROTOCOL-NOTES.md`; fixed in commit `caeef11` |
 | 11 | Sub-degree head adjustments disappeared or arrived as a snap, and a slow steady turn left a visible reverse slide as soon as it stopped | The pose froze while "still"; the escape then released the absorbed rate with the fast tau once the raw rate dropped, unwinding the published turn | Always-live pose path; routine updates bounded by `adapt_residual_cap_degs`; escape snapshot + guarded rollback (`pose_scenarios` 11/12/13, `pose_selftest` contiguous-calibration and accel-blocked-rest cases) |
 | 12 | A moving rate crossing or an IMU packet gap could validate stale rest state | Rollback dwell did not require qualified rest; a >=50 ms sample gap preserved calibration/rest/absorption history | Rollback dwell is rest-gated and resets on motion; gaps invalidate the startup window, rest dwell, rollback dwell and prior live increment (`pose_scenarios` 14 and timestamp-gap selftest) |
+| 13 | Centre screen followed the head and all diagnostics stayed at zero | Startup never finished: the synthetic 0.15 deg/s noise model produced 0.25/0.5 deg/s calibration/rest gates, but measured GT stationary deviation is 0.75 deg/s median and 1.37 deg/s p99 | Hardware-measured 1.5 deg/s gyro deviation gates, separate unchanged 0.35 deg/s runtime residual cap, realistic-noise startup regression, and stream-rate/deviation telemetry during calibration |
 
 **Standing lesson:** the IMU path is where the subtle bugs live. Every gating change must be
 accompanied by a synthetic scenario that fails before and passes after, and every claim in a commit
@@ -130,8 +131,9 @@ scenarios and update this table.
 | `warmup_s` | 4.0 | Live startup logs show the GT bias still settling after 2 s. Nothing reaches the rest detector or fusion during this discard period (a floor: `settle_samples` still applies). |
 | `calibration_window_s` / `bias_samples` | 1.0 s / 600 | One *contiguous* high-confidence rest window. At ~476 Hz the 600-sample floor is binding (~1.26 s). A window broken by motion is discarded outright: a contaminated startup bias used to gate out the very adaptation that could correct it. |
 | `calibration_timeout_s` | 10 | Diagnostic epoch only: on timeout the app keeps waiting and tracking stays closed. Publishing from a zero/fragmented bias caused visible startup settling, so invalid data is never accepted merely to start sooner. |
-| `rest_gyro_dev_degs` / `rest_accel_dev_mps2` | 0.5 / 0.5 | Enter gates for continuous rest. Deviation is the Euclidean vector magnitude, so a proper sensor-to-head rotation cannot change the classification. The accelerometer half stops a quiet gyro on a shaken package from counting as rest. |
-| `motion_dev_threshold_degs` / `motion_accel_dev_mps2` | 1.0 / 1.0 | Exit gates: crossing either resets the rest dwell and starts the motion hold-off. |
+| `calibration_gyro_dev_degs` / `calibration_accel_dev_mps2` | 1.5 / 0.3 | The worn-glasses still capture measured 0.75 deg/s median and 1.37 deg/s p99 gyro deviation; the former 0.25 gate never completed on real hardware. Accelerometer deviation measured ~0.05 m/s2 p99, so its tighter gate remains valid. |
+| `rest_gyro_dev_degs` / `rest_accel_dev_mps2` | 1.5 / 0.5 | Enter gates for continuous rest. Deviation is the Euclidean vector magnitude, so a proper sensor-to-head rotation cannot change the classification. The accelerometer half stops a quiet gyro on a shaken package from counting as rest. These noise gates only qualify rest; the separate 0.35 deg/s residual cap controls runtime bias authority. |
+| `motion_dev_threshold_degs` / `motion_accel_dev_mps2` | 3.0 / 1.0 | Exit gates: crossing either resets the rest dwell and starts the motion hold-off. The gyro exit is above measured stationary peaks; real head-turn ramps and/or accelerometer motion still trip the refractory path. |
 | `still_hold_s` | 0.5 | Continuous dwell. Between the enter and exit gates the dwell neither advances nor resets, so a mild periodic tremor can still accumulate rest. |
 | `dev_ema_tau_s` | 0.5 | The raw deviation has to be smoothed: unfiltered it flickers on gyro noise and the dwell would never complete. |
 | `adapt_residual_cap_degs` | 0.35 | Routine adaptation may only chase a residual this close to the estimate. The tighter 0.2 value failed the breathing-plus-bias envelope; larger errors go through the guarded slow escape. A steady yaw inside this band remains physically ambiguous without an absolute heading reference. |
@@ -162,14 +164,15 @@ change.
 | Always-live micro adjustments, 0.5/1.0/2.0 deg (scenario 12) | 98.8% / 99.5% / 99.7% outbound; max sample step 0.0216 deg | >= 90% outbound and return; step < 0.05 deg |
 | 1.0 deg/s for 20 s then hold (scenario 11) | 89.0% at stop; 0.125 deg reverse; 2.318 deg final offset; rollback fired | >= 80%; reverse < 0.25 deg; offset < 4 deg; rollback |
 | Genuine +1.0 deg/s bias step (scenario 13) | estimate 0.915 after 90 s; zero rollbacks; last-10-s drift 1.153 deg | > 0.7; zero rollbacks; drift < 3.0 deg |
-| Pan-and-return +/-60 deg (scenarios 1/2) | +0.061 / -0.160 deg final yaw | abs(final) < 0.3 deg |
+| Pan-and-return +/-60 deg (scenarios 1/2) | +0.082 / -0.182 deg final yaw | abs(final) < 0.3 deg |
 | Slow pan 10 deg at 2 deg/s (scenario 4) | 99.9% registered | >= 80% |
 | Fast pan 120 deg at 120 deg/s (scenario 5) | 100.0% registered | >= 95% |
 | Residual 0.5 deg/s bias, 30 s (scenario 6) | 0.028 deg published drift | < 0.5 deg |
 | Breathing + 0.5 deg/s bias, 30 s (scenario 7) | 0.232 deg half-envelope | < 0.4 deg |
-| Band-limit 1.5 deg/s bias, moving wearer (scenario 10) | 28.9 deg bounded final offset | < 40 deg (pre-fix: 90 deg/min, unbounded) |
-| 20 pan-and-settle cycles, 0.10 deg/s residual | 0.052 deg offset | < 2.0 deg |
-| Absorption enabled (opt-in), 20 pan cycles | 1.727 deg with leak; 2.049 deg without | < 3.5 / 5.0 deg |
+| Band-limit 1.5 deg/s bias, moving wearer (scenario 10) | 29.2 deg bounded final offset | < 40 deg (pre-fix: 90 deg/min, unbounded) |
+| 20 pan-and-settle cycles, 0.10 deg/s residual | 0.331 deg offset | < 2.0 deg |
+| Absorption enabled (opt-in), 20 pan cycles | 0.927 deg with leak; 1.667 deg without | < 3.5 / 5.0 deg |
+| Measured GT stationary noise at startup | calibration completes; bias error 0.002 deg/s; pose publishes | calibration and publication must open within 7 s synthetic run |
 | Fragmented startup quiet (`pose_selftest`) | no completion, bias stays 0; one contiguous window completes and matches the truth |
 | Timeout with only fragments | tracking stays closed, `calibrated()` false, bias stays 0; a later contiguous window completes |
 | Accel shake 4 m/s^2 @ 2 Hz with a quiet gyro | rest blocked while shaking, returns after it stops |
