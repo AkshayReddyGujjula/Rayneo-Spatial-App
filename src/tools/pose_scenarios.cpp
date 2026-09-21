@@ -5,17 +5,21 @@
 // harness for the reported "the centre screen ends up slightly off to one side
 // after a pan out to the screen edge and back" bug.
 //
-// Root cause: the estimator's adaptation paths (the gyro-bias adaptation and the
-// drift-absorption path) fold part of a *deliberate* movement into their
-// corrections, because their gates look only at signal *variation* (a constant
-// rate looks perfectly still to a variation detector) plus a loose 5 deg/s rate
-// cap, with no hold-off after motion. A slow pan therefore looks exactly like a
-// residual gyro bias and is subtracted out.
-//
-// Build this file against the committed (pre-fix) estimator to see the reported
-// bug: scenarios 1, 2, 3, 4 and 9 fail. Against the fixed estimator (tightened
-// rate cap + motion hold-off) every scenario passes. Scenario 2 is the mirror of
-// scenario 1 and therefore fails alongside it.
+// The estimator under test:
+//   * the pose path is always live - every sample integrates the corrected
+//     gyro, with no freeze, deadband, snap or retroactive quaternion fix;
+//   * rest is detected continuously from the low-passed gyro AND accelerometer
+//     (VQF-inspired) with a continuous dwell that only motion resets;
+//   * startup calibration takes ONE contiguous high-confidence rest window
+//     after a multi-second warmup and never averages fragments;
+//   * the gyro bias remains the single owner of steady error, but routine
+//     updates may only chase a low residual around the current estimate, so a
+//     deliberate slow yaw is not learned;
+//   * a stale estimate is recovered by a deliberately slow escape whose
+//     pre-escape bias is snapshotted: if the observed rate returns close to the
+//     snapshot for a short confirmation window the estimate rolls back (an
+//     ambiguous slow turn therefore cannot leave a post-stop reverse slide),
+//     while a genuinely persistent rate is kept.
 //
 // Synthetic sensor model: we maintain the true attitude (body -> earth), then
 // emit exactly what a worn head would report at 476 Hz:
@@ -120,8 +124,15 @@ struct HeadSim {
     PoseEstimator est;
     Mat3 attitude{};             // body -> earth
     Vec3 bias_pkg_degs{};        // residual gyro bias, sensor-package frame
+    Vec3 linear_accel_body{};    // optional non-gravity acceleration for motion regressions
     uint32_t tick = 100000;
     float t = 0.0f;
+
+    // Published-yaw step tracker, used to assert the pose never freezes and
+    // then jumps on release (which used to lose sub-degree adjustments).
+    float last_yaw = 0.0f;
+    float max_yaw_step_degs = 0.0f;
+    bool have_last_yaw = false;
 
     // Breathing-like sway: adds a 0.3 deg/s rate sinusoid at 0.25 Hz to yaw.
     bool sway = false;
@@ -139,12 +150,21 @@ struct HeadSim {
         attitude.m[2][2] = 1.0f;
     }
 
+    void reset_step_tracker() {
+        last_yaw = 0.0f;
+        max_yaw_step_degs = 0.0f;
+        have_last_yaw = false;
+    }
+
     void step(const Vec3& omega_earth_degs) {
         Vec3 omega = omega_earth_degs;
         if (sway) {
             omega.z += sway_amp_degs * std::sin(2.0f * kPi * sway_hz * t);
         }
-        const Vec3 accel_body = earth_to_body(attitude, Vec3{0.0f, 0.0f, 9.81f});
+        Vec3 accel_body = earth_to_body(attitude, Vec3{0.0f, 0.0f, 9.81f});
+        accel_body.x += linear_accel_body.x;
+        accel_body.y += linear_accel_body.y;
+        accel_body.z += linear_accel_body.z;
         const Vec3 gyro_body = earth_to_body(attitude, omega);
 
         bias_pkg_degs.x += bias_walk_degs * unit(rng);
@@ -162,6 +182,20 @@ struct HeadSim {
         s.mag_ut = Vec3{};
         s.tick_100us = tick += 21;
         est.add_sample(s);
+
+        const float y = est.euler().yaw_deg;
+        if (have_last_yaw) {
+            float delta = y - last_yaw;
+            if (delta > 180.0f) {
+                delta -= 360.0f;
+            }
+            if (delta < -180.0f) {
+                delta += 360.0f;
+            }
+            max_yaw_step_degs = std::max(max_yaw_step_degs, std::fabs(delta));
+        }
+        last_yaw = y;
+        have_last_yaw = true;
 
         const Mat3 rx = rotation_about(1.0f, 0.0f, 0.0f, omega.x * kDegToRad * kDt);
         const Mat3 ry = rotation_about(0.0f, 1.0f, 0.0f, omega.y * kDegToRad * kDt);
@@ -208,12 +242,21 @@ struct HeadSim {
     float roll() const { return est.euler().roll_deg; }
 };
 
-constexpr float kWarmupS = 4.0f;  // settle + bias calibration + margin
+constexpr float kWarmupS = 7.0f;  // warmup + rest dwell + contiguous calibration window + margin
 
 HeadSim make_sim(uint32_t seed, float initial_bias_y_degs = 0.0f) {
     HeadSim sim(seed);
     sim.bias_pkg_degs.y = initial_bias_y_degs;  // residual bias present from power-on
     sim.est.configure(PoseEstimator::Config{});
+    sim.hold(kWarmupS);
+    return sim;
+}
+
+HeadSim make_sim_with(const PoseEstimator::Config& cfg, uint32_t seed,
+                      float initial_bias_y_degs = 0.0f) {
+    HeadSim sim(seed);
+    sim.bias_pkg_degs.y = initial_bias_y_degs;
+    sim.est.configure(cfg);
     sim.hold(kWarmupS);
     return sim;
 }
@@ -478,33 +521,152 @@ int main() {
     {
         HeadSim sim = make_sim(0xC0FFEE11u);
         // A constant 1 deg/s plateau (0.5 s cosine ramps): peak*(ramp+sustain) = 1*20
-        // = 20 deg commanded. A steady 1 deg/s yaw looks like a bias to a
-        // variation-only stillness test, so the adaptation folds the far end of the
-        // pan into the estimate instead of publishing it.
+        // = 20 deg commanded. A steady 1 deg/s yaw looks like rest to a
+        // variation-only detector (and, without a magnetometer, like a yaw bias), so
+        // the slow escape will start watching it. What must NOT happen is a
+        // post-stop reverse slide: the pose must keep the pan, not unwind it.
+        //
+        // The harness's deliberately aggressive bias random walk (5e-4 per sample,
+        // several times the field residual) integrates to ~0.2 deg over the 10 s hold
+        // on its own, which would swamp the 0.25 deg reverse bound; it is disabled
+        // here so the measurement isolates the rollback. Scenarios 6, 10 and 13 keep
+        // the walking bias.
+        sim.bias_walk_degs = 0.0f;
         sim.move(1.0f, 0.5f, 19.5f, Vec3{0.0f, 0.0f, 1.0f});
         const float y_stop = sim.yaw();
         const float registered = y_stop / 20.0f * 100.0f;
-        std::printf("  registered yaw %.4f deg (%.1f%% of the commanded 20 deg)\n", y_stop, registered);
+        std::printf("  registered yaw %.4f deg (%.1f%% of the commanded 20 deg), escape rollbacks %u\n",
+                    y_stop, registered, static_cast<unsigned>(sim.est.escape_rollbacks()));
         print_bias(sim, "after pan");
-        sim.hold(10.0f);
+        // Track the worst reverse motion during the hold: the old code unwound the
+        // absorbed rotation at the absorbed rate, which the wearer saw as the view
+        // sliding back after the turn stopped.
+        float max_reverse = 0.0f;
+        const int hold_samples = static_cast<int>(std::lround(10.0f * kRateHz));
+        for (int i = 0; i < hold_samples; ++i) {
+            sim.step(Vec3{});
+            max_reverse = std::max(max_reverse, y_stop - sim.yaw());
+        }
         const float y_after = sim.yaw();
-        const float sink = std::fabs(y_after - y_stop);
-        std::printf("  after a 10 s hold: yaw %.4f deg (moved %.4f deg since the pan stopped)\n", y_after,
-                    sink);
-        // Known, physical limitation (see AGENTS.md): with the magnetometer disabled, a
-        // perfectly steady slow rotation and a yaw bias are the SAME measurement, so a
-        // 20 s unbroken 1.0 deg/s yaw cannot be distinguished from a 1.0 deg/s bias.
-        // Given that choice this estimator favours bias correction, because a permanent
-        // creep damages every session while a slow pan merely loses travel. What must
-        // hold regardless is asserted here: no runaway, and no permanent offset.
-        std::printf("  note: a steady 20 s rotation is indistinguishable from a bias without a\n");
-        std::printf("        magnetometer; the estimator bounds the damage instead of tracking it\n");
-        check(y_stop < 20.0f, "sustained slow pan is absorbed, never amplified", y_stop, 20.0f);
-        // The contract is about where the pose ENDS UP, not about the path: unwinding
-        // an absorbed rotation during the hold is expected (the estimate that absorbed
-        // it is released again), whereas a permanent displacement is the defect class
-        // the field bug produced. Assert the net offset, print the path for context.
-        check(std::fabs(y_after) < 1.0f, "the slow pan leaves no net offset", std::fabs(y_after), 1.0f);
+        const float final_offset = std::fabs(y_after - 20.0f);
+        std::printf("  after a 10 s hold: yaw %.4f deg, max reverse %.4f deg, final offset %.4f deg\n",
+                    y_after, max_reverse, final_offset);
+        // Known, physical limitation (see AGENTS.md): with the magnetometer disabled
+        // a perfectly steady slow rotation and a yaw bias are the SAME measurement.
+        // This design favours keeping the pan: the escape is slow enough that at
+        // least 80% of a 20 s turn registers, and its rollback guard releases the
+        // small part it did absorb once the turn stops, so the pan is never unwound.
+        check(y_stop >= 16.0f, "at least 80% of the slow pan registers", y_stop, 16.0f);
+        check(max_reverse < 0.25f, "no post-stop reverse slide", max_reverse, 0.25f);
+        check(y_after >= 16.0f, "the registered pan is not unwound by the hold", y_after, 16.0f);
+        check(final_offset < 4.0f, "the pan's final offset stays bounded", final_offset, 4.0f);
+        check(sim.est.escape_rollbacks() >= 1,
+              "the guarded escape rolled the ambiguous turn back to its snapshot",
+              static_cast<float>(sim.est.escape_rollbacks()), 1.0f);
+    }
+
+    // --- 12: sub-degree adjustments (legacy freeze mode) ---------------------
+    std::printf("\n-- scenario 12: 0.5/1.0/2.0 deg adjustments with the legacy freeze flag set --\n");
+    {
+        // The old freeze mode held the published pose while still and recomputed
+        // the recentre reference on release, so a 0.5-2.0 deg adjustment either
+        // disappeared or arrived as a jump. The flag is now a no-op and every
+        // adjustment must be published as it happens.
+        const float angles[3] = {0.5f, 1.0f, 2.0f};
+        for (float angle : angles) {
+            PoseEstimator::Config cfg;
+            cfg.freeze_when_still = true;  // legacy flag: previously froze the pose
+            HeadSim sim = make_sim_with(cfg, 0xC0FFEE12u);
+            // The walk is disabled here too: this case measures the sub-degree
+            // bookkeeping, not the harness's bias drift (scenarios 6/10/13 keep it).
+            sim.bias_walk_degs = 0.0f;
+            sim.reset_step_tracker();
+            const float y0 = sim.yaw();
+            sim.move(angle / 0.2f, 0.2f, 0.0f, Vec3{0.0f, 0.0f, 1.0f});
+            const float outbound = sim.yaw() - y0;
+            sim.hold(1.5f);
+            const float held = sim.yaw() - y0;
+            sim.move(-angle / 0.2f, 0.2f, 0.0f, Vec3{0.0f, 0.0f, 1.0f});
+            sim.hold(1.0f);
+            const float returned = held - (sim.yaw() - y0);
+            const float end_offset = sim.yaw() - y0;
+            std::printf("  %+.1f deg: out %.4f, return %.4f, end %.4f, max sample step %.4f deg\n",
+                        angle, outbound, returned, end_offset, sim.max_yaw_step_degs);
+            char label[128];
+            std::snprintf(label, sizeof(label), "%+.1f deg outbound registers (>=90%%)", angle);
+            check(outbound >= 0.9f * angle, label, outbound, 0.9f * angle);
+            std::snprintf(label, sizeof(label), "%+.1f deg return registers (>=90%%)", angle);
+            check(returned >= 0.9f * angle, label, returned, 0.9f * angle);
+            std::snprintf(label, sizeof(label), "%+.1f deg ends where it started", angle);
+            check(std::fabs(end_offset) < 0.15f * angle + 0.05f, label, end_offset,
+                  0.15f * angle + 0.05f);
+            check(sim.max_yaw_step_degs < 0.05f, "no freeze-release jump in the published pose",
+                  sim.max_yaw_step_degs, 0.05f);
+        }
+    }
+
+    // --- 13: a genuine persistent bias change is kept ------------------------
+    std::printf("\n-- scenario 13: a genuine +1.0 deg/s bias step persists (no rollback) --\n");
+    {
+        HeadSim sim = make_sim(0xC0FFEE13u);
+        print_bias(sim, "after warmup");
+        // The harness's walking bias would add ~0.1 deg/s of un-modelled drift on
+        // top of the step and blur the convergence check; scenarios 6 and 10 keep it
+        // (this case is about the step being learned rather than rolled back).
+        sim.bias_walk_degs = 0.0f;
+        sim.bias_pkg_degs.y += 1.0f;  // thermal-style step: persists from here on
+        sim.hold(90.0f);
+        const float y_at_90 = sim.yaw();
+        sim.hold(10.0f);
+        const float settled_drift = std::fabs(sim.yaw() - y_at_90);
+        const Vec3 bias = sim.est.gyro_bias_degs();
+        std::printf("  after 90 s: bias=(%.4f,%.4f,%.4f) rollbacks=%u, drift over the last 10 s %.4f deg\n",
+                    bias.x, bias.y, bias.z, static_cast<unsigned>(sim.est.escape_rollbacks()),
+                    settled_drift);
+        print_bias(sim, "at end");
+        // The escape is deliberately slow so that ambiguous slow turns keep their
+        // travel, so it needs tens of seconds to absorb a persistent change - but
+        // the estimate must move most of the way (a rollback would have snapped it
+        // back to zero) and the pose must have stopped creeping.
+        check(bias.y > 0.7f, "a persistent bias change is learned, not rolled back", bias.y, 0.7f);
+        check(sim.est.escape_rollbacks() == 0, "no rollback for a persistent bias change",
+              static_cast<float>(sim.est.escape_rollbacks()), 0.0f);
+        check(settled_drift < 3.0f, "the pose stops creeping once the escape converges", settled_drift,
+              3.0f);
+    }
+
+    // --- 14: moving through the snapshot band cannot trigger rollback --------
+    std::printf("\n-- scenario 14: a moving rate crossing cannot confirm escape rollback --\n");
+    {
+        HeadSim sim = make_sim(0xC0FFEE14u);
+        sim.bias_walk_degs = 0.0f;
+        sim.white = std::normal_distribution<float>{0.0f, 0.0f};
+        sim.bias_pkg_degs.y += 1.0f;
+        sim.hold(20.0f);  // open and arm the slow escape on a persistent bias
+        const uint32_t rollbacks_before = sim.est.escape_rollbacks();
+        const Vec3 bias_before = sim.est.gyro_bias_degs();
+
+        // Counter-rotate at -1 deg/s for 0.8 s while the package also has a
+        // translation/settling acceleration. The physical turn cancels the +1
+        // deg/s sensor bias and therefore crosses the old snapshot's raw-rate
+        // band for longer than the 0.2 s rollback dwell, but the independent
+        // accelerometer channel proves this interval is motion, not rest.
+        for (int i = 0; i < 381; ++i) {
+            sim.linear_accel_body.x =
+                8.0f * std::sin(2.0f * kPi * 4.0f * static_cast<float>(i) / kRateHz);
+            sim.step(Vec3{0.0f, 0.0f, -1.0f});
+        }
+        sim.linear_accel_body = Vec3{};
+        const uint32_t rollbacks_after = sim.est.escape_rollbacks();
+        const Vec3 bias_after = sim.est.gyro_bias_degs();
+        std::printf("  bias before crossing %.4f, after %.4f; rollbacks %u -> %u\n", bias_before.y,
+                    bias_after.y, static_cast<unsigned>(rollbacks_before),
+                    static_cast<unsigned>(rollbacks_after));
+        check(rollbacks_after == rollbacks_before,
+              "movement through the snapshot band does not confirm a rollback",
+              static_cast<float>(rollbacks_after - rollbacks_before), 0.0f);
+        check(bias_after.y > 0.1f, "persistent-bias estimate survives the moving crossing",
+              bias_after.y, 0.1f);
     }
 
     std::printf("\npose_scenarios: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);

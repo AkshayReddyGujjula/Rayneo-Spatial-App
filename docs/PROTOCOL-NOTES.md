@@ -62,42 +62,72 @@ Streaming persists after the host process exits; send `66 02` to stop it (or re-
 - At rest: |accel| ~= 9.84 m/s², gyro bias within +-1.5 deg/s, |mag| ~= 71 µT, die temp ~= 39.4 °C.
 - Gyro reports in deg/s (a resting value of ~1.4 would be implausible in rad/s).
 - No factory gyro-bias reply on this firmware; use runtime bias estimation instead.
-- Sensor-to-body axis mapping is not yet verified; the official legacy path maps package
-  vectors as `[x, -z, y]` and the direction will be confirmed empirically at M3.
+- Sensor-to-head axes are supplied by the proper rotation measured by
+  `orientation_calibrate.exe` and stored in `config/orientation.json`; runtime fusion has no
+  hard-coded legacy axis mapping.
 
 ## Open questions
 
 - Whether `66 3c` / `66 3e` respond in the composite (interface 5) configuration.
 - Whether magnetometer samples are fresh every report or cached.
-- Axis mapping and sign conventions for the head pose (signs to be pinned down visually at M3).
+- Long-session thermal bias behaviour on the final worn-glasses build.
 
 ## Fusion notes (live-verified)
 
 - **Yaw has no absolute reference.** With the magnetometer off, a very slow steady
   yaw rotation and a yaw bias are physically indistinguishable, so the estimator is
-  deliberately conservative: the startup calibration captures the bulk of the bias
-  (a real bias stays under about 1.5 deg/s), the continuous bias adaptation and the
-  drift absorption only act on rates a bias could explain (0.3 and 0.5 deg/s), the
-  estimate is hard-clamped to +-1.5 deg/s so it can never run away, and after a long
-  still period (8 s) a slower escape path re-opens adaptation so a stale estimate
-  can still recover. Consequence: a *steady* sub-0.5 deg/s yaw rotation is treated as
-  drift and cancelled (use `R`/recenter after such a movement), while every normal
-  head turn registers fully. `pose_scenarios` covers both sides of this trade-off.
+  deliberately conservative and every gate is a trade-off. The current design:
+  startup calibration captures the bias from ONE contiguous high-confidence rest
+  window after a 4 s warmup (fragments are never averaged; diagnostic timeouts do
+  not open tracking); a VQF-inspired rest detector watches the low-passed gyro AND
+  accelerometer with a continuous dwell; the estimate is hard-clamped to +-1.5 deg/s;
+  routine updates may only chase a residual within 0.35 deg/s of the current estimate,
+  so a deliberate slow yaw is not learned wholesale; and a residual the routine path
+  cannot explain opens a deliberately slow escape after 8 s of accumulated rest. The
+  escape snapshots the pre-escape bias and rolls back to it when the observed rate
+  returns to the snapshot's band for 0.2 s of dwell-qualified rest; detected motion
+  resets that confirmation (the routine update cannot undo an armed
+  escape excursion - only the rollback or the escape's own convergence ends it), so
+  an ambiguous slow turn keeps >=80% of its travel and leaves no post-stop reverse
+  slide, while a genuinely persistent bias step is kept (it converges over tens of
+  seconds). Consequence: a steady sub-0.35 deg/s
+  yaw rotation is treated as drift (use `R`/recenter after such a movement), while
+  every normal head turn registers fully. `pose_scenarios` covers both sides of this
+  trade-off and the rollback motion gate (scenarios 11, 13 and 14).
+- **Rest detection:** the pose path is always live - every sample integrates the
+  corrected gyro, and rest only gates *adaptation* (no freeze, deadband or snap).
+  Rest needs the gyro deviation below 0.5 deg/s AND the accelerometer deviation below
+  0.5 m/s^2 continuously for 0.5 s; crossing either exit gate (1.0) resets the dwell
+  and starts a 1 s motion hold-off. A shaken package with a quiet gyro is therefore
+  motion. The console and `--log` CSV expose this as `rest` (instantaneous),
+  `still` (dwell-qualified), `adapt_state` (0 idle / 1 routine / 2 escape /
+  3 calibrating), `corrected_rate_degs` and the cumulative `escape_rollbacks`.
+  All gyro and accelerometer deviation/residual gates use Euclidean vector magnitude,
+  so rotating between the calibrated sensor and head frames cannot change a gate result.
+  An IMU timestamp gap >=50 ms invalidates the current calibration window, rest dwell,
+  rollback dwell and drift-absorption increment.
 - **Magnetometer: off by default.** In the test environment the field reads |B| ~= 71 uT
   dominated by the package X axis (laptop/desk interference; Earth's field here should be
   ~50 uT with a strong inclination). Feeding it into the filter produced a constant
   ~4.8 deg/s yaw spin. The official RayNeo runtime also does not feed `99 65` magnetic
   fields into its fusion. The mag path stays available behind a flag.
-- **Gyro bias transient:** the first samples after `66 01` are contaminated. Calibration
-  runs after a 150-sample settle window over 1500 samples, then keeps refining slowly
-  while the device is still (gate 2 deg/s, gain 2e-4 per sample, ~476 Hz).
+- **Gyro bias transient:** the first samples after `66 01` are contaminated. Nothing
+  reaches the rest detector or the fusion for the first 4 s (and at least 150 samples);
+  then one contiguous high-confidence rest window (at least 1.0 s and 600 samples,
+  so about 1.26 s at 476 Hz)
+  is averaged for the bias. A window broken by motion is discarded, never stitched
+  together from fragments. The 10 s timeout resets only the diagnostic epoch: tracking
+  remains closed until a valid window completes rather than publishing a contaminated
+  or zero estimate.
 - **Reference attitude** is initialised from gravity, so the relative yaw/pitch/roll start
   at exactly zero with no convergence transient.
-- **Measured stationary drift (60 s, mag off):** ~6.7 deg/min overall, decaying to
-  < 0.5 deg/min once bias refinement settles (~40 s); last 20 s effectively flat.
+- **Measured stationary drift (60 s, mag off, pre-2026-09 estimator):** ~6.7 deg/min overall,
+  decaying to < 0.5 deg/min once bias refinement settles (~40 s); last 20 s effectively flat.
+  Re-measure after changing the calibration/rest gates; the bounds the suites now enforce are
+  listed in AGENTS.md section 5.
 - Pitch/roll wander is ~+-2 deg over a minute (accelerometer noise and residual bias).
-- Package -> body axis mapping currently `[x, -z, y]` (official legacy fusion convention);
-  signs still to be confirmed against physical motion at M3.
+- Package -> head mapping comes only from the measured proper rotation in
+  `config/orientation.json`; there is no hard-coded legacy axis assumption.
 
 ## Frame conventions (learned the hard way)
 

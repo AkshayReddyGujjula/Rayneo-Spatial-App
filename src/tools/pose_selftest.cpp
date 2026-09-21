@@ -1,5 +1,6 @@
 #include "imu/pose_estimator.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -129,8 +130,15 @@ int main() {
     std::printf("pose_selftest: tilted recenter + pure yaw must stay pure yaw\n");
     {
         PoseEstimator estimator;
+        // This case isolates frame composition, not startup qualification. Make
+        // calibration immediate so production warmup tuning cannot mask a
+        // quaternion-order regression.
         PoseEstimator::Config cfg;
-        cfg.bias_samples = 1000;
+        cfg.warmup_s = 0.0f;
+        cfg.settle_samples = 0;
+        cfg.still_hold_s = 0.0f;
+        cfg.calibration_window_s = 0.0f;
+        cfg.bias_samples = 1;
         estimator.configure(cfg);
 
         const Mat3 initial_tilt = rotation_about(1.0f, 0.0f, 0.0f, 20.0f * kPi / 180.0f);
@@ -175,7 +183,7 @@ int main() {
         check(std::fabs(e.roll_deg) < 3.0f, "roll leakage small", e.roll_deg, 3.0f);
     }
 
-    std::printf("pose_selftest: contaminated calibration must self-correct while still\n");
+    std::printf("pose_selftest: startup calibration ignores moving samples and captures the bias\n");
     {
         PoseEstimator estimator;
         estimator.configure(PoseEstimator::Config{});
@@ -212,7 +220,7 @@ int main() {
         const float err = std::sqrt((bias.x - true_bias_degs.x) * (bias.x - true_bias_degs.x) +
                                     (bias.y - true_bias_degs.y) * (bias.y - true_bias_degs.y) +
                                     (bias.z - true_bias_degs.z) * (bias.z - true_bias_degs.z));
-        check(err < 0.08f, "bias converges after contaminated calibration", err, 0.08f);
+        check(err < 0.08f, "bias is captured exactly from the contiguous quiet window", err, 0.08f);
 
         const Euler e1 = estimator.euler();
         feed(Vec3{0.0f, 0.0f, 0.0f}, 2380, false);
@@ -228,10 +236,12 @@ int main() {
     {
         PoseEstimator estimator;
         PoseEstimator::Config cfg;
+        cfg.warmup_s = 0.0f;
         cfg.settle_samples = 0;
+        cfg.calibration_window_s = 0.0f;
         cfg.bias_samples = 1;
-        cfg.bias_timeout_samples = 10;
         cfg.still_hold_s = 0.0f;
+        cfg.calibration_timeout_s = 100.0f;
         estimator.configure(cfg);
         ImuSample sample;
         sample.accel_mps2 = package_from_body(Vec3{0.0f, 0.0f, 9.81f});
@@ -250,6 +260,283 @@ int main() {
         check(std::fabs(reset_bias.x) < 1e-6f && std::fabs(reset_bias.y) < 1e-6f &&
                   std::fabs(reset_bias.z) < 1e-6f,
               "configure clears learned bias", reset_bias.x, 1e-6f);
+    }
+
+    std::printf("pose_selftest: startup calibration needs one contiguous rest window\n");
+    {
+        PoseEstimator::Config cfg;
+        cfg.warmup_s = 1.0f;
+        cfg.settle_samples = 10;
+        cfg.calibration_window_s = 1.0f;
+        cfg.bias_samples = 100;
+        cfg.calibration_timeout_s = 20.0f;
+        PoseEstimator estimator;
+        estimator.configure(cfg);
+
+        const Vec3 true_bias{0.0f, 0.4f, 0.0f};  // yaw bias lives on package Y
+        Mat3 attitude = rotation_about(0.0f, 0.0f, 1.0f, 0.0f);
+        uint32_t tick = 4000000;
+        auto feed = [&](float rate_degs, int samples) {
+            for (int i = 0; i < samples; ++i) {
+                const Vec3 accel_body = earth_to_body(attitude, Vec3{0.0f, 0.0f, 9.81f});
+                const Vec3 gyro_body = earth_to_body(attitude, Vec3{0.0f, 0.0f, rate_degs});
+                const Vec3 pkg = package_from_body(gyro_body);
+                ImuSample s;
+                s.accel_mps2 = package_from_body(accel_body);
+                s.gyro_degs =
+                    Vec3{pkg.x + true_bias.x, pkg.y + true_bias.y, pkg.z + true_bias.z};
+                s.tick_100us = tick += 21;
+                estimator.add_sample(s);
+                const float dt = 21.0f * 1e-4f;
+                attitude =
+                    multiply(rotation_about(0.0f, 0.0f, 1.0f, rate_degs * kPi / 180.0f * dt), attitude);
+            }
+        };
+
+        // 6 s of 0.3 s quiet fragments separated by 0.2 s motion bursts: every
+        // quiet fragment is broken before it can become a calibration window.
+        for (int cycle = 0; cycle < 12; ++cycle) {
+            feed(0.0f, 143);
+            feed(45.0f, 95);
+        }
+        const Vec3 fragmented = estimator.gyro_bias_degs();
+        std::printf("  after 6 s of fragmented quiet windows: bias_done=%d calibrated=%d bias_y=%.4f\n",
+                    estimator.bias_done() ? 1 : 0, estimator.calibrated() ? 1 : 0, fragmented.y);
+        check(!estimator.bias_done(), "fragmented quiet windows never complete the calibration",
+              estimator.bias_done() ? 1.0f : 0.0f, 0.0f);
+        check(std::fabs(fragmented.y) < 0.02f, "no bias is averaged out of fragments", fragmented.y,
+              0.02f);
+
+        // One contiguous rest window completes it, with the true bias.
+        feed(0.0f, 1904);  // 4 s
+        const Vec3 bias = estimator.gyro_bias_degs();
+        std::printf("  after one contiguous 4 s rest window: bias_done=%d calibrated=%d "
+                    "bias=(%.4f,%.4f,%.4f) true_y=%.4f\n",
+                    estimator.bias_done() ? 1 : 0, estimator.calibrated() ? 1 : 0, bias.x, bias.y,
+                    bias.z, true_bias.y);
+        check(estimator.bias_done() && estimator.calibrated(),
+              "one contiguous rest window completes the calibration",
+              estimator.calibrated() ? 1.0f : 0.0f, 1.0f);
+        check(std::fabs(bias.y - true_bias.y) < 0.05f, "the calibrated bias matches the truth", bias.y,
+              true_bias.y);
+    }
+
+    std::printf("pose_selftest: calibration timeout never finalizes a fragmented mean\n");
+    {
+        PoseEstimator::Config cfg;
+        cfg.warmup_s = 0.5f;
+        cfg.settle_samples = 10;
+        cfg.calibration_window_s = 1.0f;
+        cfg.bias_samples = 100;
+        cfg.calibration_timeout_s = 2.0f;
+        PoseEstimator estimator;
+        estimator.configure(cfg);
+
+        const Vec3 true_bias{0.0f, 0.4f, 0.0f};
+        Mat3 attitude = rotation_about(0.0f, 0.0f, 1.0f, 0.0f);
+        uint32_t tick = 5000000;
+        auto feed = [&](float rate_degs, int samples) {
+            for (int i = 0; i < samples; ++i) {
+                const Vec3 accel_body = earth_to_body(attitude, Vec3{0.0f, 0.0f, 9.81f});
+                const Vec3 gyro_body = earth_to_body(attitude, Vec3{0.0f, 0.0f, rate_degs});
+                const Vec3 pkg = package_from_body(gyro_body);
+                ImuSample s;
+                s.accel_mps2 = package_from_body(accel_body);
+                s.gyro_degs =
+                    Vec3{pkg.x + true_bias.x, pkg.y + true_bias.y, pkg.z + true_bias.z};
+                s.tick_100us = tick += 21;
+                estimator.add_sample(s);
+                const float dt = 21.0f * 1e-4f;
+                attitude =
+                    multiply(rotation_about(0.0f, 0.0f, 1.0f, rate_degs * kPi / 180.0f * dt), attitude);
+            }
+        };
+
+        // Fragments spanning the timeout: tracking must remain closed and must
+        // never use a mean of the quiet fragments (which would read 0.4 here).
+        for (int cycle = 0; cycle < 12; ++cycle) {
+            feed(0.0f, 143);
+            feed(45.0f, 95);
+        }
+        const Vec3 bias = estimator.gyro_bias_degs();
+        std::printf("  after fragments spanning the timeout: bias_done=%d calibrated=%d bias_y=%.4f\n",
+                    estimator.bias_done() ? 1 : 0, estimator.calibrated() ? 1 : 0, bias.y);
+        check(!estimator.bias_done() && !estimator.calibrated(),
+              "the timeout keeps tracking closed without a bias window",
+              estimator.bias_done() ? 1.0f : 0.0f, 0.0f);
+        check(std::fabs(bias.y) < 0.1f, "the timeout does not average the fragments", bias.y, 0.1f);
+
+        feed(0.0f, 1904);  // one valid 4 s rest window after the timeout
+        check(estimator.bias_done() && estimator.calibrated(),
+              "a later contiguous rest window completes calibration",
+              estimator.calibrated() ? 1.0f : 0.0f, 1.0f);
+    }
+
+    std::printf("pose_selftest: an IMU timestamp gap breaks the startup bias window\n");
+    {
+        PoseEstimator::Config cfg;
+        cfg.warmup_s = 0.0f;
+        cfg.settle_samples = 0;
+        cfg.still_hold_s = 0.0f;
+        cfg.calibration_window_s = 1.0f;
+        cfg.bias_samples = 100;
+        PoseEstimator estimator;
+        estimator.configure(cfg);
+
+        uint32_t tick = 5500000;
+        auto sample_at = [&](uint32_t next_tick) {
+            ImuSample s;
+            s.accel_mps2 = package_from_body(Vec3{0.0f, 0.0f, 9.81f});
+            s.gyro_degs = Vec3{0.0f, 0.4f, 0.0f};
+            s.tick_100us = next_tick;
+            estimator.add_sample(s);
+        };
+        auto feed = [&](int samples) {
+            for (int i = 0; i < samples; ++i) {
+                tick += 21;
+                sample_at(tick);
+            }
+        };
+
+        feed(300);               // ~0.63 s: not yet a complete window
+        tick += 600;             // 60 ms with unknown samples/motion
+        sample_at(tick);         // this sample must invalidate the candidate
+        feed(300);               // another ~0.63 s must not stitch across the gap
+        check(!estimator.bias_done(), "samples on both sides of a gap are never stitched",
+              estimator.bias_done() ? 1.0f : 0.0f, 0.0f);
+        feed(700);               // cover the 1 s hold-off, then >1 s contiguous data
+        check(estimator.bias_done() && estimator.calibrated(),
+              "a fresh contiguous window completes after the gap",
+              estimator.calibrated() ? 1.0f : 0.0f, 1.0f);
+    }
+
+    std::printf("pose_selftest: accelerometer motion blocks rest even with a quiet gyro\n");
+    {
+        PoseEstimator::Config cfg;
+        cfg.warmup_s = 1.0f;
+        cfg.settle_samples = 10;
+        cfg.calibration_window_s = 0.5f;
+        cfg.bias_samples = 50;
+        cfg.calibration_timeout_s = 60.0f;
+        PoseEstimator estimator;
+        estimator.configure(cfg);
+
+        Mat3 attitude = rotation_about(0.0f, 0.0f, 1.0f, 0.0f);
+        uint32_t tick = 6000000;
+        // Linear shake (4 m/s^2 at 2 Hz) while the gyro reports nothing: a
+        // gyro-only stillness test would call this rest.
+        auto feed = [&](float shake_mps2, int samples) {
+            for (int i = 0; i < samples; ++i) {
+                const float t = static_cast<float>(i) / 476.0f;
+                Vec3 accel_body = earth_to_body(attitude, Vec3{0.0f, 0.0f, 9.81f});
+                accel_body.x += shake_mps2 * std::sin(2.0f * kPi * 2.0f * t);
+                ImuSample s;
+                s.accel_mps2 = package_from_body(accel_body);
+                s.gyro_degs = Vec3{};
+                s.tick_100us = tick += 21;
+                estimator.add_sample(s);
+            }
+        };
+
+        feed(4.0f, 1428);  // 3 s of shaking after the warmup
+        std::printf("  during a 4 m/s^2 2 Hz accel shake: still=%d rest=%d bias_done=%d "
+                    "accel_dev=%.4f m/s^2\n",
+                    estimator.still() ? 1 : 0, estimator.rest() ? 1 : 0,
+                    estimator.bias_done() ? 1 : 0, estimator.accel_dev_mps2());
+        check(!estimator.still(), "accelerometer motion blocks rest", estimator.still() ? 1.0f : 0.0f,
+              0.0f);
+        check(!estimator.bias_done(), "accelerometer motion blocks the calibration window",
+              estimator.bias_done() ? 1.0f : 0.0f, 0.0f);
+
+        feed(0.0f, 1904);  // 4 s with the shake stopped
+        std::printf("  after the shake stops: still=%d rest=%d bias_done=%d calibrated=%d\n",
+                    estimator.still() ? 1 : 0, estimator.rest() ? 1 : 0,
+                    estimator.bias_done() ? 1 : 0, estimator.calibrated() ? 1 : 0);
+        check(estimator.still(), "rest returns after the shake stops", estimator.still() ? 1.0f : 0.0f,
+              1.0f);
+        check(estimator.bias_done() && estimator.calibrated(),
+              "the calibration window completes once the shake stops",
+              estimator.calibrated() ? 1.0f : 0.0f, 1.0f);
+    }
+
+    std::printf("pose_selftest: bias estimate never leaves the documented band\n");
+    {
+        PoseEstimator::Config cfg;
+        cfg.warmup_s = 0.2f;
+        cfg.settle_samples = 1;
+        cfg.calibration_window_s = 0.2f;
+        cfg.bias_samples = 50;
+        cfg.calibration_timeout_s = 120.0f;
+        PoseEstimator estimator;
+        estimator.configure(cfg);
+
+        const Vec3 true_bias{2.0f, -2.5f, 1.8f};  // far outside the documented +-1.5 deg/s band
+        Mat3 attitude = rotation_about(0.0f, 0.0f, 1.0f, 0.0f);
+        uint32_t tick = 7000000;
+        auto feed = [&](int samples) {
+            for (int i = 0; i < samples; ++i) {
+                const Vec3 accel_body = earth_to_body(attitude, Vec3{0.0f, 0.0f, 9.81f});
+                ImuSample s;
+                s.accel_mps2 = package_from_body(accel_body);
+                s.gyro_degs = true_bias;
+                s.tick_100us = tick += 21;
+                estimator.add_sample(s);
+            }
+        };
+
+        feed(952);  // 2 s
+        const Vec3 startup = estimator.gyro_bias_degs();
+        const float startup_abs =
+            std::max(std::fabs(startup.x), std::max(std::fabs(startup.y), std::fabs(startup.z)));
+        std::printf("  startup estimate (%.3f,%.3f,%.3f) for a true (%.1f,%.1f,%.1f) deg/s bias\n",
+                    startup.x, startup.y, startup.z, true_bias.x, true_bias.y, true_bias.z);
+        check(startup_abs <= 1.5f + 1e-3f, "startup calibration is clamped to +-1.5 deg/s", startup_abs,
+              1.5f);
+        check(std::fabs(std::fabs(startup.y) - 1.5f) < 1e-3f, "the clamp is the binding limit",
+              startup.y, 1.5f);
+
+        // The escape may chase the rest of the (implausible) bias; the clamp holds.
+        feed(5712);  // 12 s
+        const Vec3 runtime = estimator.gyro_bias_degs();
+        const float runtime_abs =
+            std::max(std::fabs(runtime.x), std::max(std::fabs(runtime.y), std::fabs(runtime.z)));
+        std::printf("  runtime estimate (%.3f,%.3f,%.3f) after 12 s (adapt_state=%d)\n", runtime.x,
+                    runtime.y, runtime.z, estimator.adapt_state());
+        check(runtime_abs <= 1.5f + 1e-3f, "runtime adaptation stays clamped", runtime_abs, 1.5f);
+    }
+
+    std::printf("pose_selftest: residual gates use rotation-invariant vector magnitude\n");
+    {
+        PoseEstimator::Config cfg;
+        cfg.warmup_s = 0.0f;
+        cfg.settle_samples = 0;
+        cfg.still_hold_s = 0.0f;
+        cfg.calibration_window_s = 0.0f;
+        cfg.bias_samples = 1;
+        PoseEstimator estimator;
+        estimator.configure(cfg);
+
+        uint32_t tick = 7500000;
+        auto feed = [&](const Vec3& gyro, int samples) {
+            for (int i = 0; i < samples; ++i) {
+                ImuSample s;
+                s.accel_mps2 = package_from_body(Vec3{0.0f, 0.0f, 9.81f});
+                s.gyro_degs = gyro;
+                s.tick_100us = tick += 21;
+                estimator.add_sample(s);
+            }
+        };
+        feed(Vec3{}, 1000);
+        // Each component is below the 0.35 deg/s routine cap, but the physical
+        // vector magnitude is 0.52 deg/s. A componentwise gate incorrectly
+        // absorbs it immediately; the invariant gate leaves it to the guarded
+        // escape (which cannot open during this five-second observation).
+        feed(Vec3{0.3f, 0.3f, 0.3f}, 2380);
+        const Vec3 bias = estimator.gyro_bias_degs();
+        const float bias_norm =
+            std::sqrt(bias.x * bias.x + bias.y * bias.y + bias.z * bias.z);
+        check(bias_norm < 0.10f, "diagonal motion is not misclassified by per-axis splitting",
+              bias_norm, 0.10f);
     }
 
     std::printf("pose_selftest: swing/twist decomposition used by the tracking toggles\n");

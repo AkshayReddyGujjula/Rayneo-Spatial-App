@@ -110,7 +110,6 @@ void ImuSource::run() {
         set_status("streaming, calibrating");
         PoseEstimator estimator;
         PoseEstimator::Config estimator_config;
-        estimator_config.freeze_when_still = freeze_when_still_;
         estimator_config.sensor_to_head = sensor_to_head_;
         estimator.configure(estimator_config);
         has_pose_.store(false);
@@ -155,10 +154,24 @@ void ImuSource::run() {
             by_.store(bias.y, std::memory_order_relaxed);
             bz_.store(bias.z, std::memory_order_relaxed);
             still_.store(estimator.still(), std::memory_order_relaxed);
+            rest_.store(estimator.rest(), std::memory_order_relaxed);
+            adapt_state_.store(estimator.adapt_state(), std::memory_order_relaxed);
+            corrected_rate_degs_.store(estimator.corrected_rate_degs(),
+                                       std::memory_order_relaxed);
+            escape_rollbacks_.store(estimator.escape_rollbacks(), std::memory_order_relaxed);
+            calibrated_.store(estimator.calibrated(), std::memory_order_relaxed);
             drift_degs_.store(estimator.drift_correction_degs(), std::memory_order_relaxed);
 
-            const char* phase = !estimator.bias_done() ? "hold still - calibrating"
-                                                       : (estimator.still() ? "streaming (still)" : "streaming");
+            const char* phase = nullptr;
+            if (!estimator.bias_done()) {
+                phase = "hold still - calibrating";
+            } else if (estimator.adapt_state() == static_cast<int>(BiasAdaptState::escape)) {
+                phase = "streaming (bias escape)";
+            } else if (estimator.still()) {
+                phase = "streaming (still)";
+            } else {
+                phase = "streaming";
+            }
             if (phase != last_phase) {
                 last_phase = phase;
                 set_status(phase);

@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <array>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -28,12 +29,25 @@ public:
     Vec3 gyro_bias_degs() const;
     Vec3 last_gyro_degs() const;
     uint32_t last_tick() const { return last_tick_.load(std::memory_order_relaxed); }
+    // Dwell-qualified rest (the estimator's stillness); `rest()` is the
+    // instantaneous rest condition.
     bool still() const { return still_.load(std::memory_order_relaxed); }
+    bool rest() const { return rest_.load(std::memory_order_relaxed); }
+    // 0 = idle, 1 = routine, 2 = escape, 3 = calibrating (see BiasAdaptState).
+    int adapt_state() const { return adapt_state_.load(std::memory_order_relaxed); }
+    float corrected_rate_degs() const {
+        return corrected_rate_degs_.load(std::memory_order_relaxed);
+    }
+    uint32_t escape_rollbacks() const {
+        return escape_rollbacks_.load(std::memory_order_relaxed);
+    }
+    // True once the startup bias came from a contiguous rest window. Diagnostic
+    // timeouts never open the pose with an unqualified estimate.
+    bool calibrated() const { return calibrated_.load(std::memory_order_relaxed); }
     float drift_correction_degs() const;
     std::string status() const;
 
     void recenter() { recenter_request_.store(true, std::memory_order_relaxed); }
-    void set_freeze_when_still(bool enabled) { freeze_when_still_ = enabled; }
     void set_sensor_to_head(const std::array<float, 9>& matrix) { sensor_to_head_ = matrix; }
 
 private:
@@ -58,10 +72,14 @@ private:
     std::atomic<float> gz_{0.0f};
     std::atomic<uint32_t> last_tick_{0};
     std::atomic<bool> still_{false};
+    std::atomic<bool> rest_{false};
+    std::atomic<int> adapt_state_{static_cast<int>(BiasAdaptState::calibrating)};
+    std::atomic<float> corrected_rate_degs_{0.0f};
+    std::atomic<uint32_t> escape_rollbacks_{0};
+    std::atomic<bool> calibrated_{false};
     std::atomic<float> drift_degs_{0.0f};
     mutable std::mutex status_mutex_;
     std::string status_;
-    bool freeze_when_still_ = false;
     std::array<float, 9> sensor_to_head_{
         1.0f, 0.0f, 0.0f,
         0.0f, 0.0f, -1.0f,
