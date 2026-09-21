@@ -170,8 +170,14 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
     // how deliberate motion used to end up inside the bias.
     const bool slow_enough = raw_rate_magnitude < cfg_.adapt_rate_cap_degs;
     const bool escape = still_since_motion_s_ >= cfg_.adapt_escape_s;
+    // The still flag is sticky, so it can stay true through the settling tail of a
+    // movement; the absorption additionally requires a low *current* deviation so it
+    // does not inflate on accelerometer settle (the bias adaptation keeps its own
+    // rate and hold-off gates, which are enough there).
     const bool calib_eligible = still_ && raw_rate_magnitude < cfg_.calibration_rate_cap_degs;
     const bool adapt_eligible = still_ && holdoff_s_ <= 0.0f && (slow_enough || escape);
+    const bool absorb_eligible =
+        adapt_eligible && stillness_degs_ < cfg_.still_dev_threshold_degs;
 
     if (!bias_done_) {
         if (calib_eligible) {
@@ -259,13 +265,28 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
         // The absorption gates on its own (still + hold-off + a slow raw rate):
         // rates this small are below anything a deliberate pan produces, so this
         // never needs the escape window that the bias adaptation uses.
-        if (have_prev_live_ && still_ && holdoff_s_ <= 0.0f && cfg_.drift_rate_cap_degs > 0.0f &&
+        if (have_prev_live_ && absorb_eligible && cfg_.drift_rate_cap_degs > 0.0f &&
             raw_rate_magnitude < cfg_.drift_rate_cap_degs) {
             const Quat increment = quat_multiply(live, quat_conjugate(q_prev_live_));
             drift_correction_ = quat_multiply(increment, drift_correction_);
         }
         q_prev_live_ = live;
         have_prev_live_ = true;
+
+        if (adapt_eligible) {
+            if (cfg_.drift_leak_tau_s > 0.0f) {
+                float scale = 1.0f - dt / cfg_.drift_leak_tau_s;
+                if (scale < 0.0f) {
+                    scale = 0.0f;
+                }
+                drift_correction_ = quat_scaled(drift_correction_, scale);
+            }
+            const float correction_deg = quat_angle_degs(drift_correction_);
+            if (correction_deg > cfg_.drift_limit_degs) {
+                drift_correction_ =
+                    quat_scaled(drift_correction_, cfg_.drift_limit_degs / correction_deg);
+            }
+        }
     }
 
     if (!have_ref_) {
