@@ -557,7 +557,8 @@ int main(int argc, char** argv) {
         if (diagnostics.is_open() && write_header) {
             diagnostics << "elapsed_s,tick_100us,gx_raw,gy_raw,gz_raw,bias_x,bias_y,bias_z,"
                            "view_yaw_deg,view_pitch_deg,view_roll_deg,still,"
-                           "rest,adapt_state,corrected_rate_degs,escape_rollbacks\n";
+                           "rest,adapt_state,corrected_rate_degs,stillness_degs,"
+                           "accel_dev_mps2,escape_rollbacks\n";
         }
     }
     int log_rows = 0;
@@ -809,10 +810,11 @@ int main(int argc, char** argv) {
             const gt::Vec3 b = imu.gyro_bias_degs();
             char row[256];
             std::snprintf(row, sizeof(row),
-                          "%.3f,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%.3f,%u\n",
+                          "%.3f,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%.3f,%.3f,%.3f,%u\n",
                           elapsed, imu.last_tick(), g.x, g.y, g.z, b.x, b.y, b.z, le.yaw_deg,
                           le.pitch_deg, le.roll_deg, imu.still() ? 1 : 0, imu.rest() ? 1 : 0,
-                          imu.adapt_state(), imu.corrected_rate_degs(),
+                          imu.adapt_state(), imu.corrected_rate_degs(), imu.stillness_degs(),
+                          imu.accel_dev_mps2(),
                           static_cast<unsigned>(imu.escape_rollbacks()));
             diagnostics << row;
             if (++log_rows % 120 == 0) {
@@ -829,10 +831,12 @@ int main(int argc, char** argv) {
                 const gt::Vec3 bias = imu.gyro_bias_degs();
                 std::printf(
                     "[%.0fs] fps=%.1f  imu=%.1fHz (%s)  bias=(%+.2f,%+.2f,%+.2f) drift=%.2f  "
-                    "rest=%d adapt=%d corr=%.2f rollbacks=%u  yaw=%7.2f pitch=%6.2f roll=%6.2f\n",
+                    "rest=%d adapt=%d corr=%.2f dev=(%.2f,%.2f) rollbacks=%u  "
+                    "yaw=%7.2f pitch=%6.2f roll=%6.2f\n",
                     elapsed, fps, imu.sample_rate_hz(), imu.status().c_str(), bias.x, bias.y, bias.z,
                     imu.drift_correction_degs(), imu.rest() ? 1 : 0, imu.adapt_state(),
-                    imu.corrected_rate_degs(), static_cast<unsigned>(imu.escape_rollbacks()),
+                    imu.corrected_rate_degs(), imu.stillness_degs(), imu.accel_dev_mps2(),
+                    static_cast<unsigned>(imu.escape_rollbacks()),
                     e.yaw_deg, e.pitch_deg, e.roll_deg);
             }
             frames_at_stat = frames;

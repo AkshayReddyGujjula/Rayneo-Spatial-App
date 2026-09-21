@@ -113,6 +113,7 @@ void ImuSource::run() {
         estimator_config.sensor_to_head = sensor_to_head_;
         estimator.configure(estimator_config);
         has_pose_.store(false);
+        sample_rate_hz_.store(0.0, std::memory_order_relaxed);
 
         auto rate_window_start = SteadyClock::now();
         int rate_window_samples = 0;
@@ -144,6 +145,21 @@ void ImuSource::run() {
             }
             last_imu_time = SteadyClock::now();
 
+            // Stream-rate telemetry describes the device stream, including the
+            // startup calibration phase. Counting only fused samples made a
+            // healthy 476 Hz stream misleadingly print as 0 Hz until tracking
+            // opened, which hid calibration-gate failures in live tests.
+            ++rate_window_samples;
+            const auto rate_now = SteadyClock::now();
+            const double rate_elapsed =
+                std::chrono::duration<double>(rate_now - rate_window_start).count();
+            if (rate_elapsed >= 1.0) {
+                sample_rate_hz_.store(rate_window_samples / rate_elapsed,
+                                      std::memory_order_relaxed);
+                rate_window_start = rate_now;
+                rate_window_samples = 0;
+            }
+
             const bool ready = estimator.add_sample(r.imu);
             gx_.store(r.imu.gyro_degs.x, std::memory_order_relaxed);
             gy_.store(r.imu.gyro_degs.y, std::memory_order_relaxed);
@@ -158,6 +174,8 @@ void ImuSource::run() {
             adapt_state_.store(estimator.adapt_state(), std::memory_order_relaxed);
             corrected_rate_degs_.store(estimator.corrected_rate_degs(),
                                        std::memory_order_relaxed);
+            stillness_degs_.store(estimator.stillness_degs(), std::memory_order_relaxed);
+            accel_dev_mps2_.store(estimator.accel_dev_mps2(), std::memory_order_relaxed);
             escape_rollbacks_.store(estimator.escape_rollbacks(), std::memory_order_relaxed);
             calibrated_.store(estimator.calibrated(), std::memory_order_relaxed);
             drift_degs_.store(estimator.drift_correction_degs(), std::memory_order_relaxed);
@@ -186,15 +204,6 @@ void ImuSource::run() {
                 qz_.store(q.z, std::memory_order_relaxed);
                 pose_sequence_.fetch_add(1, std::memory_order_release);
                 has_pose_.store(true, std::memory_order_release);
-                ++rate_window_samples;
-
-                const auto now = SteadyClock::now();
-                const double elapsed = std::chrono::duration<double>(now - rate_window_start).count();
-                if (elapsed >= 1.0) {
-                    sample_rate_hz_.store(rate_window_samples / elapsed, std::memory_order_relaxed);
-                    rate_window_start = now;
-                    rate_window_samples = 0;
-                }
             }
         }
 
