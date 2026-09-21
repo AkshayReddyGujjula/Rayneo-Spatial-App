@@ -28,8 +28,23 @@ public:
         // bias_limit_degs, and a long still period always re-opens adaptation so a
         // stale estimate can recover without any runaway.
         float calibration_rate_cap_degs = 1.5f;
-        float adapt_rate_cap_degs = 0.3f;
-        float drift_rate_cap_degs = 0.5f;
+        // Widened to cover the documented plausible bias band: the bias adaptation is
+        // the single owner of steady error, so it must be able to see one.
+        float adapt_rate_cap_degs = 0.5f;
+        // Drift absorption is OPT-IN. When it was enabled it also swallowed
+        // post-movement accelerometer settling, and its correction (which nothing
+        // released) became a permanent workspace rotation - measured in the field as
+        // 3.9 deg/min, i.e. the left screen drifting to centre in ~10 minutes. With a
+        // single owner (the bias) no offset can accumulate. Set this above the bias
+        // cap to re-enable it; the leak below then bounds the correction.
+        float drift_rate_cap_degs = 0.0f;
+        // The correction must never become a permanent workspace rotation: the bias
+        // adaptation owns the steady error, so the correction bleeds back to identity
+        // (measured in the field: a stale correction grew 3.9 deg/min and had rotated
+        // the workspace by ~39 deg after ten minutes), with a hard angle bound as a
+        // second line of defence.
+        float drift_leak_tau_s = 20.0f;
+        float drift_limit_degs = 2.0f;
         float bias_limit_degs = 1.5f;
         // Long enough that a deliberate slow pan (a few seconds) never trips it,
         // short enough that a stale estimate recovers within seconds of stillness.

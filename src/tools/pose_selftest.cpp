@@ -265,6 +265,52 @@ int main() {
         check(pull_back < 0.4f, "movement is held afterwards", pull_back, 0.4f);
     }
 
+    std::printf("pose_selftest: repeated pan-and-settle must not accumulate an offset\n");
+    {
+        PoseEstimator estimator;
+        estimator.configure(PoseEstimator::Config{});
+
+        Mat3 attitude = rotation_about(0.0f, 0.0f, 1.0f, 0.0f);
+        uint32_t tick = 1200000;
+        auto feed = [&](float rate_degs, int samples) {
+            for (int i = 0; i < samples; ++i) {
+                const Vec3 accel_body = earth_to_body(attitude, Vec3{0.0f, 0.0f, 9.81f});
+                const Vec3 gyro_body = earth_to_body(attitude, Vec3{0.0f, 0.0f, rate_degs});
+                ImuSample s;
+                s.accel_mps2 = package_from_body(accel_body);
+                // A slow thermal-style residual on the yaw axis (package Y).
+                const Vec3 pkg = package_from_body(gyro_body);
+                s.gyro_degs = Vec3{pkg.x, pkg.y + 0.10f, pkg.z};
+                s.tick_100us = tick += 21;
+                estimator.add_sample(s);
+                const float dt = 21.0f * 1e-4f;
+                attitude = multiply(
+                    rotation_about(0.0f, 0.0f, 1.0f, rate_degs * kPi / 180.0f * dt), attitude);
+            }
+        };
+
+        feed(0.0f, 3000);
+        const float start_yaw = estimator.euler().yaw_deg;
+        for (int cycle = 0; cycle < 20; ++cycle) {
+            // Pan out and back (one full sine period = zero net rotation).
+            for (int i = 0; i < 952; ++i) {
+                const float t = static_cast<float>(i) / 476.0f;
+                feed(45.0f * std::sin(2.0f * kPi * t / 2.0f), 1);
+            }
+            // A decaying 6 Hz wobble stands in for the head settling after a pan.
+            for (int i = 0; i < 476; ++i) {
+                const float t = static_cast<float>(i) / 476.0f;
+                feed(1.5f * std::exp(-3.0f * t) * std::sin(2.0f * kPi * 6.0f * t), 1);
+            }
+            feed(0.0f, 952);
+        }
+        const float end_yaw = estimator.euler().yaw_deg;
+        const float offset = std::fabs(end_yaw - start_yaw);
+        std::printf("  after 20 pan-and-settle cycles: yaw %.3f -> %.3f, offset %.3f deg\\n", start_yaw,
+                    end_yaw, offset);
+        check(offset < 1.0f, "no accumulating offset over 20 pans", offset, 1.0f);
+    }
+
     std::printf("pose_selftest: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -26,6 +26,8 @@ Quat quat_twist_about(const Quat& q, float axis_x, float axis_y, float axis_z);
 
 // Rotation magnitude of a quaternion in degrees (0..180).
 float quat_angle_degs(const Quat& q);
+// Exact rotation by the given fraction of q angle (stays a unit rotation).
+Quat quat_scaled(const Quat& q, float fraction);
 Euler quat_to_euler(const Quat& q);
 
 class MadgwickFilter {
