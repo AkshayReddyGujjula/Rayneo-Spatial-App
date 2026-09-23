@@ -13,6 +13,7 @@
 #include "util/utf8_path.h"
 #include "app_shell/telemetry.h"
 #include "app_shell/ui_help.h"
+#include "app_shell/ui_orbit.h"
 
 #include <cmath>
 #include <cstdio>
@@ -588,6 +589,51 @@ void test_help_topics() {
           "field topics track the layout field order");
 }
 
+void test_orbit() {
+    std::printf("app_selftest: orbit projection\n");
+    gt::OrbitView view;
+    view.yaw_deg = 0.0f;
+    view.pitch_deg = 0.0f;
+    view.distance_m = 6.0f;
+    view.target_x = 0.0f;
+    view.target_y = 1.0f;
+    view.target_z = 0.0f;
+    const gt::OrbitCamera camera = gt::orbit_camera(view);
+    RECT rect{0, 0, 400, 300};
+    const gt::OrbitPoint origin = gt::orbit_project(view, camera, gt::OrbitVec3{0.0f, 0.0f, 0.0f},
+                                                   rect);
+    check(!origin.behind && std::abs(origin.pixel.x - 200) <= 1 &&
+              std::abs(origin.pixel.y - 150) <= 1,
+          "the head projects to the viewport centre from behind");
+    check(std::fabs(origin.depth_m - 5.0f) < 1e-3f, "head depth is the camera distance minus 1m");
+    const gt::OrbitPoint behind =
+        gt::orbit_project(view, camera, gt::OrbitVec3{0.0f, -6.0f, 0.0f}, rect);
+    check(behind.behind, "points behind the camera are flagged");
+    gt::Layout layout = gt::preset_layout(gt::LayoutPreset::Single);
+    const gt::OrbitQuad quad = gt::orbit_screen_quad(layout.screens[0]);
+    check(std::fabs(quad.center.x) < 1e-4f && std::fabs(quad.center.y - 2.0f) < 1e-4f &&
+              std::fabs(quad.center.z) < 1e-4f,
+          "the single screen centre sits 2m straight ahead");
+    const gt::OrbitVec3 edge_x{quad.corners[1].x - quad.corners[0].x,
+                               quad.corners[1].y - quad.corners[0].y,
+                               quad.corners[1].z - quad.corners[0].z};
+    const float width = std::sqrt(edge_x.x * edge_x.x + edge_x.y * edge_x.y + edge_x.z * edge_x.z);
+    check(std::fabs(width - 1.6f) < 1e-3f && edge_x.x / width > 0.999f,
+          "the quad right edge spans the width along +X");
+    const gt::OrbitVec3 edge_z{quad.corners[3].x - quad.corners[0].x,
+                               quad.corners[3].y - quad.corners[0].y,
+                               quad.corners[3].z - quad.corners[0].z};
+    const float height =
+        std::sqrt(edge_z.x * edge_z.x + edge_z.y * edge_z.y + edge_z.z * edge_z.z);
+    check(std::fabs(height - 0.9f) < 1e-3f && edge_z.z / height > 0.999f,
+          "the quad up edge spans the height along +Z");
+    const gt::OrbitPoint centre = gt::orbit_project(view, camera, quad.center, rect);
+    check(gt::orbit_hit_test(layout, view, camera, rect, centre.pixel.x, centre.pixel.y, 14) == 0,
+          "tapping a projected screen selects it");
+    check(gt::orbit_hit_test(layout, view, camera, rect, 0, 0, 14) < 0,
+          "tapping empty space selects nothing");
+}
+
 }  // namespace
 
 int main() {
@@ -614,6 +660,7 @@ int main() {
     test_presets_and_screens();
     test_user_presets(directory);
     test_help_topics();
+    test_orbit();
     test_field_normalisation();
     test_log_rotation(directory);
     test_telemetry();

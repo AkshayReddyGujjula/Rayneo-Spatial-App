@@ -45,6 +45,8 @@ enum UiId : int {
     kUiRecoverDisplays = 19,
     kUiPresetSave = 20,
     kUiPresetDelete = 21,
+    kUiEditorFullscreen = 22,
+    kUiEditorDimToggle = 23,
     kUiPresetBase = 100,
     kUiFieldBase = 200,
     kUiScreenBase = 300,
@@ -146,6 +148,14 @@ struct AppState {
     size_t selected_screen = 0;
     std::vector<std::string> preset_names;
     std::string loaded_preset;
+    bool editor_fullscreen = false;
+    bool editor_3d = false;
+    float orbit_yaw_deg = -30.0f;
+    float orbit_pitch_deg = 18.0f;
+    float orbit_distance_m = 6.5f;
+    bool orbiting = false;
+    POINT orbit_origin{};
+    float drag_start_yaw = 0.0f;
 
     EngineClient engine;
     EngineStatusFile engine_status;
