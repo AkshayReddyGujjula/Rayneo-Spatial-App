@@ -146,13 +146,23 @@ void PoseEstimator::update_rest_detector(const Vec3& raw, const Vec3& accel, flo
     const Vec3 accel_dev{std::fabs(accel.x - accel_lpf_.x), std::fabs(accel.y - accel_lpf_.y),
                          std::fabs(accel.z - accel_lpf_.z)};
 
-    const float dev_alpha = dt / (cfg_.dev_ema_tau_s + dt);
-    gyro_dev_ema_.x += (gyro_dev.x - gyro_dev_ema_.x) * dev_alpha;
-    gyro_dev_ema_.y += (gyro_dev.y - gyro_dev_ema_.y) * dev_alpha;
-    gyro_dev_ema_.z += (gyro_dev.z - gyro_dev_ema_.z) * dev_alpha;
-    accel_dev_ema_.x += (accel_dev.x - accel_dev_ema_.x) * dev_alpha;
-    accel_dev_ema_.y += (accel_dev.y - accel_dev_ema_.y) * dev_alpha;
-    accel_dev_ema_.z += (accel_dev.z - accel_dev_ema_.z) * dev_alpha;
+    // Asymmetric deviation smoothing: drain fast toward an already-quiet
+    // signal so rest recovers ~1 s after a pan (scenario 18), rise slow so
+    // noise flicker still cannot validate rest (bug 13 margins untouched).
+    const float dev_up = dt / (cfg_.dev_ema_tau_s + dt);
+    const float dev_down = dt / (cfg_.dev_ema_fall_tau_s + dt);
+    gyro_dev_ema_.x +=
+        (gyro_dev.x - gyro_dev_ema_.x) * (gyro_dev.x < gyro_dev_ema_.x ? dev_down : dev_up);
+    gyro_dev_ema_.y +=
+        (gyro_dev.y - gyro_dev_ema_.y) * (gyro_dev.y < gyro_dev_ema_.y ? dev_down : dev_up);
+    gyro_dev_ema_.z +=
+        (gyro_dev.z - gyro_dev_ema_.z) * (gyro_dev.z < gyro_dev_ema_.z ? dev_down : dev_up);
+    accel_dev_ema_.x +=
+        (accel_dev.x - accel_dev_ema_.x) * (accel_dev.x < accel_dev_ema_.x ? dev_down : dev_up);
+    accel_dev_ema_.y +=
+        (accel_dev.y - accel_dev_ema_.y) * (accel_dev.y < accel_dev_ema_.y ? dev_down : dev_up);
+    accel_dev_ema_.z +=
+        (accel_dev.z - accel_dev_ema_.z) * (accel_dev.z < accel_dev_ema_.z ? dev_down : dev_up);
 
     // Euclidean magnitudes are invariant under the calibrated sensor-to-head
     // rotation. A componentwise maximum would make the same physical diagonal

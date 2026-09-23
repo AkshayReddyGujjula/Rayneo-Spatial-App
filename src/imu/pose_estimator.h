@@ -66,6 +66,14 @@ public:
         float still_hold_s = 0.5f;
         float fast_ema_tau_s = 0.2f;
         float dev_ema_tau_s = 0.5f;
+        // Falling-edge time constant for the deviation smoothing. The rising
+        // edge keeps the full 0.5 s so noise flicker never validates rest,
+        // but after a real pan the symmetric tail kept rest qualification -
+        // and therefore all bias adaptation - starved through 2 s holds
+        // (scenario 18: the estimate sat frozen for 80 s while the wearer
+        // looked around). Draining fast recovers eligibility ~1 s after a
+        // pan instead of ~2.5 s.
+        float dev_ema_fall_tau_s = 0.08f;
         float accel_lpf_tau_s = 0.5f;
 
         // --- runtime bias ownership -----------------------------------------
