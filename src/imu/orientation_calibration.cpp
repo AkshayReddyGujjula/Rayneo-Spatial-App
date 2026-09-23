@@ -1,5 +1,7 @@
 #include "imu/orientation_calibration.h"
 
+#include "util/utf8_path.h"
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -558,7 +560,7 @@ bool save_orientation_calibration(const std::string& path, const OrientationCali
         error = "cannot save a failed calibration";
         return false;
     }
-    const std::filesystem::path destination(path);
+    const std::filesystem::path destination = path_from_utf8(path);
     std::filesystem::path temporary = destination;
     temporary += ".tmp";
     std::ofstream output(temporary, std::ios::out | std::ios::trunc);
@@ -609,7 +611,7 @@ bool save_orientation_calibration(const std::string& path, const OrientationCali
 
 bool load_orientation_calibration(const std::string& path, std::array<float, 9>& matrix,
                                   std::string& error) {
-    std::ifstream input(path, std::ios::in);
+    std::ifstream input(path_from_utf8(path), std::ios::in);
     if (!input) {
         error = "could not open calibration file";
         return false;

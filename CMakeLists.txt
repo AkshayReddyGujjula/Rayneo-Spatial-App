@@ -53,11 +53,70 @@ target_link_libraries(gt_imu_probe PRIVATE rayneo_core)
 
 add_executable(spatial_desk
   src/app/spatial_desk.cpp
+  src/app/engine_protocol.cpp
   src/imu/imu_source.cpp
   src/render/camera.cpp
   src/render/renderer.cpp
 )
 target_link_libraries(spatial_desk PRIVATE rayneo_core rayneo_layout rayneo_vdd rayneo_capture d3d11 dxgi d3dcompiler user32 gdi32)
+
+# Controller application model: pure logic, no windows, covered by app_selftest.
+# It owns the preference file, the layout editing rules, the engine command
+# contract and the telemetry tail reader.
+add_library(rayneo_app_model STATIC
+  src/app/engine_protocol.cpp
+  src/app_shell/app_config.cpp
+  src/app_shell/app_layout.cpp
+  src/app_shell/engine_commands.cpp
+  src/app_shell/telemetry.cpp
+)
+target_include_directories(rayneo_app_model PUBLIC src)
+target_link_libraries(rayneo_app_model PUBLIC nlohmann_json::nlohmann_json rayneo_layout)
+
+# Controller shell: Win32 window, tray lifecycle, engine process owner and the
+# read-only health checks. Inbox Windows libraries only.
+add_library(rayneo_app_ui STATIC
+  src/app_shell/app_state.cpp
+  src/app_shell/app_window.cpp
+  src/app_shell/diagnostics.cpp
+  src/app_shell/engine_client.cpp
+  src/app_shell/paths.cpp
+  src/app_shell/tray_icon.cpp
+  src/app_shell/ui_paint.cpp
+  src/app_shell/ui_theme.cpp
+  src/app_shell/ui_widgets.cpp
+)
+target_include_directories(rayneo_app_ui PUBLIC src)
+target_link_libraries(rayneo_app_ui PUBLIC rayneo_app_model rayneo_core rayneo_vdd user32 gdi32 shell32)
+target_compile_definitions(rayneo_app_ui PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+
+# The controller is a GUI application; spatial_desk.exe stays the renderer engine.
+# The resource script is compiled only when a resource compiler is available
+# (rc.exe inside the MSVC environment), so a toolchain without RC still builds.
+if(WIN32)
+  enable_language(RC OPTIONAL)
+endif()
+
+add_executable(rayneo_spatial_app WIN32
+  src/app_shell/main.cpp
+)
+if(WIN32 AND CMAKE_RC_COMPILER)
+  target_sources(rayneo_spatial_app PRIVATE resources/rayneo_spatial.rc)
+  set_source_files_properties(resources/rayneo_spatial.rc PROPERTIES
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/resources/app.manifest;${CMAKE_CURRENT_SOURCE_DIR}/resources/app.ico"
+  )
+endif()
+set_target_properties(rayneo_spatial_app PROPERTIES
+  OUTPUT_NAME "RayNeo Spatial"
+  WIN32_EXECUTABLE TRUE
+)
+# The .rc already embeds the application manifest (ID 1); suppress the
+# linker's auto-generated manifest to avoid a CVT1100 duplicate resource.
+target_link_options(rayneo_spatial_app PRIVATE "/MANIFEST:NO")
+target_link_libraries(rayneo_spatial_app PRIVATE rayneo_app_ui)
+# On the resource compiler's include path so the manifest resolves from the
+# source tree rather than from the build directory.
+target_include_directories(rayneo_spatial_app PRIVATE resources)
 
 add_executable(camera_selftest
   src/tools/camera_selftest.cpp
@@ -102,3 +161,7 @@ add_executable(view_selftest
 )
 target_link_libraries(view_selftest PRIVATE rayneo_core rayneo_layout)
 add_test(NAME view_selftest COMMAND view_selftest "${CMAKE_SOURCE_DIR}/scratch")
+
+add_executable(app_selftest src/tools/app_selftest.cpp)
+target_link_libraries(app_selftest PRIVATE rayneo_app_model)
+add_test(NAME app_selftest COMMAND app_selftest)

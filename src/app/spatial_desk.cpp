@@ -1,3 +1,4 @@
+#include "app/engine_protocol.h"
 #include "capture/desktop_duplication.h"
 #include "imu/imu_source.h"
 #include "imu/orientation_calibration.h"
@@ -5,6 +6,7 @@
 #include "render/renderer.h"
 #include "vdd/display_config.h"
 #include "vdd/vdd_client.h"
+#include "util/utf8_path.h"
 
 #include <windows.h>
 
@@ -13,13 +15,16 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <cwctype>
 #include <cstring>
 #include <fstream>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <numeric>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -45,6 +50,31 @@ struct CaptureTierState {
 
 constexpr int kFatalCaptureFailures = 120;
 
+// Machine-readable engine status, rewritten once per second and at every state
+// change. The controller reads it at up to 2 Hz (see app/engine_protocol.h), and
+// it is the only channel that survives the engine being launched by hand.
+struct StatusReport {
+    std::string path;
+    std::string state = gt::kStatusStarting;
+    std::string mode = gt::kModePreview;
+    std::string error;
+    int screens = 0;
+    double fps = 0.0;
+    int monitor = -1;
+    int monitor_width = 0;
+    int monitor_height = 0;
+    bool vdd = false;
+    bool imu = false;
+    bool detached = false;
+    double elapsed_s = 0.0;
+};
+
+StatusReport g_status;
+
+// Mirrors the armed topology guard for the query reply: set once the takeover
+// commits, cleared once the pre-workspace arrangement is restored.
+bool g_topology_takeover = false;
+
 struct Options {
     int monitor = -1;
     bool monitor_explicit = false;
@@ -55,6 +85,7 @@ struct Options {
     std::string log_path;
     std::string calibration_path;
     std::string layout_path;
+    std::string status_path;
     bool virtual_displays = true;
 };
 
@@ -63,10 +94,14 @@ enum HotkeyId : int {
     kHotkeyToggleYaw = 2,
     kHotkeyTogglePitch = 3,
     kHotkeyQuit = 4,
+    kHotkeyExitWorkspace = 5,
 };
 
 struct AppState {
     bool quit = false;
+    bool reload_layout = false;
+    bool virtual_displays = true;
+    int screen_count = 0;
     gt::ImuSource* imu = nullptr;
     bool yaw_tracking = true;
     bool pitch_tracking = true;
@@ -77,6 +112,55 @@ struct AppState {
 };
 
 AppState* g_app = nullptr;
+
+void publish_status(const StatusReport& report) {
+    if (report.path.empty()) {
+        return;
+    }
+    std::string text;
+    text += std::string(gt::kStatusKeyState) + "=" + report.state + "\n";
+    text += std::string(gt::kStatusKeyMode) + "=" + report.mode + "\n";
+    text += std::string(gt::kStatusKeyScreens) + "=" + std::to_string(report.screens) + "\n";
+    char fps[64];
+    std::snprintf(fps, sizeof(fps), "%.2f", report.fps);
+    text += std::string(gt::kStatusKeyFps) + "=" + fps + "\n";
+    text += std::string(gt::kStatusKeyMonitor) + "=" + std::to_string(report.monitor) + "\n";
+    text += std::string(gt::kStatusKeyMonitorWidth) + "=" + std::to_string(report.monitor_width) + "\n";
+    text += std::string(gt::kStatusKeyMonitorHeight) + "=" + std::to_string(report.monitor_height) + "\n";
+    text += std::string(gt::kStatusKeyVdd) + "=" + (report.vdd ? "1" : "0") + "\n";
+    text += std::string(gt::kStatusKeyImu) + "=" + (report.imu ? "1" : "0") + "\n";
+    text += std::string(gt::kStatusKeyDetached) + "=" + (report.detached ? "1" : "0") + "\n";
+    char elapsed[64];
+    std::snprintf(elapsed, sizeof(elapsed), "%.2f", report.elapsed_s);
+    text += std::string(gt::kStatusKeyElapsed) + "=" + elapsed + "\n";
+    text += std::string(gt::kStatusKeyUpdated) + "=" +
+            std::to_string(static_cast<long long>(std::time(nullptr))) + "\n";
+    text += std::string(gt::kStatusKeyError) + "=" + gt::engine_status_sanitize(report.error) + "\n";
+
+    // UTF-8 in, wide API out: the status path may live under a non-ASCII
+    // profile directory, where the ANSI file APIs silently fail.
+    const std::filesystem::path destination = gt::path_from_utf8(report.path);
+    std::filesystem::path temporary = destination;
+    temporary += ".tmp";
+    std::ofstream output(temporary, std::ios::out | std::ios::trunc);
+    if (!output) {
+        return;
+    }
+    output << text;
+    output.flush();
+    if (!output) {
+        output.close();
+        std::error_code remove_error;
+        std::filesystem::remove(temporary, remove_error);
+        return;
+    }
+    output.close();
+    if (!MoveFileExW(temporary.c_str(), destination.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        std::error_code remove_error;
+        std::filesystem::remove(temporary, remove_error);
+    }
+}
 
 class UniqueHandle {
 public:
@@ -106,15 +190,14 @@ BOOL CALLBACK monitor_enum_proc(HMONITOR handle, HDC, LPRECT, LPARAM data) {
         monitor.cb = sizeof(monitor);
         if (EnumDisplayDevicesW(info.szDevice, 0, &monitor, 0)) {
             entry.description = monitor.DeviceString;
+            // Single matcher (unit-tested in vdd_selftest): the detached-
+            // glasses recovery below must agree with the active scan.
+            entry.glasses = gt::is_glasses_display(monitor.DeviceString, monitor.DeviceID,
+                                                   entry.primary);
             std::wstring searchable = entry.description + L" " + monitor.DeviceID;
             for (wchar_t& character : searchable) {
                 character = static_cast<wchar_t>(std::towlower(character));
             }
-            const bool branded = searchable.find(L"smartglasses") != std::wstring::npos ||
-                                 searchable.find(L"rayneo") != std::wstring::npos;
-            const bool tcl_secondary = !entry.primary &&
-                                       searchable.find(L"tcl") != std::wstring::npos;
-            entry.glasses = branded || tcl_secondary;
             entry.virtual_display = searchable.find(L"parsec") != std::wstring::npos ||
                                     searchable.find(L"psccdd") != std::wstring::npos ||
                                     searchable.find(L"vda") != std::wstring::npos;
@@ -133,13 +216,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             }
             return 0;
         case WM_KEYDOWN:
-            if (wparam == VK_ESCAPE && g_app != nullptr) {
-                g_app->quit = true;
-            }
-            if (wparam == 'R' && g_app != nullptr && g_app->imu != nullptr) {
-                g_app->imu->recenter();
-                std::printf("  recentered\n");
-            }
+            // No ESC quit or plain-R recenter here: both fired while typing
+            // or escaping other apps. Quit is Ctrl+Alt+Q / Ctrl+Shift+\ only
+            // (see register_global_hotkeys).
             return 0;
         case WM_HOTKEY:
             if (g_app != nullptr) {
@@ -165,11 +244,75 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                     case kHotkeyQuit:
                         g_app->quit = true;
                         break;
+                    case kHotkeyExitWorkspace:
+                        g_app->quit = true;
+                        break;
                     default:
                         break;
                 }
             }
             return 0;
+        // Private controller messages (app/engine_protocol.h). They are sent by
+        // "RayNeo Spatial.exe" with SendMessageTimeout, so every handler must
+        // return promptly and must never block on the render loop.
+        case gt::kEngineMessageRecenter:
+            if (g_app != nullptr && g_app->imu != nullptr) {
+                g_app->imu->recenter();
+                std::printf("  recentered (controller)\n");
+            }
+            return 0;
+        case gt::kEngineMessageToggleYaw:
+            if (g_app != nullptr) {
+                g_app->yaw_tracking = !g_app->yaw_tracking;
+                g_app->capture_yaw_hold = !g_app->yaw_tracking;
+                std::printf("  yaw tracking %s (controller)\n",
+                            g_app->yaw_tracking ? "on" : "off (view holds yaw)");
+            }
+            return 0;
+        case gt::kEngineMessageTogglePitch:
+            if (g_app != nullptr) {
+                g_app->pitch_tracking = !g_app->pitch_tracking;
+                g_app->capture_pitch_hold = !g_app->pitch_tracking;
+                std::printf("  pitch tracking %s (controller)\n",
+                            g_app->pitch_tracking ? "on" : "off (view holds pitch)");
+            }
+            return 0;
+        case gt::kEngineMessageReloadLayout:
+            if (g_app != nullptr) {
+                g_app->reload_layout = true;
+                std::printf("  layout reload requested (controller)\n");
+            }
+            return 0;
+        case gt::kEngineMessageQuit:
+            if (g_app != nullptr) {
+                g_app->quit = true;
+                std::printf("  graceful quit requested (controller)\n");
+            }
+            return 0;
+        case gt::kEngineMessageQuery: {
+            if (g_app == nullptr) {
+                return 0;
+            }
+            unsigned flags = 0;
+            if (g_app->yaw_tracking) {
+                flags |= gt::kEngineFlagYawTracking;
+            }
+            if (g_app->pitch_tracking) {
+                flags |= gt::kEngineFlagPitchTracking;
+            }
+            if (g_app->virtual_displays) {
+                flags |= gt::kEngineFlagVirtualDisplays;
+            }
+            if (g_app->imu != nullptr) {
+                flags |= gt::kEngineFlagHeadTracking;
+            }
+            if (g_topology_takeover) {
+                flags |= gt::kEngineFlagTopologyTakeover;
+            }
+            flags |= (static_cast<unsigned>(g_app->screen_count) << gt::kEngineScreenCountShift) &
+                     gt::kEngineScreenCountMask;
+            return static_cast<LRESULT>(flags);
+        }
         case WM_SETCURSOR:
             if (LOWORD(lparam) == HTCLIENT) {
                 SetCursor(nullptr);
@@ -187,7 +330,7 @@ void print_usage() {
         "spatial_desk - head-tracked spatial view on the RayNeo GT\n"
         "  --monitor N   display index to render on (default: first non-primary)\n"
         "  --fov DEG     virtual horizontal field of view (default 46)\n"
-        "  --seconds N   exit after N seconds (0 = run until ESC)\n"
+        "  --seconds N   exit after N seconds (0 = run until quit)\n"
         "  --no-imu      run without head tracking (fixed camera)\n"
         "  --freeze-still / --no-freeze-still  obsolete, accepted and ignored (the pose path\n"
         "                is always live; the gyro bias owns steady error)\n"
@@ -196,11 +339,14 @@ void print_usage() {
         "  --calibration FILE  sensor-to-head calibration (default config/orientation.json)\n"
         "  --layout FILE  screen layout (default config/layouts/default.json)\n"
         "  --no-virtual-displays  render labelled test screens without Parsec VDD\n"
-        "  global hotkeys: Ctrl+Alt+R recenter, Ctrl+Alt+Y yaw tracking, "
-        "Ctrl+Alt+P pitch tracking, Ctrl+Alt+Q quit\n");
+        "  --status FILE  write a key=value engine status file for the controller\n"
+        "  workspace mode detaches the laptop panel until exit (its windows move to\n"
+        "                the center desktop); Ctrl+Shift+\\ exits the engine\n"
+        "  global hotkeys: Ctrl+Shift+R recenter, Ctrl+Alt+Y yaw tracking, "
+        "Ctrl+Alt+P pitch tracking, Ctrl+Alt+Q quit, Ctrl+Shift:\\ exit workspace\n");
 }
 
-bool parse_args(int argc, char** argv, Options& opt) {
+bool parse_args(int argc, char** argv, Options& opt, bool& show_help) {
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         if (std::strcmp(a, "--monitor") == 0 && i + 1 < argc) {
@@ -222,10 +368,13 @@ bool parse_args(int argc, char** argv, Options& opt) {
             opt.calibration_path = argv[++i];
         } else if (std::strcmp(a, "--layout") == 0 && i + 1 < argc) {
             opt.layout_path = argv[++i];
+        } else if (std::strcmp(a, "--status") == 0 && i + 1 < argc) {
+            opt.status_path = argv[++i];
         } else if (std::strcmp(a, "--no-virtual-displays") == 0) {
             opt.virtual_displays = false;
         } else if (std::strcmp(a, "--help") == 0 || std::strcmp(a, "-h") == 0) {
             print_usage();
+            show_help = true;
             return false;
         } else {
             std::printf("unknown option: %s\n", a);
@@ -239,17 +388,20 @@ bool parse_args(int argc, char** argv, Options& opt) {
 void register_global_hotkeys(HWND hwnd) {
     struct Binding {
         int id;
+        UINT modifiers;
         UINT virtual_key;
         const wchar_t* label;
     };
     const Binding bindings[] = {
-        {kHotkeyRecenter, 'R', L"Ctrl+Alt+R (recenter)"},
-        {kHotkeyToggleYaw, 'Y', L"Ctrl+Alt+Y (yaw tracking)"},
-        {kHotkeyTogglePitch, 'P', L"Ctrl+Alt+P (pitch tracking)"},
-        {kHotkeyQuit, 'Q', L"Ctrl+Alt+Q (quit)"},
+        {kHotkeyRecenter, MOD_CONTROL | MOD_SHIFT, 'R', L"Ctrl+Shift+R (recenter)"},
+        {kHotkeyToggleYaw, MOD_CONTROL | MOD_ALT, 'Y', L"Ctrl+Alt+Y (yaw tracking)"},
+        {kHotkeyTogglePitch, MOD_CONTROL | MOD_ALT, 'P', L"Ctrl+Alt+P (pitch tracking)"},
+        {kHotkeyQuit, MOD_CONTROL | MOD_ALT, 'Q', L"Ctrl+Alt+Q (quit)"},
+        {kHotkeyExitWorkspace, MOD_CONTROL | MOD_SHIFT, VK_OEM_5,
+         L"Ctrl+Shift+\\ (exit workspace)"},
     };
     for (const Binding& binding : bindings) {
-        if (!RegisterHotKey(hwnd, binding.id, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
+        if (!RegisterHotKey(hwnd, binding.id, binding.modifiers | MOD_NOREPEAT,
                             binding.virtual_key)) {
             std::printf("  hotkey %ls unavailable (already in use by another app)\n", binding.label);
         }
@@ -311,9 +463,91 @@ std::filesystem::path repo_root_from_executable() {
 std::string default_repo_path(const std::filesystem::path& relative) {
     const std::filesystem::path root = repo_root_from_executable();
     if (root.empty()) {
-        return relative.string();
+        return gt::utf8_from_path(relative);
     }
-    return (root / relative).string();
+    return gt::utf8_from_path(root / relative);
+}
+
+// Restores the pre-workspace display topology (laptop panel back, original
+// primary) on every exit path once armed: normal shutdown restores explicitly
+// and disarms, while early returns and failures restore here.
+struct TopologyGuard {
+    gt::WorkspaceTopology topo;
+    gt::VddClient* vdd = nullptr;
+    bool armed = false;
+    ~TopologyGuard() {
+        try {
+            if (armed && topo.active && vdd != nullptr) {
+                std::string error;
+                if (!gt::restore_display_topology(topo, *vdd, error)) {
+                    std::printf("display topology restore failed: %s\n", error.c_str());
+                } else {
+                    // The failing path already published; re-publish so the
+                    // status file stops claiming the panel is detached.
+                    g_topology_takeover = false;
+                    g_status.detached = false;
+                    publish_status(g_status);
+                    if (topo.taskbar_state >= 0) {
+                        std::printf("  taskbar auto-hide: captured=%d before-restore=%d "
+                                    "after=%d%s\n",
+                                    topo.taskbar_state, topo.taskbar_before,
+                                    topo.taskbar_after,
+                                    topo.taskbar_reapplied ? " (re-applied)"
+                                                           : " (already correct)");
+                    }
+                }
+            }
+        } catch (...) {
+        }
+    }
+    void arm(gt::WorkspaceTopology&& snapshot) {
+        topo = std::move(snapshot);
+        armed = true;
+    }
+    void disarm() {
+        armed = false;
+    }
+};
+
+struct WorkspacePlan {
+    std::vector<std::pair<int, float>> driver_yaw;  // rank order
+    int center_driver = -1;
+    std::vector<gt::PlannedDesktop> desktops;
+};
+
+// Maps layout screens (by vdd_index) onto created driver indices in bind rank
+// order, then plans the desktop arrangement: center primary, yaw-ordered sides.
+bool plan_workspace_for_layout(const gt::Layout& layout, const std::vector<int>& driver_indices,
+                               WorkspacePlan& plan, std::string& error) {
+    if (layout.screens.size() != driver_indices.size()) {
+        error = "capture binding requires one virtual display per layout screen";
+        return false;
+    }
+    std::vector<size_t> order(layout.screens.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](size_t left, size_t right) {
+        return layout.screens[left].vdd_index < layout.screens[right].vdd_index;
+    });
+    plan.driver_yaw.clear();
+    for (size_t rank = 0; rank < order.size(); ++rank) {
+        plan.driver_yaw.emplace_back(driver_indices[rank],
+                                     layout.screens[order[rank]].yaw_deg);
+    }
+    plan.center_driver = gt::select_center_driver(plan.driver_yaw);
+    if (plan.center_driver < 0) {
+        error = "no virtual displays bound";
+        return false;
+    }
+    plan.desktops = gt::plan_workspace_desktops(plan.driver_yaw, plan.center_driver, 1920);
+    return true;
+}
+
+std::map<int, std::wstring> vdd_device_names() {
+    std::map<int, std::wstring> names;
+    for (const gt::VirtualDisplayInfo& info : gt::enumerate_virtual_displays()) {
+        names[info.driver_index] = info.device_name;
+    }
+    return names;
 }
 
 bool bind_desktop_captures(
@@ -352,9 +586,44 @@ bool bind_desktop_captures(
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int wmain(int argc, wchar_t** argv) {
+    // The controller redirects stdout/stderr to engine.log. Disable stdio
+    // buffering so a crash still leaves the last diagnostic line on disk.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
+    // First: per-monitor DPI awareness, before the takeover moves any window.
+    // A DPI-unaware process reads virtualized window rects on a stale scale
+    // that lags primary-display changes, while the display APIs speak
+    // physical pixels; the migration must compare and set one frame only.
+    enable_dpi_awareness();
+    // Wide entry point: argv stays exact for non-ASCII paths, then narrows to
+    // UTF-8 once. All file IO below decodes UTF-8 (see util/utf8_path.h).
+    std::vector<std::string> utf8_args;
+    utf8_args.reserve(static_cast<size_t>(argc < 0 ? 0 : argc));
+    for (int i = 0; i < argc; ++i) {
+        const std::wstring wide = argv[i] != nullptr ? argv[i] : L"";
+        const std::string narrow = gt::utf8_from_wide_text(wide);
+        if (!wide.empty() && narrow.empty()) {
+            std::printf("invalid command line argument %d: not representable in UTF-8\n", i);
+            return 2;
+        }
+        utf8_args.push_back(narrow);
+    }
+    std::vector<char*> narrow_argv;
+    narrow_argv.reserve(utf8_args.size());
+    for (std::string& arg : utf8_args) {
+        narrow_argv.push_back(arg.data());
+    }
     Options opt;
-    if (!parse_args(argc, argv, opt)) {
+    bool show_help = false;
+    if (!parse_args(argc, narrow_argv.data(), opt, show_help)) {
+        if (show_help) {
+            return 0;
+        }
+        g_status.path = opt.status_path;
+        g_status.state = gt::kStatusFailed;
+        g_status.error = "invalid command line (see --help)";
+        publish_status(g_status);
         return 2;
     }
     if (opt.calibration_path.empty()) {
@@ -364,9 +633,18 @@ int main(int argc, char** argv) {
         opt.layout_path =
             default_repo_path(std::filesystem::path("config") / "layouts" / "default.json");
     }
+    g_status.path = opt.status_path;
+    g_status.mode = opt.virtual_displays ? gt::kModeWorkspace : gt::kModePreview;
+    g_status.vdd = opt.virtual_displays;
+    g_status.imu = !opt.no_imu;
+    publish_status(g_status);
+
     if (!std::isfinite(opt.fov) || opt.fov < 20.0f || opt.fov > 150.0f ||
         !std::isfinite(opt.seconds) || opt.seconds < 0.0) {
         std::printf("invalid arguments: fov must be 20..150 degrees and seconds must be non-negative\n");
+        g_status.state = gt::kStatusFailed;
+        g_status.error = "invalid arguments: fov must be 20..150 degrees and seconds must be non-negative";
+        publish_status(g_status);
         return 2;
     }
 
@@ -374,10 +652,18 @@ int main(int argc, char** argv) {
     if (instance.get() == nullptr) {
         std::printf("could not create the single-instance guard (Windows error %lu)\n",
                     GetLastError());
+        g_status.state = gt::kStatusFailed;
+        g_status.error = "could not create the single-instance guard";
+        publish_status(g_status);
         return 1;
     }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         std::printf("spatial_desk is already running\n");
+        // The running engine rewrites this file every second, so the stale
+        // "failed" marker self-heals within one status interval.
+        g_status.state = gt::kStatusFailed;
+        g_status.error = "spatial_desk is already running";
+        publish_status(g_status);
         return 1;
     }
 
@@ -388,6 +674,10 @@ int main(int argc, char** argv) {
             std::printf("orientation calibration required: %s (%s)\n", opt.calibration_path.c_str(),
                         calibration_error.c_str());
             std::printf("run orientation_calibrate.exe while wearing the glasses, then start spatial_desk again\n");
+            g_status.state = gt::kStatusFailed;
+            g_status.error =
+                gt::engine_status_sanitize("orientation calibration required: " + calibration_error);
+            publish_status(g_status);
             return 1;
         }
     }
@@ -395,6 +685,9 @@ int main(int argc, char** argv) {
     std::string layout_error;
     if (!gt::load_layout(opt.layout_path, layout, layout_error)) {
         std::printf("layout load failed: %s (%s)\n", opt.layout_path.c_str(), layout_error.c_str());
+        g_status.state = gt::kStatusFailed;
+        g_status.error = gt::engine_status_sanitize("layout load failed: " + layout_error);
+        publish_status(g_status);
         return 1;
     }
     if (!opt.fov_explicit) {
@@ -403,25 +696,151 @@ int main(int argc, char** argv) {
 
     gt::VddClient vdd;
     std::vector<gt::ConfiguredDisplay> virtual_displays;
+    WorkspacePlan workspace_plan;
+    TopologyGuard topology_guard;
+    gt::WorkspaceTopology workspace_topo;
     if (opt.virtual_displays) {
         std::string vdd_error;
-        if (!vdd.connect(layout.screens.size(), vdd_error) ||
-            !gt::configure_virtual_displays(vdd.display_indices(), 1920, 1080, 120,
-                                            virtual_displays, vdd_error)) {
+        std::wstring internal_display;
+        WorkspacePlan plan;
+        // The pristine arrangement is captured before the VDDs exist:
+        // connecting reshuffles it, and the restore pins exactly this back.
+        std::vector<gt::DisplayModeSnapshot> pristine;
+        bool started = gt::snapshot_attached_displays(pristine, vdd_error);
+        if (started) {
+            // The laptop panel (if any) is detached by the takeover below, so
+            // it must be identified on the pristine topology: connecting the
+            // VDDs reshuffles GDI device names, and a post-connect name may
+            // not match these snapshots (the window record then finds nothing).
+            started = gt::find_internal_display(internal_display, vdd_error);
+        }
+        gt::MigrationSeed seed;
+        if (started && !internal_display.empty()) {
+            for (const gt::DisplayModeSnapshot& snapshot : pristine) {
+                if (snapshot.device_name != internal_display) {
+                    continue;
+                }
+                seed.laptop_home.left = snapshot.mode.dmPosition.x;
+                seed.laptop_home.top = snapshot.mode.dmPosition.y;
+                seed.laptop_home.right =
+                    seed.laptop_home.left + static_cast<LONG>(snapshot.mode.dmPelsWidth);
+                seed.laptop_home.bottom =
+                    seed.laptop_home.top + static_cast<LONG>(snapshot.mode.dmPelsHeight);
+                seed.have_laptop_home = true;
+                gt::snapshot_laptop_windows(seed.laptop_home, seed.windows);
+                break;
+            }
+        }
+        if (started && !opt.monitor_explicit) {
+            // Fail fast before touching anything: starting a takeover without
+            // the glasses just churns the topology and exits at monitor
+            // selection.
+            std::vector<MonitorEntry> preflight;
+            EnumDisplayMonitors(nullptr, nullptr, monitor_enum_proc,
+                                reinterpret_cast<LPARAM>(&preflight));
+            bool glasses_present = false;
+            for (const MonitorEntry& monitor : preflight) {
+                if (monitor.glasses) {
+                    glasses_present = true;
+                    break;
+                }
+            }
+            if (!glasses_present) {
+                // Connected but detached ("Disconnect this display"
+                // persists): GDI re-attach first, CCD path reactivation for
+                // the deeper disconnect (GDI loses the EDID while the target
+                // persists), then one rescan before failing.
+                std::wstring detached;
+                bool recovered = false;
+                if (gt::find_detached_glasses_display(detached)) {
+                    std::printf("found the disconnected glasses display (%ls); re-attaching\n",
+                                detached.c_str());
+                    std::string recover_error;
+                    recovered = gt::reattach_detached_glasses(recover_error);
+                    if (!recovered) {
+                        std::printf("glasses re-attach failed: %s\n", recover_error.c_str());
+                    }
+                }
+                if (!recovered) {
+                    // Silent unless it works; the failure dump below covers
+                    // the rest (same rule as the wait loop).
+                    std::string path_error;
+                    if (gt::reactivate_glasses_path(path_error)) {
+                        std::printf("re-activated the glasses display path\n");
+                    }
+                }
+                preflight.clear();
+                EnumDisplayMonitors(nullptr, nullptr, monitor_enum_proc,
+                                    reinterpret_cast<LPARAM>(&preflight));
+                for (const MonitorEntry& monitor : preflight) {
+                    if (monitor.glasses) {
+                        glasses_present = true;
+                        break;
+                    }
+                }
+            }
+            if (!glasses_present) {
+                std::printf("the RayNeo glasses display was not found; connect it and use "
+                            "Extend mode (Win+P), then start again\n");
+                std::printf("display landscape at failure:\n%s",
+                            gt::describe_display_landscape().c_str());
+                g_status.state = gt::kStatusFailed;
+                g_status.error = "the RayNeo glasses display was not found";
+                publish_status(g_status);
+                return 1;
+            }
+        }
+        if (started && !gt::wait_for_no_virtual_displays(10000)) {
+            std::printf("warning: stale virtual displays are still attached; continuing\n");
+        }
+        if (started) {
+            started = vdd.connect(layout.screens.size(), vdd_error);
+        }
+        if (started) {
+            started = plan_workspace_for_layout(layout, vdd.display_indices(), plan, vdd_error);
+        }
+        if (started) {
+            started = gt::apply_workspace_topology(
+                pristine, plan.desktops, plan.center_driver, 1920, 1080, 120, internal_display,
+                seed, vdd, workspace_topo, virtual_displays, vdd_error);
+        }
+        if (!started) {
             std::printf("virtual display startup failed: %s\n", vdd_error.c_str());
-            std::printf("install the signed Parsec VDD, use Windows Extend mode, or pass "
-                        "--no-virtual-displays for the renderer-only diagnostic\n");
+            if (vdd.connected()) {
+                std::printf("if the laptop display looks wrong, use the controller's Recover "
+                            "displays or press Win+P (Extend)\n");
+            } else {
+                std::printf("install the signed Parsec VDD, use Windows Extend mode, or pass "
+                            "--no-virtual-displays for the renderer-only diagnostic\n");
+            }
+            g_status.state = gt::kStatusFailed;
+            g_status.error = gt::engine_status_sanitize("virtual display startup failed: " + vdd_error);
+            publish_status(g_status);
+            vdd.disconnect();
             return 1;
         }
+        topology_guard.vdd = &vdd;
+        const int placed_windows = workspace_topo.windows_placed;
+        const int repaired_takeover = workspace_topo.windows_repaired;
+        topology_guard.arm(std::move(workspace_topo));
+        g_topology_takeover = true;
+        g_status.detached = !internal_display.empty();
+        workspace_plan = plan;
         std::printf("created %zu virtual displays (Parsec VDD version %d)\n",
                     virtual_displays.size(), vdd.driver_version());
         for (const auto& display : virtual_displays) {
-            std::printf("  VDD[%d] %dx%d@%dHz at (%d,%d)\n", display.driver_index,
-                        display.width, display.height, display.refresh_hz, display.x, display.y);
+            std::printf("  VDD[%d] %dx%d@%dHz at (%d,%d)%s\n", display.driver_index,
+                        display.width, display.height, display.refresh_hz, display.x, display.y,
+                        display.driver_index == plan.center_driver ? " (primary)" : "");
+        }
+        if (!internal_display.empty()) {
+            std::printf("  detached the laptop display; moved %d windows to the center desktop\n",
+                        placed_windows);
+            if (repaired_takeover > 0) {
+                std::printf("  unminimized %d windows after the detach\n", repaired_takeover);
+            }
         }
     }
-
-    enable_dpi_awareness();
 
     std::vector<MonitorEntry> monitors;
     EnumDisplayMonitors(nullptr, nullptr, monitor_enum_proc, reinterpret_cast<LPARAM>(&monitors));
@@ -437,6 +856,9 @@ int main(int argc, char** argv) {
         if (opt.monitor < 0 || opt.monitor >= static_cast<int>(monitors.size())) {
             std::printf("invalid monitor index %d; choose one of the indices listed above\n",
                         opt.monitor);
+            g_status.state = gt::kStatusFailed;
+            g_status.error = "invalid monitor index";
+            publish_status(g_status);
             return 2;
         }
         selected = opt.monitor;
@@ -464,12 +886,84 @@ int main(int argc, char** argv) {
             }
         }
     }
+    if (selected < 0 && !opt.monitor_explicit) {
+        // The glasses link flaps under topology churn, and a recalled
+        // "Disconnect this display" can land asynchronously after the
+        // takeover; give it a bounded window to come back before failing
+        // (the takeover already ran, so waiting costs nothing but time).
+        // The recovery runs on every pass, not just once: a single shot can
+        // fire while the adapter is still flagged attached.
+        std::printf("waiting for the glasses display to reappear...\n");
+        for (int wait_s = 0; wait_s < 15 && selected < 0; ++wait_s) {
+            std::wstring detached;
+            bool recovered = false;
+            if (gt::find_detached_glasses_display(detached)) {
+                std::printf("the glasses display is disconnected; re-attaching...\n");
+                std::string recover_error;
+                recovered = gt::reattach_detached_glasses(recover_error);
+                if (!recovered) {
+                    std::printf("glasses re-attach failed: %s\n", recover_error.c_str());
+                }
+            }
+            if (!recovered) {
+                // Deeper disconnect (EDID gone, CCD target persists):
+                // silent unless it works; the failure dump covers the rest.
+                std::string path_error;
+                if (gt::reactivate_glasses_path(path_error)) {
+                    std::printf("re-activated the glasses display path\n");
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            monitors.clear();
+            EnumDisplayMonitors(nullptr, nullptr, monitor_enum_proc,
+                                reinterpret_cast<LPARAM>(&monitors));
+            for (size_t i = 0; i < monitors.size(); ++i) {
+                if (monitors[i].glasses) {
+                    selected = static_cast<int>(i);
+                    break;
+                }
+            }
+            // No fallback inside the loop: keep every pass for the glasses
+            // (a non-glasses appearance must not preempt a recovery that
+            // lands a pass later).
+        }
+        if (selected < 0) {
+            // One fallback pass after the wait: a non-glasses display that
+            // appeared mid-wait is better than nothing.
+            for (size_t i = 0; i < monitors.size(); ++i) {
+                if (!monitors[i].virtual_display) {
+                    selected = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+        if (selected >= 0) {
+            if (monitors[static_cast<size_t>(selected)].glasses) {
+                std::printf("glasses display reappeared, continuing\n");
+            } else {
+                std::printf("glasses display not found; continuing on non-glasses "
+                            "fallback [%d]\n",
+                            selected);
+            }
+        } else {
+            // Diagnostic, not noise: distinguishes a physical link flap
+            // (nothing enumerates) from a deactivation the recovery missed.
+            std::printf("display landscape at failure:\n%s",
+                        gt::describe_display_landscape().c_str());
+        }
+    }
     if (selected < 0) {
         if (monitors.empty()) {
             std::printf("no monitors found\n");
+            g_status.state = gt::kStatusFailed;
+            g_status.error = "no monitors found";
+            publish_status(g_status);
         } else {
-            std::printf("only Parsec virtual displays are available to render on; "
-                        "pass --monitor N to choose one explicitly\n");
+            std::printf("the RayNeo glasses display was not found; check Extend mode (Win+P), "
+                        "or pass --monitor N to choose one explicitly\n");
+            g_status.state = gt::kStatusFailed;
+            g_status.error = "the RayNeo glasses display was not found";
+            publish_status(g_status);
         }
         return 1;
     }
@@ -477,7 +971,7 @@ int main(int argc, char** argv) {
     const int width = target.rect.right - target.rect.left;
     const int height = target.rect.bottom - target.rect.top;
     std::printf("rendering on [%d] %dx%d\n", selected, width, height);
-    std::printf("controls: ESC quit, R recenter head tracking\n");
+    std::printf("controls: Ctrl+Alt+Q quit, Ctrl+Shift+R recenter head tracking\n");
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -485,34 +979,46 @@ int main(int argc, char** argv) {
     wc.lpfnWndProc = window_proc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"RayNeoSpatialDesk";
+    wc.lpszClassName = gt::kEngineWindowClass;
     if (RegisterClassExW(&wc) == 0) {
         std::printf("RegisterClassExW failed (%lu)\n", GetLastError());
+        g_status.state = gt::kStatusFailed;
+        g_status.error = "RegisterClassExW failed";
+        publish_status(g_status);
         return 1;
     }
 
-    HWND hwnd = CreateWindowExW(WS_EX_TOPMOST, L"RayNeoSpatialDesk", L"RayNeo Spatial Desk",
+    HWND hwnd = CreateWindowExW(WS_EX_TOPMOST, gt::kEngineWindowClass, gt::kEngineWindowTitle,
                                 WS_POPUP, target.rect.left, target.rect.top, width, height,
                                 nullptr, nullptr, wc.hInstance, nullptr);
     if (hwnd == nullptr) {
         std::printf("CreateWindowExW failed (%lu)\n", GetLastError());
+        g_status.state = gt::kStatusFailed;
+        g_status.error = "CreateWindowExW failed";
+        publish_status(g_status);
         return 1;
     }
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
-    std::printf("global hotkeys: Ctrl+Alt+R recenter, Ctrl+Alt+Y yaw tracking, "
-                "Ctrl+Alt+P pitch tracking, Ctrl+Alt+Q quit\n");
+    std::printf("global hotkeys: Ctrl+Shift+R recenter, Ctrl+Alt+Y yaw tracking, "
+                "Ctrl+Alt+P pitch tracking, Ctrl+Alt+Q quit, Ctrl+Shift:\\ exit workspace\n");
     register_global_hotkeys(hwnd);
 
     gt::Renderer renderer;
     std::string error;
     if (!renderer.init(hwnd, static_cast<uint32_t>(width), static_cast<uint32_t>(height), error)) {
         std::printf("renderer init failed: %s\n", error.c_str());
+        g_status.state = gt::kStatusFailed;
+        g_status.error = gt::engine_status_sanitize("renderer init failed: " + error);
+        publish_status(g_status);
         DestroyWindow(hwnd);
         return 1;
     }
     if (!renderer.set_layout(layout, error)) {
         std::printf("renderer layout failed: %s\n", error.c_str());
+        g_status.state = gt::kStatusFailed;
+        g_status.error = gt::engine_status_sanitize("renderer layout failed: " + error);
+        publish_status(g_status);
         renderer.shutdown();
         DestroyWindow(hwnd);
         return 1;
@@ -523,11 +1029,21 @@ int main(int argc, char** argv) {
                 layout.capture_policy.active_fps, layout.capture_policy.leave_deg,
                 layout.capture_policy.mid_fps, layout.capture_policy.idle_fps,
                 layout.capture_policy.enter_deg);
+    g_status.state = gt::kStatusReady;
+    g_status.screens = static_cast<int>(layout.screens.size());
+    g_status.monitor = selected;
+    g_status.monitor_width = width;
+    g_status.monitor_height = height;
+    g_status.error.clear();
+    publish_status(g_status);
 
     std::vector<std::unique_ptr<gt::DesktopDuplicator>> captures;
     if (opt.virtual_displays &&
         !bind_desktop_captures(renderer, layout, virtual_displays, captures, error)) {
         std::printf("desktop capture startup failed: %s\n", error.c_str());
+        g_status.state = gt::kStatusFailed;
+        g_status.error = gt::engine_status_sanitize("desktop capture startup failed: " + error);
+        publish_status(g_status);
         renderer.shutdown();
         DestroyWindow(hwnd);
         return 1;
@@ -538,6 +1054,8 @@ int main(int argc, char** argv) {
     AppState state;
     state.imu = opt.no_imu ? nullptr : &imu;
     g_app = &state;
+    state.screen_count = static_cast<int>(layout.screens.size());
+    state.virtual_displays = opt.virtual_displays;
     if (!opt.no_imu) {
         imu.set_sensor_to_head(sensor_to_head);
         std::printf("loaded orientation calibration: %s\n", opt.calibration_path.c_str());
@@ -552,8 +1070,9 @@ int main(int argc, char** argv) {
 
     std::ofstream diagnostics;
     if (!opt.log_path.empty()) {
-        const bool write_header = !std::filesystem::exists(opt.log_path);
-        diagnostics.open(opt.log_path, std::ios::out | std::ios::app);
+        const std::filesystem::path log_file = gt::path_from_utf8(opt.log_path);
+        const bool write_header = !std::filesystem::exists(log_file);
+        diagnostics.open(log_file, std::ios::out | std::ios::app);
         if (diagnostics.is_open() && write_header) {
             diagnostics << "elapsed_s,tick_100us,gx_raw,gy_raw,gz_raw,bias_x,bias_y,bias_z,"
                            "view_yaw_deg,view_pitch_deg,view_roll_deg,still,"
@@ -563,10 +1082,16 @@ int main(int argc, char** argv) {
     }
     int log_rows = 0;
     std::error_code layout_time_error;
-    auto layout_write_time = std::filesystem::last_write_time(opt.layout_path, layout_time_error);
+    auto layout_write_time =
+        std::filesystem::last_write_time(gt::path_from_utf8(opt.layout_path), layout_time_error);
     double next_layout_check = 0.5;
     double next_capture_error_log = 0.0;
     int consecutive_capture_failures = 0;
+    // Mid-run fatalities must surface as a failed exit, not a clean stop:
+    // the controller maps exit 0 to "exited normally" without consulting the
+    // status file.
+    bool engine_failed = false;
+    std::string fatal_detail;
 
     while (!state.quit) {
         MSG message;
@@ -574,35 +1099,50 @@ int main(int argc, char** argv) {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
-        if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) {
-            state.quit = true;
-        }
+        // Deliberately no GetAsyncKeyState(VK_ESCAPE) poll: it is
+        // process-global and quit the workspace while escaping other apps.
         const double elapsed = std::chrono::duration<double>(SteadyClock::now() - start).count();
         if (opt.seconds > 0.0 && elapsed >= opt.seconds) {
             state.quit = true;
         }
 
-        if (elapsed >= next_layout_check) {
+        const bool force_layout_reload = state.reload_layout;
+        state.reload_layout = false;
+        if (elapsed >= next_layout_check || force_layout_reload) {
             next_layout_check = elapsed + 0.5;
             std::error_code time_error;
-            const auto write_time = std::filesystem::last_write_time(opt.layout_path, time_error);
-            if (!time_error && (layout_time_error || write_time != layout_write_time)) {
-                layout_write_time = write_time;
-                layout_time_error.clear();
+            const auto write_time =
+                std::filesystem::last_write_time(gt::path_from_utf8(opt.layout_path), time_error);
+            const bool mtime_changed =
+                !time_error && (layout_time_error || write_time != layout_write_time);
+            if (mtime_changed || force_layout_reload) {
                 gt::Layout candidate;
                 std::string reload_error;
                 const size_t previous_display_count = layout.screens.size();
                 bool displays_changed = false;
+                bool plan_changed = false;
                 bool renderer_changed = false;
+                const WorkspacePlan previous_plan = workspace_plan;
+                WorkspacePlan reload_plan;
                 std::vector<std::unique_ptr<gt::DesktopDuplicator>> candidate_captures;
                 bool reload_ok = gt::load_layout(opt.layout_path, candidate, reload_error);
                 if (reload_ok && opt.virtual_displays) {
                     displays_changed = candidate.screens.size() != previous_display_count;
                     if (displays_changed) {
-                        reload_ok = vdd.resize(candidate.screens.size(), reload_error) &&
-                                    gt::configure_virtual_displays(
-                                        vdd.display_indices(), 1920, 1080, 120, virtual_displays,
-                                        reload_error);
+                        reload_ok = vdd.resize(candidate.screens.size(), reload_error);
+                    }
+                    if (reload_ok &&
+                        plan_workspace_for_layout(candidate, vdd.display_indices(), reload_plan,
+                                                  reload_error)) {
+                        if (reload_plan.desktops != workspace_plan.desktops ||
+                            reload_plan.center_driver != workspace_plan.center_driver) {
+                            reload_ok = gt::reposition_virtual_displays(
+                                reload_plan.desktops, vdd_device_names(), reload_plan.center_driver,
+                                1920, 1080, 120, virtual_displays, reload_error);
+                            plan_changed = reload_ok;
+                        }
+                    } else {
+                        reload_ok = false;
                     }
                 }
                 if (reload_ok) {
@@ -614,36 +1154,56 @@ int main(int argc, char** argv) {
                                                       candidate_captures, reload_error);
                 }
                 if (reload_ok) {
+                    // Only a successful load advances the watermark: a torn
+                    // read (possible from non-atomic hand edits) is retried
+                    // on the next check instead of being forgotten.
+                    if (!time_error) {
+                        layout_write_time = write_time;
+                        layout_time_error.clear();
+                    }
                     layout = std::move(candidate);
                     if (opt.virtual_displays) {
                         captures = std::move(candidate_captures);
                         capture_states.assign(captures.size(), CaptureTierState{});
+                        workspace_plan = reload_plan;
                     }
                     if (!opt.fov_explicit) {
                         opt.fov = layout.fov_deg;
                     }
                     std::printf("reloaded layout (%zu screens)\n", layout.screens.size());
+                    state.screen_count = static_cast<int>(layout.screens.size());
+                    g_status.screens = state.screen_count;
+                    publish_status(g_status);
                 } else {
                     if (renderer_changed) {
                         std::string renderer_rollback_error;
                         if (!renderer.set_layout(layout, renderer_rollback_error)) {
                             std::printf("renderer layout rollback failed: %s\n",
                                         renderer_rollback_error.c_str());
+                            engine_failed = true;
+                            fatal_detail =
+                                "renderer layout rollback failed: " + renderer_rollback_error;
                             state.quit = true;
                         }
                     }
-                    if (opt.virtual_displays && displays_changed) {
+                    if (opt.virtual_displays && (displays_changed || plan_changed)) {
                         std::string rollback_error;
                         if (!vdd.resize(previous_display_count, rollback_error) ||
-                            !gt::configure_virtual_displays(vdd.display_indices(), 1920, 1080, 120,
-                                                            virtual_displays, rollback_error)) {
+                            !gt::reposition_virtual_displays(
+                                previous_plan.desktops, vdd_device_names(),
+                                previous_plan.center_driver, 1920, 1080, 120, virtual_displays,
+                                rollback_error)) {
                             std::printf("virtual display rollback failed: %s\n",
                                         rollback_error.c_str());
+                            engine_failed = true;
+                            fatal_detail = "virtual display rollback failed: " + rollback_error;
                             state.quit = true;
                         } else if (!bind_desktop_captures(renderer, layout, virtual_displays,
                                                           captures, rollback_error)) {
                             std::printf("desktop capture rollback failed: %s\n",
                                         rollback_error.c_str());
+                            engine_failed = true;
+                            fatal_detail = "desktop capture rollback failed: " + rollback_error;
                             state.quit = true;
                         }
                     }
@@ -655,6 +1215,8 @@ int main(int argc, char** argv) {
         if (opt.virtual_displays && vdd.consecutive_keepalive_failures() >= 5) {
             std::printf("Parsec VDD keepalive failed repeatedly; exiting before its watchdog "
                         "removes the desktops\n");
+            engine_failed = true;
+            fatal_detail = "Parsec VDD keepalive failed repeatedly";
             state.quit = true;
         }
 
@@ -731,6 +1293,8 @@ int main(int argc, char** argv) {
                     frame_capture_failed = true;
                     if (++consecutive_capture_failures >= kFatalCaptureFailures) {
                         std::printf("desktop capture kept failing; exiting\n");
+                        engine_failed = true;
+                        fatal_detail = "desktop capture kept failing";
                         state.quit = true;
                     }
                 }
@@ -746,6 +1310,8 @@ int main(int argc, char** argv) {
                 frame_capture_failed = true;
                 if (++consecutive_capture_failures >= kFatalCaptureFailures) {
                     std::printf("desktop capture kept failing; exiting\n");
+                    engine_failed = true;
+                    fatal_detail = "desktop capture kept failing";
                     state.quit = true;
                 }
                 continue;
@@ -787,6 +1353,8 @@ int main(int argc, char** argv) {
                 frame_capture_failed = true;
                 if (++consecutive_capture_failures >= kFatalCaptureFailures) {
                     std::printf("desktop cursor update kept failing; exiting\n");
+                    engine_failed = true;
+                    fatal_detail = "desktop cursor update kept failing";
                     state.quit = true;
                 }
             }
@@ -800,6 +1368,11 @@ int main(int argc, char** argv) {
         renderer.render(head, opt.fov, static_cast<float>(elapsed));
         if (!renderer.present()) {
             std::printf("present failed, exiting\n");
+            engine_failed = true;
+            fatal_detail = "present failed";
+            g_status.state = gt::kStatusFailed;
+            g_status.error = "present failed";
+            publish_status(g_status);
             break;
         }
         ++frames;
@@ -840,25 +1413,66 @@ int main(int argc, char** argv) {
                     e.yaw_deg, e.pitch_deg, e.roll_deg);
             }
             frames_at_stat = frames;
+            g_status.fps = fps;
+            g_status.elapsed_s = elapsed;
+            g_status.screens = state.screen_count;
+            publish_status(g_status);
             next_stat += 1.0;
         }
     }
 
     std::printf("shutting down\n");
+    captures.clear();
+    if (topology_guard.armed) {
+        std::printf("restoring the laptop display (removing virtual desktops)...\n");
+        std::string topo_error;
+        if (!gt::restore_display_topology(topology_guard.topo, vdd, topo_error)) {
+            std::printf("display topology restore failed: %s\n", topo_error.c_str());
+            engine_failed = true;
+            fatal_detail = "display topology restore failed: " + topo_error;
+        } else {
+            g_topology_takeover = false;
+            g_status.detached = false;
+            if (topology_guard.topo.windows_restored > 0) {
+                std::printf("  moved %d windows back to the laptop display\n",
+                            topology_guard.topo.windows_restored);
+            }
+            if (topology_guard.topo.windows_repaired > 0) {
+                std::printf("  unminimized %d windows after the restore\n",
+                            topology_guard.topo.windows_repaired);
+            }
+            if (topology_guard.topo.taskbar_state >= 0) {
+                std::printf("  taskbar auto-hide: captured=%d before-restore=%d after=%d%s\n",
+                            topology_guard.topo.taskbar_state,
+                            topology_guard.topo.taskbar_before,
+                            topology_guard.topo.taskbar_after,
+                            topology_guard.topo.taskbar_reapplied ? " (re-applied)"
+                                                                  : " (already correct)");
+            }
+        }
+        topology_guard.disarm();
+    }
+    if (engine_failed) {
+        g_status.state = gt::kStatusFailed;
+        g_status.error = gt::engine_status_sanitize(fatal_detail);
+    } else if (g_status.state != gt::kStatusFailed) {
+        g_status.state = gt::kStatusStopped;
+    }
+    g_status.elapsed_s = 0.0;
+    publish_status(g_status);
     UnregisterHotKey(hwnd, kHotkeyRecenter);
     UnregisterHotKey(hwnd, kHotkeyToggleYaw);
     UnregisterHotKey(hwnd, kHotkeyTogglePitch);
     UnregisterHotKey(hwnd, kHotkeyQuit);
+    UnregisterHotKey(hwnd, kHotkeyExitWorkspace);
     if (diagnostics.is_open()) {
         diagnostics.close();
     }
     if (!opt.no_imu) {
         imu.stop();
     }
-    captures.clear();
-    vdd.disconnect();
     g_app = nullptr;
     renderer.shutdown();
     DestroyWindow(hwnd);
-    return 0;
+    return engine_failed ? 1 : 0;
 }

@@ -110,25 +110,6 @@ std::wstring widen(const std::string& text) {
     return output;
 }
 
-bool create_solid_texture(ID3D11Device* device, uint32_t bgra,
-                          ComPtr<ID3D11ShaderResourceView>& view) {
-    D3D11_TEXTURE2D_DESC description{};
-    description.Width = 1;
-    description.Height = 1;
-    description.MipLevels = 1;
-    description.ArraySize = 1;
-    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    description.SampleDesc.Count = 1;
-    description.Usage = D3D11_USAGE_IMMUTABLE;
-    description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    D3D11_SUBRESOURCE_DATA data{};
-    data.pSysMem = &bgra;
-    data.SysMemPitch = sizeof(bgra);
-    ComPtr<ID3D11Texture2D> texture;
-    return SUCCEEDED(device->CreateTexture2D(&description, &data, &texture)) &&
-           SUCCEEDED(device->CreateShaderResourceView(texture.Get(), nullptr, &view));
-}
-
 bool create_label_texture(ID3D11Device* device, const ScreenLayout& screen,
                           ComPtr<ID3D11ShaderResourceView>& view) {
     constexpr int width = 512;
@@ -408,7 +389,7 @@ bool Renderer::init(HWND hwnd, uint32_t width, uint32_t height, std::string& err
     }
 
     D3D11_BUFFER_DESC vb_desc{};
-    constexpr UINT kMaximumVertices = 84 + 8 * 6 + 6;
+    constexpr UINT kMaximumVertices = 8 * 6;
     vb_desc.ByteWidth = kMaximumVertices * sizeof(Vertex);
     vb_desc.Usage = D3D11_USAGE_DYNAMIC;
     vb_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
@@ -429,9 +410,8 @@ bool Renderer::init(HWND hwnd, uint32_t width, uint32_t height, std::string& err
     sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
     sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
-    if (FAILED(device_->CreateSamplerState(&sampler_desc, &sampler_)) ||
-        !create_solid_texture(device_.Get(), 0xFFFFFFFFu, white_texture_)) {
-        error = "texture resources creation failed";
+    if (FAILED(device_->CreateSamplerState(&sampler_desc, &sampler_))) {
+        error = "sampler creation failed";
         return false;
     }
 
@@ -465,12 +445,6 @@ bool Renderer::init(HWND hwnd, uint32_t width, uint32_t height, std::string& err
     depth_desc_state.StencilEnable = FALSE;
     if (FAILED(device_->CreateDepthStencilState(&depth_desc_state, &depth_state_))) {
         error = "depth stencil state creation failed";
-        return false;
-    }
-    depth_desc_state.DepthEnable = FALSE;
-    depth_desc_state.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
-    if (FAILED(device_->CreateDepthStencilState(&depth_desc_state, &depth_disabled_state_))) {
-        error = "depth-disabled stencil state creation failed";
         return false;
     }
     depth_desc_state.DepthEnable = TRUE;
@@ -507,15 +481,7 @@ bool Renderer::set_layout(const Layout& layout, std::string& error) {
     }
 
     std::vector<Vertex> vertices;
-    vertices.reserve(84 + layout.screens.size() * 6 + 6);
-    for (int i = -10; i <= 10; ++i) {
-        const float t = static_cast<float>(i) * 0.5f;
-        vertices.push_back(Vertex{t, 0.0f, -5.0f, 0.22f, 0.22f, 0.26f, 1.0f, 0.5f, 0.5f});
-        vertices.push_back(Vertex{t, 0.0f, 5.0f, 0.22f, 0.22f, 0.26f, 1.0f, 0.5f, 0.5f});
-        vertices.push_back(Vertex{-5.0f, 0.0f, t, 0.22f, 0.22f, 0.26f, 1.0f, 0.5f, 0.5f});
-        vertices.push_back(Vertex{5.0f, 0.0f, t, 0.22f, 0.22f, 0.26f, 1.0f, 0.5f, 0.5f});
-    }
-    const UINT new_line_vertex_count = static_cast<UINT>(vertices.size());
+    vertices.reserve(layout.screens.size() * 6);
 
     std::vector<ScreenDraw> new_draws;
     new_draws.reserve(layout.screens.size());
@@ -535,15 +501,6 @@ bool Renderer::set_layout(const Layout& layout, std::string& error) {
         new_draws.push_back(std::move(draw));
     }
 
-    const UINT new_crosshair_start = static_cast<UINT>(vertices.size());
-    constexpr float s = 0.010f;
-    constexpr float z = 0.5f;
-    vertices.push_back(Vertex{-s, -s, z, 1.0f, 1.0f, 1.0f, 1.0f, 0.5f, 0.5f});
-    vertices.push_back(Vertex{s, -s, z, 1.0f, 1.0f, 1.0f, 1.0f, 0.5f, 0.5f});
-    vertices.push_back(Vertex{s, s, z, 1.0f, 1.0f, 1.0f, 1.0f, 0.5f, 0.5f});
-    vertices.push_back(Vertex{-s, -s, z, 1.0f, 1.0f, 1.0f, 1.0f, 0.5f, 0.5f});
-    vertices.push_back(Vertex{s, s, z, 1.0f, 1.0f, 1.0f, 1.0f, 0.5f, 0.5f});
-    vertices.push_back(Vertex{-s, s, z, 1.0f, 1.0f, 1.0f, 1.0f, 0.5f, 0.5f});
 
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (FAILED(context_->Map(vertex_buffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
@@ -553,8 +510,6 @@ bool Renderer::set_layout(const Layout& layout, std::string& error) {
     std::memcpy(mapped.pData, vertices.data(), vertices.size() * sizeof(Vertex));
     context_->Unmap(vertex_buffer_.Get(), 0);
 
-    line_vertex_count_ = new_line_vertex_count;
-    crosshair_vertex_start_ = new_crosshair_start;
     screen_draws_ = std::move(new_draws);
     return true;
 }
@@ -619,11 +574,9 @@ void Renderer::shutdown() {
     cursor_constant_buffer_.Reset();
     rasterizer_.Reset();
     depth_state_.Reset();
-    depth_disabled_state_.Reset();
     cursor_depth_state_.Reset();
     cursor_blend_state_.Reset();
     sampler_.Reset();
-    white_texture_.Reset();
     screen_draws_.clear();
     context_.Reset();
     device_.Reset();
@@ -671,10 +624,6 @@ void Renderer::render(const Quat& head, float fov_horizontal_deg, float time_s) 
     DirectX::XMStoreFloat4x4(&matrix, DirectX::XMMatrixTranspose(view * projection));
     context_->UpdateSubresource(constant_buffer_.Get(), 0, nullptr, &matrix, 0, 0);
 
-    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
-    ID3D11ShaderResourceView* white[] = {white_texture_.Get()};
-    context_->PSSetShaderResources(0, 1, white);
-    context_->Draw(line_vertex_count_, 0);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     for (const ScreenDraw& screen : screen_draws_) {
         ID3D11ShaderResourceView* texture[] = {
@@ -760,13 +709,6 @@ void Renderer::render(const Quat& head, float fov_horizontal_deg, float time_s) 
         }
     }
 
-    DirectX::XMStoreFloat4x4(&matrix, DirectX::XMMatrixTranspose(projection));
-    context_->UpdateSubresource(constant_buffer_.Get(), 0, nullptr, &matrix, 0, 0);
-    context_->OMSetDepthStencilState(depth_disabled_state_.Get(), 0);
-    context_->PSSetShader(pixel_shader_.Get(), nullptr, 0);
-    context_->IASetVertexBuffers(0, 1, buffers, &stride, &offset);
-    context_->PSSetShaderResources(0, 1, white);
-    context_->Draw(6, crosshair_vertex_start_);
 }
 
 void Renderer::wait_for_frame() {

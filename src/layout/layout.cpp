@@ -1,5 +1,7 @@
 #include "layout/layout.h"
 
+#include "util/utf8_path.h"
+
 #include <nlohmann/json.hpp>
 
 #include <cmath>
@@ -141,7 +143,7 @@ bool validate_layout(const Layout& layout, std::string& error) {
 
 bool load_layout(const std::string& path, Layout& layout, std::string& error) {
     try {
-        std::ifstream input(path);
+        std::ifstream input(path_from_utf8(path));
         if (!input) {
             error = "could not open layout file";
             return false;
@@ -199,7 +201,7 @@ bool save_layout(const std::string& path, const Layout& layout, std::string& err
     if (!validate_layout(layout, error)) {
         return false;
     }
-    const std::filesystem::path destination(path);
+    const std::filesystem::path destination = path_from_utf8(path);
     std::filesystem::path temporary = destination;
     temporary += ".tmp";
     std::ofstream output(temporary, std::ios::out | std::ios::trunc);
