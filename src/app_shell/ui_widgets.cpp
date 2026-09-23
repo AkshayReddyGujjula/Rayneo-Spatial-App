@@ -150,6 +150,17 @@ void draw_chip(Canvas& canvas, const RECT& rect, const std::wstring& label, COLO
     canvas.text(font, palette::text, rect, label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
+void draw_help_mark(Canvas& canvas, const RECT& rect, bool focused, bool hovered, HFONT font) {
+    if (hovered) {
+        canvas.fill_round(rect, (rect.bottom - rect.top) / 2, palette::accent_soft);
+    }
+    const COLORREF color = hovered ? palette::accent : palette::text_faint;
+    canvas.text(font, color, rect, L"?", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (focused) {
+        canvas.outline_round(rect, (rect.bottom - rect.top) / 2, 1, palette::focus);
+    }
+}
+
 void draw_slider(Canvas& canvas, const RECT& rect, const std::wstring& label,
                  const std::wstring& value_text, float fraction, bool focused, bool hovered,
                  bool enabled, HFONT label_font, HFONT value_font) {

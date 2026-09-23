@@ -66,6 +66,10 @@ void draw_button(Canvas& canvas, const RECT& rect, const std::wstring& label, Bu
                  bool focused, bool hovered, bool enabled, HFONT font);
 void draw_chip(Canvas& canvas, const RECT& rect, const std::wstring& label, COLORREF accent,
                bool focused, bool hovered, HFONT font);
+// Minimalist hover-help mark: a small faint "?", no chip chrome. Brightens on
+// hover; keyboard focus keeps a subtle ring.
+void draw_help_mark(Canvas& canvas, const RECT& rect, bool focused, bool hovered, HFONT font);
+inline int help_mark_width(UINT dpi) { return scale_px(16, dpi); }
 void draw_slider(Canvas& canvas, const RECT& rect, const std::wstring& label,
                  const std::wstring& value_text, float fraction, bool focused, bool hovered,
                  bool enabled, HFONT label_font, HFONT value_font);
