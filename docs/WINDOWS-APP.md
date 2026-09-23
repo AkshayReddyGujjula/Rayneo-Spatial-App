@@ -102,14 +102,22 @@ The existing global hotkeys keep working: `Ctrl+Shift+R` recenter, `Ctrl+Alt+Y` 
 
 ## 4. Layout editor
 
-* **Presets** — single centred, triple arc (default, −45°/0°/+45°), quad arc, five arc and a wide
-  3 × 4 m arc. A preset is loaded into the editor and only written when you press **Save and
-  reload**.
+* **Presets** — factory layouts include single centred, triple arc (default, −45°/0°/+45°),
+  quad arc, five arc and a wide 3 × 4 m arc. Named layouts can also be saved and selected; the
+  shipped names include `triple` and `ultrawide`. A preset is loaded into the editor and only
+  written when you press **Save and reload**.
 * **Screens** — 1 to 8. **Add screen** allocates the lowest free `screen-N` id and the lowest free
   `vdd_index` (0..15); **Remove** frees both for reuse. Ids and indices are always unique, which is
   what `gt::validate_layout` enforces.
 * **Arc editor** — drag a screen left/right to change its yaw, up/down to change its pitch; the
   crosshair is the wearer, the rings are 1..4 m and the ticks are yaw.
+* **3D editor** — switch to 3D and optionally fullscreen. Click anywhere on a screen to select
+  it; drag that screen to move it under the pointer, or drag empty space to orbit the view.
+  Mouse wheel over the view zooms the editor camera. The fullscreen view keeps yaw, pitch,
+  depth from your eyes, roll, width and height controls for the selected screen beside Save and
+  Revert. A 3D drag may also change depth to keep the screen under the pointer at steep orbit
+  angles; use the selected screen's depth slider to fine-tune it. The slider uses a geometric
+  scale for finer control near normal viewing distances while retaining the full 0.25–20 m range.
 * **Sliders** — yaw, pitch, roll, distance, width, height for the selected screen, plus field of
   view and the capture policy (active/mid/idle FPS, enter/leave hysteresis). Coupled values are
   normalised as you drag: `1 <= idle <= mid <= active` and `enter > leave` always hold.

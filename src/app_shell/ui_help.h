@@ -161,8 +161,9 @@ inline const wchar_t* help_text(HelpTopic topic) {
                    L"Use it when an experiment goes sideways.";
         case HelpTopic::EditorCanvas:
             return L"Arrangement preview: you are the dot, screens are the coloured "
-                   L"shapes. Drag a screen to move it, Tab here for arrow-key control. "
-                   L"In 3D, drag empty space to orbit and scroll to zoom.";
+                   L"shapes. Click any screen to select it and drag to move it. In 3D, "
+                   L"the drag can also change depth; the depth slider fine-tunes it. "
+                   L"Drag empty space to orbit and scroll to zoom. Tab for arrow keys.";
         case HelpTopic::EditorFullscreen:
             return L"Expands the arrangement editor to fill the whole window for fine "
                    L"adjustments. Press Esc or the button again to dock it back.";
