@@ -477,6 +477,15 @@ void test_field_normalisation() {
     check(gt::set_layout_field(layout, screen, gt::LayoutField::Distance, 0.01f, error) &&
               std::fabs(screen.distance_m - 0.25f) < 1e-4f,
           "distance clamps to the validation limit");
+    const float two_metre_position =
+        gt::layout_slider_fraction(gt::LayoutField::Distance, 2.0f);
+    check(two_metre_position > 0.4f && two_metre_position < 0.55f &&
+              std::fabs(gt::layout_slider_value(gt::LayoutField::Distance,
+                                                two_metre_position) - 2.0f) < 1e-4f,
+          "depth slider gives typical screen distances room for precise adjustment");
+    check(std::fabs(gt::layout_slider_value(gt::LayoutField::Distance, 0.0f) - 0.25f) < 1e-4f &&
+              std::fabs(gt::layout_slider_value(gt::LayoutField::Distance, 1.0f) - 20.0f) < 1e-3f,
+          "depth slider keeps the full supported range");
     check(gt::set_layout_field(layout, screen, gt::LayoutField::ActiveFps, 5.0f, error) &&
               layout.capture_policy.active_fps == 5 && layout.capture_policy.mid_fps == 5 &&
               layout.capture_policy.idle_fps == 1 && gt::validate_layout(layout, error),
@@ -681,8 +690,35 @@ void test_orbit() {
     const gt::OrbitPoint centre = gt::orbit_project(view, camera, quad.center, rect);
     check(gt::orbit_hit_test(layout, view, camera, rect, centre.pixel.x, centre.pixel.y, 14) == 0,
           "tapping a projected screen selects it");
+    const gt::OrbitPoint corner = gt::orbit_project(view, camera, quad.corners[2], rect);
+    const int inner_x = centre.pixel.x + (corner.pixel.x - centre.pixel.x) * 3 / 4;
+    const int inner_y = centre.pixel.y + (corner.pixel.y - centre.pixel.y) * 3 / 4;
+    check(gt::orbit_hit_test(layout, view, camera, rect, inner_x, inner_y, 14) == 0,
+          "tapping inside a screen away from its centre selects it");
+    gt::ScreenLayout near_screen = layout.screens[0];
+    near_screen.distance_m = 1.0f;
+    near_screen.id = "near";
+    layout.screens.insert(layout.screens.begin(), near_screen);
+    check(gt::orbit_hit_test(layout, view, camera, rect, centre.pixel.x, centre.pixel.y, 14) == 0,
+          "overlapping screens select the one nearest the editor camera");
     check(gt::orbit_hit_test(layout, view, camera, rect, 0, 0, 14) < 0,
           "tapping empty space selects nothing");
+    gt::OrbitView angled_view;
+    angled_view.yaw_deg = -30.0f;
+    angled_view.pitch_deg = 18.0f;
+    const gt::OrbitCamera angled_camera = gt::orbit_camera(angled_view);
+    gt::ScreenLayout dragged = layout.screens[1];
+    const gt::OrbitPoint before_drag = gt::orbit_project(
+        angled_view, angled_camera, gt::orbit_screen_quad(dragged).center, rect);
+    const gt::OrbitDragAngles dragged_angles = gt::orbit_drag_angles(
+        dragged, angled_view, angled_camera, rect, 30, -20);
+    dragged.yaw_deg = dragged_angles.yaw_deg;
+    dragged.pitch_deg = dragged_angles.pitch_deg;
+    const gt::OrbitPoint after_drag = gt::orbit_project(
+        angled_view, angled_camera, gt::orbit_screen_quad(dragged).center, rect);
+    check(std::abs(after_drag.pixel.x - before_drag.pixel.x - 30) <= 3 &&
+              std::abs(after_drag.pixel.y - before_drag.pixel.y + 20) <= 3,
+          "dragging a screen in an angled 3D view follows the pointer");
 }
 
 }  // namespace

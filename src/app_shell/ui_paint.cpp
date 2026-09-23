@@ -1052,7 +1052,10 @@ void paint_editor_panel(Canvas& canvas, const PaintContext& context, const Metri
     canvas_rect.left += metrics.pad;
     canvas_rect.right -= metrics.pad;
     canvas_rect.top += metrics.pad + scale_px(22, dpi);
-    canvas_rect.bottom -= scale_px(34, dpi);
+    const int quick_controls_height = state.editor_fullscreen
+                                          ? metrics.slider * 2 + metrics.button + scale_px(16, dpi)
+                                          : 0;
+    canvas_rect.bottom -= scale_px(34, dpi) + quick_controls_height;
     if (canvas_rect.bottom <= canvas_rect.top + scale_px(40, dpi)) {
         return;
     }
@@ -1190,14 +1193,68 @@ void paint_editor_panel(Canvas& canvas, const PaintContext& context, const Metri
 
     RECT hint = rect_of(rect.left + metrics.pad, canvas_rect.bottom + scale_px(4, dpi),
                         rect.right - rect.left - metrics.pad * 2, scale_px(26, dpi));
-    std::wstring hint_text =
-        state.editor_3d
-            ? L"Drag a screen to move it; drag empty space to orbit, scroll to zoom. "
-              L"Tab to the view for arrow-key control."
-            : L"Drag a screen left/right for yaw, up/down for pitch. "
-              L"Tab to the arc and use the arrow keys for keyboard control.";
+    std::wstring hint_text;
+    if (state.editor_fullscreen && !state.layout.screens.empty() &&
+        state.selected_screen < state.layout.screens.size()) {
+        hint_text = L"Selected: " + wide_from_utf8(state.layout.screens[state.selected_screen].id) +
+                    L". Click any screen to select; drag it to move; drag empty space to orbit. "
+                    L"Scroll to zoom the view.";
+    } else if (state.editor_3d) {
+        hint_text = L"Click any screen to select; drag to move; drag empty space to orbit. "
+                    L"Scroll to zoom the view.";
+    } else {
+        hint_text = L"Drag a screen left/right for yaw, up/down for pitch. "
+                    L"Tab to the arc and use the arrow keys for keyboard control.";
+    }
     canvas.text(fonts.small, palette::text_faint, hint, ellipsize(hint_text, 150),
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    if (state.editor_fullscreen && !state.layout.screens.empty() &&
+        state.selected_screen < state.layout.screens.size()) {
+        const ScreenLayout& screen = state.layout.screens[state.selected_screen];
+        const LayoutField quick_fields[] = {
+            LayoutField::Yaw, LayoutField::Pitch, LayoutField::Distance,
+            LayoutField::Roll, LayoutField::Width, LayoutField::Height,
+        };
+        const int quick_left = rect.left + metrics.pad;
+        const int quick_width = rect.right - rect.left - metrics.pad * 2;
+        const int column_width = (quick_width - metrics.gap * 2) / 3;
+        const int quick_top = hint.bottom + scale_px(3, dpi);
+        for (int index = 0; index < 6; ++index) {
+            const LayoutField field = quick_fields[index];
+            const float value = layout_field_value(state.layout, screen, field);
+            const float fraction = layout_slider_fraction(field, value);
+            RECT slider = rect_of(quick_left + (index % 3) * (column_width + metrics.gap),
+                                  quick_top + (index / 3) * metrics.slider, column_width,
+                                  metrics.slider);
+            const std::wstring label = field == LayoutField::Distance
+                                           ? L"Depth from eyes"
+                                           : layout_field_label(field);
+            draw_slider(canvas, slider, label,
+                        wide_from_utf8(format_layout_field_value(field, value)), fraction,
+                        state.focus_id == ui_field_id(field),
+                        state.hover_id == ui_field_id(field), true, fonts.small, fonts.body);
+            add_hotspot(hotspots, ui_field_id(field), static_cast<int>(field), slider);
+        }
+        const int actions_y = quick_top + metrics.slider * 2 + scale_px(5, dpi);
+        RECT save = rect_of(quick_left, actions_y, scale_px(148, dpi), metrics.button);
+        draw_button(canvas, save, L"Save layout", ButtonStyle::Primary,
+                    state.focus_id == kUiSaveLayout, state.hover_id == kUiSaveLayout,
+                    state.layout_dirty, fonts.small);
+        add_hotspot(hotspots, kUiSaveLayout, 0, save, state.layout_dirty);
+        RECT revert = rect_of(save.right + metrics.gap, actions_y, scale_px(148, dpi),
+                              metrics.button);
+        draw_button(canvas, revert, L"Revert changes", ButtonStyle::Ghost,
+                    state.focus_id == kUiRevertLayout, state.hover_id == kUiRevertLayout,
+                    state.layout_dirty, fonts.small);
+        add_hotspot(hotspots, kUiRevertLayout, 0, revert, state.layout_dirty);
+        RECT note = rect_of(revert.right + metrics.gap, actions_y,
+                            std::max(0L, rect.right - metrics.pad - revert.right - metrics.gap),
+                            metrics.button);
+        canvas.text(fonts.small, state.layout_dirty ? palette::warning : palette::text_faint,
+                    note, state.layout_dirty ? L"Unsaved changes" : L"Layout saved",
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
 
     const int title_y = rect.top + metrics.pad + scale_px(1, dpi);
     const int title_chip_h = scale_px(20, dpi);
@@ -1281,12 +1338,8 @@ void paint_fields_panel(Canvas& canvas, const PaintContext& context, const Metri
     for (int row = 0; row < rows; ++row) {
         for (int column = 0; column < columns; ++column) {
             const LayoutField field = fields[row * columns + column];
-            float minimum = 0.0f;
-            float maximum = 0.0f;
-            float step = 0.0f;
-            layout_field_range(field, minimum, maximum, step);
             const float value = layout_field_value(state.layout, screen, field);
-            const float fraction = maximum > minimum ? (value - minimum) / (maximum - minimum) : 0.0f;
+            const float fraction = layout_slider_fraction(field, value);
             const int help_w = scale_px(26, dpi);
             RECT slider = rect_of(left + column * (column_width + metrics.gap), y,
                                   column_width - help_w - metrics.gap, metrics.slider);

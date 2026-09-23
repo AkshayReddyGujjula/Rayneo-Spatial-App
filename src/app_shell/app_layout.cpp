@@ -393,6 +393,34 @@ bool layout_field_range(LayoutField field, float& minimum, float& maximum, float
     }
 }
 
+float layout_slider_fraction(LayoutField field, float value) {
+    float minimum = 0.0f;
+    float maximum = 0.0f;
+    float step = 0.0f;
+    if (!layout_field_range(field, minimum, maximum, step) || maximum <= minimum) {
+        return 0.0f;
+    }
+    const float bounded = std::clamp(value, minimum, maximum);
+    if (field == LayoutField::Distance) {
+        return std::log(bounded / minimum) / std::log(maximum / minimum);
+    }
+    return (bounded - minimum) / (maximum - minimum);
+}
+
+float layout_slider_value(LayoutField field, float fraction) {
+    float minimum = 0.0f;
+    float maximum = 0.0f;
+    float step = 0.0f;
+    if (!layout_field_range(field, minimum, maximum, step) || maximum <= minimum) {
+        return 0.0f;
+    }
+    const float bounded = std::clamp(fraction, 0.0f, 1.0f);
+    if (field == LayoutField::Distance) {
+        return minimum * std::pow(maximum / minimum, bounded);
+    }
+    return minimum + bounded * (maximum - minimum);
+}
+
 bool set_layout_field(Layout& layout, ScreenLayout& screen, LayoutField field, float value,
                       std::string& error) {
     float minimum = 0.0f;
