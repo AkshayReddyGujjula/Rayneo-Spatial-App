@@ -591,16 +591,34 @@ int main() {
             std::fabs(yaw_twist.w - yaw_only.w) + std::fabs(yaw_twist.z - yaw_only.z);
         check(yaw_error < 1e-5f, "twist about the vertical captures a pure yaw", yaw_error, 1e-5f);
 
-        const Quat nod_only{std::cos(half), 0.0f, std::sin(half), 0.0f};
-        const Quat nod_twist = quat_twist_about(nod_only, 0.0f, 0.0f, 1.0f);
-        const float nod_error = std::fabs(nod_twist.w - 1.0f) + std::fabs(nod_twist.x) +
-                                std::fabs(nod_twist.y) + std::fabs(nod_twist.z);
-        check(nod_error < 1e-5f, "twist about the vertical ignores a pure nod", nod_error, 1e-5f);
+        // Head frame is X=right, Y=forward, Z=up: nod (pitch) is about X and
+        // tilt is about Y. The pitch-hold toggles in spatial_desk.cpp rely on
+        // this: freezing (1,0,0) holds pitch, freezing (0,0,1) holds yaw.
+        const Quat tilt_only{std::cos(half), 0.0f, std::sin(half), 0.0f};
+        const Quat tilt_twist = quat_twist_about(tilt_only, 0.0f, 0.0f, 1.0f);
+        const float tilt_error = std::fabs(tilt_twist.w - 1.0f) + std::fabs(tilt_twist.x) +
+                                 std::fabs(tilt_twist.y) + std::fabs(tilt_twist.z);
+        check(tilt_error < 1e-5f, "twist about the vertical ignores a pure tilt", tilt_error,
+              1e-5f);
 
-        const Quat ear_twist = quat_twist_about(nod_only, 0.0f, 1.0f, 0.0f);
-        const float ear_error =
-            std::fabs(ear_twist.w - nod_only.w) + std::fabs(ear_twist.y - nod_only.y);
-        check(ear_error < 1e-5f, "twist about the ear axis captures a pure nod", ear_error, 1e-5f);
+        const Quat fwd_twist = quat_twist_about(tilt_only, 0.0f, 1.0f, 0.0f);
+        const float fwd_error =
+            std::fabs(fwd_twist.w - tilt_only.w) + std::fabs(fwd_twist.y - tilt_only.y);
+        check(fwd_error < 1e-5f, "twist about the forward axis captures a pure tilt", fwd_error,
+              1e-5f);
+
+        const Quat nod_only{std::cos(half), std::sin(half), 0.0f, 0.0f};
+        const Quat nod_twist = quat_twist_about(nod_only, 1.0f, 0.0f, 0.0f);
+        const float nod_error =
+            std::fabs(nod_twist.w - nod_only.w) + std::fabs(nod_twist.x - nod_only.x);
+        check(nod_error < 1e-5f, "twist about the ear axis captures a pure nod", nod_error,
+              1e-5f);
+
+        const Quat nod_off = quat_twist_about(nod_only, 0.0f, 1.0f, 0.0f);
+        const float nod_off_error = std::fabs(nod_off.w - 1.0f) + std::fabs(nod_off.x) +
+                                    std::fabs(nod_off.y) + std::fabs(nod_off.z);
+        check(nod_off_error < 1e-5f, "twist about the forward axis ignores a pure nod",
+              nod_off_error, 1e-5f);
     }
 
     std::printf("pose_selftest: drift absorption keeps micro-movements\n");

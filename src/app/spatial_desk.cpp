@@ -1226,7 +1226,9 @@ int wmain(int argc, wchar_t** argv) {
             state.capture_yaw_hold = false;
         }
         if (state.capture_pitch_hold) {
-            state.held_pitch_twist = gt::quat_twist_about(head, 0.0f, 1.0f, 0.0f);
+            // Nod (pitch) is about head X (right); head Y (forward) is the tilt
+            // axis. Twisting about Y here used to freeze tilt instead of pitch.
+            state.held_pitch_twist = gt::quat_twist_about(head, 1.0f, 0.0f, 0.0f);
             state.capture_pitch_hold = false;
         }
         if (!state.yaw_tracking) {
@@ -1235,7 +1237,7 @@ int wmain(int argc, wchar_t** argv) {
             head = gt::quat_multiply(state.held_yaw_twist, swing);
         }
         if (!state.pitch_tracking) {
-            const gt::Quat twist = gt::quat_twist_about(head, 0.0f, 1.0f, 0.0f);
+            const gt::Quat twist = gt::quat_twist_about(head, 1.0f, 0.0f, 0.0f);
             const gt::Quat swing = gt::quat_multiply(gt::quat_conjugate(twist), head);
             head = gt::quat_multiply(state.held_pitch_twist, swing);
         }
