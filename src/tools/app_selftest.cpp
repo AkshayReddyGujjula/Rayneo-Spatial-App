@@ -283,6 +283,44 @@ void test_app_config(const std::filesystem::path& directory) {
     bad = defaults;
     bad.splits.column = 2.0f;
     check(!gt::validate_app_config(bad, error), "an out-of-range split fraction is rejected");
+    bad = defaults;
+    bad.splits.left[0] = 0.0f;
+    bad.splits.left[1] = 0.0f;
+    bad.splits.left[2] = 1.0f;
+    check(gt::validate_app_config(bad, error), "degenerate split shares validate (paint clamps)");
+    {
+        // A pre-splitter preference file (no "splits" block) loads as automatic.
+        const std::filesystem::path legacy =
+            std::filesystem::temp_directory_path() / "rayneo-legacy-app.json";
+        {
+            std::ofstream out(legacy, std::ios::binary | std::ios::trunc);
+            out << "{\"version\": 1, \"layout_path\": \"a\", \"calibration_path\": \"b\", "
+                   "\"log_dir\": \"c\", \"monitor_index\": -1, \"health_poll_ms\": 1000, "
+                   "\"preview_without_head_tracking\": false, \"close_to_tray\": false}";
+        }
+        gt::AppConfig loaded;
+        check(gt::load_app_config(legacy, loaded, error) && loaded.splits.column < 0.0f &&
+                  loaded.splits.left[0] < 0.0f,
+              "a legacy file without splits loads as automatic");
+        std::error_code remove_error;
+        std::filesystem::remove(legacy, remove_error);
+    }
+    {
+        // Malformed splits fail the load instead of crashing the dashboard.
+        const std::filesystem::path broken =
+            std::filesystem::temp_directory_path() / "rayneo-broken-app.json";
+        {
+            std::ofstream out(broken, std::ios::binary | std::ios::trunc);
+            out << "{\"version\": 1, \"layout_path\": \"a\", \"calibration_path\": \"b\", "
+                   "\"log_dir\": \"c\", \"monitor_index\": -1, \"health_poll_ms\": 1000, "
+                   "\"preview_without_head_tracking\": false, \"close_to_tray\": false, "
+                   "\"splits\": {\"column\": \"wide\"}}";
+        }
+        gt::AppConfig loaded;
+        check(!gt::load_app_config(broken, loaded, error), "malformed splits fail the load");
+        std::error_code remove_error;
+        std::filesystem::remove(broken, remove_error);
+    }
 
     const std::filesystem::path path = directory / "app.json";
     gt::AppConfig config = defaults;
