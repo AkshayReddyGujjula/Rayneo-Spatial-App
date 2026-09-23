@@ -391,11 +391,13 @@ int main() {
     }
 
     // --- 8: diagonal --------------------------------------------------------
-    std::printf("\n-- scenario 8: diagonal yaw +40 / pitch +15 and back --\n");
+    std::printf("\n-- scenario 8: diagonal yaw +40 / tilt +15 and back --\n");
     {
         HeadSim sim = make_sim(0xC0FFEE08u);
-        // Yaw is about earth Z, nod (pitch) about earth Y. Axis {0, 15, 40} gives
-        // Euler yaw ~40 deg and pitch ~14 deg; total magnitude 42.72 deg over 1 s.
+        // Yaw is about earth Z, tilt about earth Y (the euler pitch channel).
+        // True nod is about X; the nod scenario below covers it. Axis {0, 15, 40}
+        // gives Euler yaw ~40 deg and pitch ~14 deg; total magnitude 42.72 deg
+        // over 1 s.
         const float mag = std::sqrt(15.0f * 15.0f + 40.0f * 40.0f);
         const float peak = mag / 0.5f;  // 0.5 s raised-cosine rise, 0.5 s fall
         sim.move(peak, 0.5f, 0.0f, Vec3{0.0f, 15.0f, 40.0f});
