@@ -12,9 +12,11 @@
 #include "app_shell/engine_commands.h"
 #include "util/utf8_path.h"
 #include "app_shell/telemetry.h"
+#include "app_shell/ui_help.h"
 
 #include <cmath>
 #include <cstdio>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -568,6 +570,24 @@ void test_user_presets(const std::filesystem::path& directory) {
     check(!gt::validate_app_config(config, error), "an evil active preset fails validation");
 }
 
+void test_help_topics() {
+    std::printf("app_selftest: help topics\n");
+    bool all_long = true;
+    for (int i = 0; i < static_cast<int>(gt::HelpTopic::Count); ++i) {
+        const wchar_t* text = gt::help_text(static_cast<gt::HelpTopic>(i));
+        all_long = all_long && text != nullptr && std::wcslen(text) >= 40;
+    }
+    check(all_long, "every help topic resolves to a substantive text");
+    check(std::wstring(gt::help_text(gt::HelpTopic::FieldYaw)).find(L"Negative") !=
+              std::wstring::npos,
+          "the yaw slider help names both directions");
+    check(std::wstring(gt::help_text(gt::HelpTopic::EngineYawToggle)).find(L"Ctrl+Alt+Y") !=
+              std::wstring::npos,
+          "the yaw toggle help names its hotkey");
+    check(gt::help_for_field(gt::LayoutField::LeaveDeg) == gt::HelpTopic::FieldLeaveDeg,
+          "field topics track the layout field order");
+}
+
 }  // namespace
 
 int main() {
@@ -593,6 +613,7 @@ int main() {
     test_app_config(directory);
     test_presets_and_screens();
     test_user_presets(directory);
+    test_help_topics();
     test_field_normalisation();
     test_log_rotation(directory);
     test_telemetry();

@@ -51,10 +51,15 @@ enum UiId : int {
     kUiEditorCanvas = 400,
     kUiScrollBase = 500,
     kUiUserPresetBase = 600,
+    kUiHelpBase = 700,
 };
 
 inline int ui_user_preset_id(size_t index) {
     return kUiUserPresetBase + static_cast<int>(index);
+}
+
+inline int ui_help_id(int panel, int row) {
+    return kUiHelpBase + panel * 64 + row;
 }
 
 inline int ui_preset_id(LayoutPreset preset) {
