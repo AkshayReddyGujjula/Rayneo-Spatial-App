@@ -3,6 +3,7 @@
 #include "imu/fusion.h"
 #include "layout/layout.h"
 #include "render/camera.h"
+#include "render/screen_geometry.h"
 
 #include <windows.h>
 #include <d3d11.h>
@@ -11,6 +12,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -82,6 +84,7 @@ private:
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> label_texture;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> live_texture;
         ScreenLayout layout;
+        std::array<ScreenGeometryVertex, 6> geometry{};
         bool cursor_visible = false;
         int cursor_x = 0;
         int cursor_y = 0;

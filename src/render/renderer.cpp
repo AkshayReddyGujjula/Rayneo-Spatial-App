@@ -5,6 +5,7 @@
 #include <d3dcompiler.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -494,6 +495,7 @@ bool Renderer::set_layout(const Layout& layout, std::string& error) {
             return false;
         }
         const auto geometry = make_screen_quad(screen);
+        draw.geometry = geometry;
         for (const ScreenGeometryVertex& point : geometry) {
             vertices.push_back(Vertex{point.x, point.y, point.z, 1.0f, 1.0f, 1.0f, 1.0f,
                                       point.u, point.v});
@@ -632,10 +634,11 @@ void Renderer::render(const Quat& head, float fov_horizontal_deg, float time_s) 
         context_->Draw(6, screen.vertex_start);
     }
 
-    std::vector<Vertex> cursor_vertices;
-    std::vector<size_t> cursor_screens;
-    cursor_vertices.reserve(screen_draws_.size() * 6);
-    cursor_screens.reserve(screen_draws_.size());
+    // validate_layout limits the workspace to eight screens. Keep the cursor
+    // batch on the stack so a visible pointer does not allocate every frame.
+    std::array<Vertex, 8 * 6> cursor_vertices;
+    std::array<size_t, 8> cursor_screens;
+    size_t cursor_count = 0;
     for (size_t index = 0; index < screen_draws_.size(); ++index) {
         const ScreenDraw& screen = screen_draws_[index];
         if (!screen.cursor_visible || !screen.cursor_view || !screen.live_texture ||
@@ -660,25 +663,29 @@ void Renderer::render(const Quat& head, float fov_horizontal_deg, float time_s) 
         const float cursor_v0 = (clipped_top - top) / (bottom - top);
         const float cursor_u1 = (clipped_right - left) / (right - left);
         const float cursor_v1 = (clipped_bottom - top) / (bottom - top);
-        const auto quad = make_screen_quad(screen.layout);
-        const Vertex top_left = interpolate_cursor_vertex(quad, clipped_left, clipped_top,
+        const Vertex top_left = interpolate_cursor_vertex(screen.geometry, clipped_left, clipped_top,
                                                            cursor_u0, cursor_v0);
-        const Vertex top_right = interpolate_cursor_vertex(quad, clipped_right, clipped_top,
+        const Vertex top_right = interpolate_cursor_vertex(screen.geometry, clipped_right, clipped_top,
                                                             cursor_u1, cursor_v0);
         const Vertex bottom_right = interpolate_cursor_vertex(
-            quad, clipped_right, clipped_bottom, cursor_u1, cursor_v1);
-        const Vertex bottom_left = interpolate_cursor_vertex(quad, clipped_left, clipped_bottom,
+            screen.geometry, clipped_right, clipped_bottom, cursor_u1, cursor_v1);
+        const Vertex bottom_left = interpolate_cursor_vertex(screen.geometry, clipped_left, clipped_bottom,
                                                               cursor_u0, cursor_v1);
-        cursor_vertices.insert(cursor_vertices.end(), {bottom_left, bottom_right, top_right,
-                                                       bottom_left, top_right, top_left});
-        cursor_screens.push_back(index);
+        const size_t vertex_start = cursor_count * 6;
+        cursor_vertices[vertex_start + 0] = bottom_left;
+        cursor_vertices[vertex_start + 1] = bottom_right;
+        cursor_vertices[vertex_start + 2] = top_right;
+        cursor_vertices[vertex_start + 3] = bottom_left;
+        cursor_vertices[vertex_start + 4] = top_right;
+        cursor_vertices[vertex_start + 5] = top_left;
+        cursor_screens[cursor_count++] = index;
     }
-    if (!cursor_vertices.empty()) {
+    if (cursor_count != 0) {
         D3D11_MAPPED_SUBRESOURCE cursor_mapped{};
         if (SUCCEEDED(context_->Map(cursor_vertex_buffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
                                     &cursor_mapped))) {
             std::memcpy(cursor_mapped.pData, cursor_vertices.data(),
-                        cursor_vertices.size() * sizeof(Vertex));
+                        cursor_count * 6 * sizeof(Vertex));
             context_->Unmap(cursor_vertex_buffer_.Get(), 0);
             ID3D11Buffer* cursor_buffers[] = {cursor_vertex_buffer_.Get()};
             context_->IASetVertexBuffers(0, 1, cursor_buffers, &stride, &offset);
@@ -688,7 +695,7 @@ void Renderer::render(const Quat& head, float fov_horizontal_deg, float time_s) 
             context_->OMSetBlendState(cursor_blend_state_.Get(), blend_factor, 0xFFFFFFFFu);
             ID3D11Buffer* cursor_constants[] = {cursor_constant_buffer_.Get()};
             context_->PSSetConstantBuffers(1, 1, cursor_constants);
-            for (size_t cursor_index = 0; cursor_index < cursor_screens.size(); ++cursor_index) {
+            for (size_t cursor_index = 0; cursor_index < cursor_count; ++cursor_index) {
                 const ScreenDraw& screen = screen_draws_[cursor_screens[cursor_index]];
                 CursorConstants constants{};
                 constants.u = static_cast<float>(screen.cursor_x) / screen.desktop_width;

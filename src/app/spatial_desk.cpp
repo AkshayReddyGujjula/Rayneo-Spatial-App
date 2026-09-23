@@ -158,8 +158,10 @@ void publish_status(const StatusReport& report) {
         return;
     }
     output.close();
-    if (!MoveFileExW(temporary.c_str(), destination.c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    // This is an ephemeral one-second heartbeat. Atomic replacement keeps
+    // readers from seeing partial reports; forcing every rename to stable
+    // storage only adds a disk sync to the render loop.
+    if (!MoveFileExW(temporary.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING)) {
         std::error_code remove_error;
         std::filesystem::remove(temporary, remove_error);
     }
