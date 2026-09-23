@@ -1,5 +1,6 @@
 #include "app_shell/ui_paint.h"
 
+#include "app_shell/ui_help.h"
 #include "app/engine_protocol.h"
 
 #include <algorithm>
@@ -286,6 +287,12 @@ void paint_header(Canvas& canvas, const PaintContext& context, const Metrics& me
     draw_button(canvas, refresh, L"Refresh", ButtonStyle::Secondary,
                 state.focus_id == kUiRefresh, state.hover_id == kUiRefresh, true, fonts.body);
     add_hotspot(hotspots, kUiRefresh, 0, refresh);
+    RECT help_refresh = rect_of(refresh.left - metrics.gap - scale_px(24, dpi), refresh.top,
+                                scale_px(24, dpi), chip_height);
+    draw_chip(canvas, help_refresh, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(6, 0), state.hover_id == ui_help_id(6, 0), fonts.body);
+    add_hotspot(hotspots, ui_help_id(6, 0), static_cast<int>(HelpTopic::HeaderRefresh),
+                help_refresh);
 
     const int mode_width = scale_px(190, dpi);
     RECT mode_chip = rect_of(refresh.left - metrics.gap - mode_width, refresh.top, mode_width,
@@ -418,16 +425,25 @@ void paint_status_panel(Canvas& canvas, const PaintContext& context, const Metri
         paint_scrollbar(canvas, context, kScrollStatus, rect, view, content_h, false, hotspots);
     canvas.push_clip(view);
     int y = view.top - offset;
-    for (const Row& row : rows) {
+    const int help_w = scale_px(24, dpi);
+    for (size_t row_index = 0; row_index < rows.size(); ++row_index) {
+        const Row& row = rows[row_index];
         const int dot_x = text_left + scale_px(5, dpi);
         draw_dot(canvas, dot_x, y + scale_px(10, dpi), scale_px(4, dpi), row.dot);
         RECT label_rect = rect_of(text_left + scale_px(16, dpi), y, label_width, scale_px(20, dpi));
         canvas.text(fonts.small, palette::text_dim, label_rect, row.label,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        RECT value_rect =
-            rect_of(value_left, y, view.right - value_left, scale_px(20, dpi));
+        RECT value_rect = rect_of(value_left, y, view.right - value_left - help_w - metrics.gap,
+                                  scale_px(20, dpi));
         canvas.text(fonts.body, palette::text, value_rect, row.value,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        RECT help_rect = rect_of(view.right - help_w, y, help_w, scale_px(20, dpi));
+        const int help_id = ui_help_id(0, static_cast<int>(row_index));
+        const int help_topic =
+            static_cast<int>(HelpTopic::StatusEngine) + static_cast<int>(row_index);
+        draw_chip(canvas, help_rect, L"?", palette::text_faint, state.focus_id == help_id,
+                  state.hover_id == help_id, fonts.small);
+        add_clipped_hotspot(hotspots, help_id, help_topic, help_rect, view, kScrollStatus);
         RECT detail_rect = rect_of(text_left + scale_px(16, dpi), y + scale_px(19, dpi),
                                    view.right - text_left - scale_px(16, dpi), scale_px(15, dpi));
         canvas.text(fonts.small, palette::text_faint, detail_rect, ellipsize(row.detail, 84),
@@ -471,6 +487,7 @@ void paint_engine_panel(Canvas& canvas, const PaintContext& context, const Metri
     }
     const std::wstring note_text = ellipsize(note, 150);
     const int row_gap = scale_px(8, dpi);
+    const int help_w = scale_px(24, dpi);
     const int controls_h =
         (metrics.button + row_gap) * 2 + scale_px(28, dpi) + scale_px(30, dpi);
     const int note_h =
@@ -481,52 +498,95 @@ void paint_engine_panel(Canvas& canvas, const PaintContext& context, const Metri
     int y = view.top - offset;
 
     const int half = (width - metrics.gap) / 2;
-    RECT start_workspace = rect_of(left, y, half, metrics.button);
+    RECT start_workspace = rect_of(left, y, half - help_w - metrics.gap, metrics.button);
     draw_button(canvas, start_workspace, L"Start workspace", ButtonStyle::Primary,
                 state.focus_id == kUiStartWorkspace,
                 state.hover_id == kUiStartWorkspace && !busy && workspace_block.empty(),
                 !busy && workspace_block.empty(), fonts.body);
     add_clipped_hotspot(hotspots, kUiStartWorkspace, 0, start_workspace, view, kScrollEngine,
                         !busy && workspace_block.empty());
+    RECT help_workspace =
+        rect_of(start_workspace.right + metrics.gap, y, help_w, metrics.button);
+    draw_chip(canvas, help_workspace, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(1, 0), state.hover_id == ui_help_id(1, 0),
+              fonts.small);
+    add_clipped_hotspot(hotspots, ui_help_id(1, 0),
+                        static_cast<int>(HelpTopic::EngineStartWorkspace), help_workspace, view,
+                        kScrollEngine);
 
-    RECT start_preview = rect_of(left + half + metrics.gap, y, half, metrics.button);
+    RECT start_preview =
+        rect_of(left + half + metrics.gap, y, half - help_w - metrics.gap, metrics.button);
     draw_button(canvas, start_preview, L"Start preview", ButtonStyle::Secondary,
                 state.focus_id == kUiStartPreview,
                 state.hover_id == kUiStartPreview && !busy && preview_block.empty(),
                 !busy && preview_block.empty(), fonts.body);
     add_clipped_hotspot(hotspots, kUiStartPreview, 0, start_preview, view, kScrollEngine,
                         !busy && preview_block.empty());
+    RECT help_preview = rect_of(start_preview.right + metrics.gap, y, help_w, metrics.button);
+    draw_chip(canvas, help_preview, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(1, 1), state.hover_id == ui_help_id(1, 1),
+              fonts.small);
+    add_clipped_hotspot(hotspots, ui_help_id(1, 1),
+                        static_cast<int>(HelpTopic::EngineStartPreview), help_preview, view,
+                        kScrollEngine);
     y += metrics.button + scale_px(8, dpi);
 
     const int third = (width - metrics.gap * 2) / 3;
-    RECT stop = rect_of(left, y, third, metrics.button);
+    RECT stop = rect_of(left, y, third - help_w - metrics.gap, metrics.button);
     draw_button(canvas, stop, L"Stop", ButtonStyle::Danger, state.focus_id == kUiStopEngine,
                 state.hover_id == kUiStopEngine, busy, fonts.body);
     add_clipped_hotspot(hotspots, kUiStopEngine, 0, stop, view, kScrollEngine, busy);
+    RECT help_stop = rect_of(stop.right + metrics.gap, y, help_w, metrics.button);
+    draw_chip(canvas, help_stop, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(1, 2), state.hover_id == ui_help_id(1, 2),
+              fonts.small);
+    add_clipped_hotspot(hotspots, ui_help_id(1, 2), static_cast<int>(HelpTopic::EngineStop),
+                        help_stop, view, kScrollEngine);
 
-    RECT recenter = rect_of(left + third + metrics.gap, y, third, metrics.button);
+    RECT recenter =
+        rect_of(left + third + metrics.gap, y, third - help_w - metrics.gap, metrics.button);
     draw_button(canvas, recenter, L"Recenter", ButtonStyle::Secondary,
                 state.focus_id == kUiRecenter, state.hover_id == kUiRecenter, busy, fonts.body);
     add_clipped_hotspot(hotspots, kUiRecenter, 0, recenter, view, kScrollEngine, busy);
+    RECT help_recenter = rect_of(recenter.right + metrics.gap, y, help_w, metrics.button);
+    draw_chip(canvas, help_recenter, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(1, 3), state.hover_id == ui_help_id(1, 3),
+              fonts.small);
+    add_clipped_hotspot(hotspots, ui_help_id(1, 3), static_cast<int>(HelpTopic::EngineRecenter),
+                        help_recenter, view, kScrollEngine);
 
-    RECT reload = rect_of(left + (third + metrics.gap) * 2, y, third, metrics.button);
+    RECT reload = rect_of(left + (third + metrics.gap) * 2, y, third - help_w - metrics.gap,
+                          metrics.button);
     draw_button(canvas, reload, L"Reload layout", ButtonStyle::Ghost,
                 state.focus_id == kUiReloadLayout, state.hover_id == kUiReloadLayout, busy,
                 fonts.body);
     add_clipped_hotspot(hotspots, kUiReloadLayout, 0, reload, view, kScrollEngine, busy);
+    RECT help_reload = rect_of(reload.right + metrics.gap, y, help_w, metrics.button);
+    draw_chip(canvas, help_reload, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(1, 4), state.hover_id == ui_help_id(1, 4),
+              fonts.small);
+    add_clipped_hotspot(hotspots, ui_help_id(1, 4),
+                        static_cast<int>(HelpTopic::EngineReloadLayout), help_reload, view,
+                        kScrollEngine);
     y += metrics.button + scale_px(8, dpi);
 
     const int toggle_width = (width - metrics.gap) / 2;
-    RECT yaw_toggle = rect_of(left, y, toggle_width, scale_px(24, dpi));
+    RECT yaw_toggle = rect_of(left, y, toggle_width - help_w - metrics.gap, scale_px(24, dpi));
     const bool yaw_on = state.engine.snapshot().query_answered
                             ? (state.engine.snapshot().query_flags & kEngineFlagYawTracking) != 0
                             : true;
     draw_toggle(canvas, yaw_toggle, L"Yaw tracking (Ctrl+Alt+Y)", yaw_on,
                 state.focus_id == kUiToggleYaw, state.hover_id == kUiToggleYaw, fonts.small);
     add_clipped_hotspot(hotspots, kUiToggleYaw, 0, yaw_toggle, view, kScrollEngine, busy);
+    RECT help_yaw = rect_of(yaw_toggle.right + metrics.gap, y, help_w, scale_px(24, dpi));
+    draw_chip(canvas, help_yaw, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(1, 5), state.hover_id == ui_help_id(1, 5),
+              fonts.small);
+    add_clipped_hotspot(hotspots, ui_help_id(1, 5), static_cast<int>(HelpTopic::EngineYawToggle),
+                        help_yaw, view, kScrollEngine);
 
-    RECT pitch_toggle = rect_of(left + toggle_width + metrics.gap, y, toggle_width,
-                                scale_px(24, dpi));
+    RECT pitch_toggle = rect_of(left + toggle_width + metrics.gap, y,
+                                  toggle_width - help_w - metrics.gap, scale_px(24, dpi));
     const bool pitch_on =
         state.engine.snapshot().query_answered
             ? (state.engine.snapshot().query_flags & kEngineFlagPitchTracking) != 0
@@ -534,15 +594,28 @@ void paint_engine_panel(Canvas& canvas, const PaintContext& context, const Metri
     draw_toggle(canvas, pitch_toggle, L"Pitch tracking (Ctrl+Alt+P)", pitch_on,
                 state.focus_id == kUiTogglePitch, state.hover_id == kUiTogglePitch, fonts.small);
     add_clipped_hotspot(hotspots, kUiTogglePitch, 0, pitch_toggle, view, kScrollEngine, busy);
+    RECT help_pitch = rect_of(pitch_toggle.right + metrics.gap, y, help_w, scale_px(24, dpi));
+    draw_chip(canvas, help_pitch, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(1, 6), state.hover_id == ui_help_id(1, 6),
+              fonts.small);
+    add_clipped_hotspot(hotspots, ui_help_id(1, 6),
+                        static_cast<int>(HelpTopic::EnginePitchToggle), help_pitch, view,
+                        kScrollEngine);
     y += scale_px(28, dpi);
 
-    RECT no_imu = rect_of(left, y, width, scale_px(24, dpi));
+    RECT no_imu = rect_of(left, y, width - help_w - metrics.gap, scale_px(24, dpi));
     draw_toggle(canvas, no_imu, L"Preview without head tracking (--no-imu)",
                 state.config.preview_without_head_tracking,
                 state.focus_id == kUiPreviewWithoutHeadTracking,
                 state.hover_id == kUiPreviewWithoutHeadTracking, fonts.small);
     add_clipped_hotspot(hotspots, kUiPreviewWithoutHeadTracking, 0, no_imu, view, kScrollEngine,
                         !busy);
+    RECT help_no_imu = rect_of(no_imu.right + metrics.gap, y, help_w, scale_px(24, dpi));
+    draw_chip(canvas, help_no_imu, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(1, 7), state.hover_id == ui_help_id(1, 7),
+              fonts.small);
+    add_clipped_hotspot(hotspots, ui_help_id(1, 7), static_cast<int>(HelpTopic::EngineNoImu),
+                        help_no_imu, view, kScrollEngine);
     y += scale_px(30, dpi);
 
     RECT note_rect = rect_of(left, y, width, note_h);
@@ -565,6 +638,7 @@ void paint_diagnostics_panel(Canvas& canvas, const PaintContext& context, const 
               rect.bottom - metrics.pad};
     const int half = (width - metrics.gap) / 2;
     const int small_button = scale_px(30, dpi);
+    const int help_w = scale_px(24, dpi);
     const int line_h = scale_px(15, dpi);
     const int buttons_h = (small_button + scale_px(8, dpi)) * 3;
     const int events_h =
@@ -574,36 +648,69 @@ void paint_diagnostics_panel(Canvas& canvas, const PaintContext& context, const 
     canvas.push_clip(view);
     int y = view.top - offset;
 
-    RECT calibration = rect_of(left, y, half, small_button);
+    RECT calibration = rect_of(left, y, half - help_w - metrics.gap, small_button);
     draw_button(canvas, calibration, L"Run calibration", ButtonStyle::Secondary,
                 state.focus_id == kUiLaunchCalibration, state.hover_id == kUiLaunchCalibration,
                 state.paths.calibration_tool_found, fonts.small);
     add_clipped_hotspot(hotspots, kUiLaunchCalibration, 0, calibration, view, kScrollDiagnostics,
                         state.paths.calibration_tool_found);
+    RECT help_cal = rect_of(calibration.right + metrics.gap, y, help_w, small_button);
+    draw_chip(canvas, help_cal, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(2, 0), state.hover_id == ui_help_id(2, 0),
+              fonts.small);
+    add_clipped_hotspot(hotspots, ui_help_id(2, 0), static_cast<int>(HelpTopic::DiagCalibration),
+                        help_cal, view, kScrollDiagnostics);
 
-    RECT engine_log = rect_of(left + half + metrics.gap, y, half, small_button);
+    RECT engine_log =
+        rect_of(left + half + metrics.gap, y, half - help_w - metrics.gap, small_button);
     draw_button(canvas, engine_log, L"Open engine log", ButtonStyle::Ghost,
                 state.focus_id == kUiOpenEngineLog, state.hover_id == kUiOpenEngineLog, true,
                 fonts.small);
     add_clipped_hotspot(hotspots, kUiOpenEngineLog, 0, engine_log, view, kScrollDiagnostics);
+    RECT help_log = rect_of(engine_log.right + metrics.gap, y, help_w, small_button);
+    draw_chip(canvas, help_log, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(2, 1), state.hover_id == ui_help_id(2, 1),
+              fonts.small);
+    add_clipped_hotspot(hotspots, ui_help_id(2, 1), static_cast<int>(HelpTopic::DiagEngineLog),
+                        help_log, view, kScrollDiagnostics);
     y += small_button + scale_px(8, dpi);
 
-    RECT logs_folder = rect_of(left, y, half, small_button);
+    RECT logs_folder = rect_of(left, y, half - help_w - metrics.gap, small_button);
     draw_button(canvas, logs_folder, L"Open logs folder", ButtonStyle::Ghost,
                 state.focus_id == kUiOpenLogs, state.hover_id == kUiOpenLogs, true, fonts.small);
     add_clipped_hotspot(hotspots, kUiOpenLogs, 0, logs_folder, view, kScrollDiagnostics);
+    RECT help_folder = rect_of(logs_folder.right + metrics.gap, y, help_w, small_button);
+    draw_chip(canvas, help_folder, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(2, 2), state.hover_id == ui_help_id(2, 2),
+              fonts.small);
+    add_clipped_hotspot(hotspots, ui_help_id(2, 2), static_cast<int>(HelpTopic::DiagLogsFolder),
+                        help_folder, view, kScrollDiagnostics);
 
-    RECT tray_toggle = rect_of(left + half + metrics.gap, y, half, small_button);
+    RECT tray_toggle =
+        rect_of(left + half + metrics.gap, y, half - help_w - metrics.gap, small_button);
     draw_toggle(canvas, tray_toggle, L"Close to tray", state.config.close_to_tray,
                 state.focus_id == kUiCloseToTray, state.hover_id == kUiCloseToTray, fonts.small);
     add_clipped_hotspot(hotspots, kUiCloseToTray, 0, tray_toggle, view, kScrollDiagnostics);
+    RECT help_tray = rect_of(tray_toggle.right + metrics.gap, y, help_w, small_button);
+    draw_chip(canvas, help_tray, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(2, 3), state.hover_id == ui_help_id(2, 3),
+              fonts.small);
+    add_clipped_hotspot(hotspots, ui_help_id(2, 3), static_cast<int>(HelpTopic::DiagCloseToTray),
+                        help_tray, view, kScrollDiagnostics);
     y += small_button + scale_px(8, dpi);
 
-    RECT recover = rect_of(left, y, half, small_button);
+    RECT recover = rect_of(left, y, half - help_w - metrics.gap, small_button);
     draw_button(canvas, recover, L"Recover displays", ButtonStyle::Ghost,
                 state.focus_id == kUiRecoverDisplays, state.hover_id == kUiRecoverDisplays, true,
                 fonts.small);
     add_clipped_hotspot(hotspots, kUiRecoverDisplays, 0, recover, view, kScrollDiagnostics);
+    RECT help_recover = rect_of(recover.right + metrics.gap, y, help_w, small_button);
+    draw_chip(canvas, help_recover, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(2, 4), state.hover_id == ui_help_id(2, 4),
+              fonts.small);
+    add_clipped_hotspot(hotspots, ui_help_id(2, 4),
+                        static_cast<int>(HelpTopic::DiagRecoverDisplays), help_recover, view,
+                        kScrollDiagnostics);
     y += small_button + scale_px(8, dpi);
 
     if (state.events.empty()) {
@@ -641,7 +748,7 @@ void paint_layout_panel(Canvas& canvas, const PaintContext& context, const Metri
         RECT rc{};
         int id = 0;
         int arg = 0;
-        int kind = 0;  // 0 = preset chip, 1 = screen chip, 2 = button
+        int kind = 0;  // 0 = preset, 1 = screen, 2 = button, 3 = user preset, 6 = help, 7 = hint
     };
     std::vector<FlowItem> items;
     int content_y = 0;
@@ -674,7 +781,13 @@ void paint_layout_panel(Canvas& canvas, const PaintContext& context, const Metri
         place(scale_px(static_cast<int>(label.size()) * 7 + 22, dpi), chip_height,
               ui_preset_id(preset), 0, 0);
     }
+    place(scale_px(24, dpi), chip_height, ui_help_id(3, 0),
+          static_cast<int>(HelpTopic::LayoutFactory), 6);
     end_block(scale_px(8, dpi));
+    if (state.preset_names.empty()) {
+        place(width, scale_px(16, dpi), 0, 0, 7);
+        end_block(scale_px(2, dpi));
+    }
     for (size_t index = 0; index < state.preset_names.size() && index < 32; ++index) {
         std::wstring label = wide_from_utf8(state.preset_names[index]);
         if (state.preset_names[index] == state.loaded_preset) {
@@ -683,6 +796,8 @@ void paint_layout_panel(Canvas& canvas, const PaintContext& context, const Metri
         place(scale_px(static_cast<int>(label.size()) * 7 + 22, dpi), chip_height,
               ui_user_preset_id(index), static_cast<int>(index), 3);
     }
+    place(scale_px(24, dpi), chip_height, ui_help_id(3, 1),
+          static_cast<int>(HelpTopic::LayoutUserPresets), 6);
     end_block(scale_px(8, dpi));
     for (size_t index = 0; index < state.layout.screens.size(); ++index) {
         place(scale_px(96, dpi), chip_height, ui_screen_id(index), static_cast<int>(index), 1);
@@ -690,11 +805,17 @@ void paint_layout_panel(Canvas& canvas, const PaintContext& context, const Metri
     end_block(scale_px(8, dpi));
     const int button_h = scale_px(30, dpi);
     place(scale_px(96, dpi), button_h, kUiAddScreen, 0, 2);
+    place(scale_px(24, dpi), button_h, ui_help_id(3, 2), static_cast<int>(HelpTopic::LayoutAddScreen), 6);
     place(scale_px(96, dpi), button_h, kUiRemoveScreen, 0, 2);
+    place(scale_px(24, dpi), button_h, ui_help_id(3, 3), static_cast<int>(HelpTopic::LayoutRemoveScreen), 6);
     place(scale_px(126, dpi), button_h, kUiSaveLayout, 0, 2);
+    place(scale_px(24, dpi), button_h, ui_help_id(3, 4), static_cast<int>(HelpTopic::LayoutSave), 6);
     place(scale_px(96, dpi), button_h, kUiRevertLayout, 0, 2);
+    place(scale_px(24, dpi), button_h, ui_help_id(3, 5), static_cast<int>(HelpTopic::LayoutRevert), 6);
     place(scale_px(150, dpi), button_h, kUiPresetSave, 0, 2);
+    place(scale_px(24, dpi), button_h, ui_help_id(3, 6), static_cast<int>(HelpTopic::LayoutPresetSave), 6);
     place(scale_px(130, dpi), button_h, kUiPresetDelete, 0, 2);
+    place(scale_px(24, dpi), button_h, ui_help_id(3, 7), static_cast<int>(HelpTopic::LayoutPresetDelete), 6);
     end_block(scale_px(6, dpi));
     const int summary_h = scale_px(16, dpi);
 
@@ -721,6 +842,14 @@ void paint_layout_panel(Canvas& canvas, const PaintContext& context, const Metri
             draw_chip(canvas, rc, label, palette::accent, state.focus_id == item.id,
                       state.hover_id == item.id, fonts.small);
             add_clipped_hotspot(hotspots, item.id, item.arg, rc, view, kScrollLayout);
+        } else if (item.kind == 6) {
+            draw_chip(canvas, rc, L"?", palette::text_faint, state.focus_id == item.id,
+                      state.hover_id == item.id, fonts.small);
+            add_clipped_hotspot(hotspots, item.id, item.arg, rc, view, kScrollLayout);
+        } else if (item.kind == 7) {
+            canvas.text(fonts.small, palette::text_faint, rc,
+                        L"No saved presets yet -- arrange screens, then Save as preset.",
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         } else if (item.kind == 1) {
             const ScreenLayout& screen = state.layout.screens[static_cast<size_t>(item.arg)];
             const bool selected = static_cast<size_t>(item.arg) == state.selected_screen;
@@ -930,6 +1059,13 @@ void paint_editor_panel(Canvas& canvas, const PaintContext& context, const Metri
     canvas.text(fonts.small, palette::text_faint, hint, ellipsize(hint_text, 150),
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
+    RECT help_editor = rect_of(rect.right - metrics.pad - scale_px(24, dpi),
+                                 rect.top + metrics.pad + scale_px(1, dpi), scale_px(24, dpi),
+                                 scale_px(20, dpi));
+    draw_chip(canvas, help_editor, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(5, 0), state.hover_id == ui_help_id(5, 0), fonts.small);
+    add_hotspot(hotspots, ui_help_id(5, 0), static_cast<int>(HelpTopic::EditorCanvas), help_editor);
+
     Hotspot editor;
     editor.id = kUiEditorCanvas;
     editor.arg = 0;
@@ -987,14 +1123,21 @@ void paint_fields_panel(Canvas& canvas, const PaintContext& context, const Metri
             layout_field_range(field, minimum, maximum, step);
             const float value = layout_field_value(state.layout, screen, field);
             const float fraction = maximum > minimum ? (value - minimum) / (maximum - minimum) : 0.0f;
-            RECT slider = rect_of(left + column * (column_width + metrics.gap), y, column_width,
-                                  metrics.slider);
+            const int help_w = scale_px(26, dpi);
+            RECT slider = rect_of(left + column * (column_width + metrics.gap), y,
+                                  column_width - help_w - metrics.gap, metrics.slider);
             draw_slider(canvas, slider, layout_field_label(field),
                         wide_from_utf8(format_layout_field_value(field, value)), fraction,
                         state.focus_id == ui_field_id(field), state.hover_id == ui_field_id(field),
                         true, fonts.small, fonts.body);
             add_clipped_hotspot(hotspots, ui_field_id(field), static_cast<int>(field), slider,
                                 view, kScrollFields);
+            RECT help_rect = rect_of(slider.right + metrics.gap, y, help_w, metrics.slider);
+            const int help_id = ui_help_id(4, static_cast<int>(field));
+            draw_chip(canvas, help_rect, L"?", palette::text_faint, state.focus_id == help_id,
+                      state.hover_id == help_id, fonts.small);
+            add_clipped_hotspot(hotspots, help_id, static_cast<int>(help_for_field(field)),
+                                help_rect, view, kScrollFields);
         }
         y += metrics.slider;
     }
@@ -1106,6 +1249,64 @@ float editor_yaw_from_point(const EditorGeometry& geometry, POINT point) {
     return static_cast<float>(yaw);
 }
 
+void paint_help_bubble(Canvas& canvas, const PaintContext& context, const Metrics& metrics,
+                         const std::vector<Hotspot>& hotspots) {
+    const AppState& state = *context.state;
+    const FontSet& fonts = *context.fonts;
+    const UINT dpi = context.dpi;
+    int id = state.hover_id;
+    if (id < kUiHelpBase || id >= kUiHelpBase + 7 * 64) {
+        id = state.focus_id;
+    }
+    if (id < kUiHelpBase || id >= kUiHelpBase + 7 * 64) {
+        return;
+    }
+    int topic = -1;
+    RECT anchor{};
+    bool found = false;
+    for (const Hotspot& spot : hotspots) {
+        if (spot.id == id) {
+            topic = spot.arg;
+            anchor = spot.rect;
+            found = true;
+            break;
+        }
+    }
+    if (!found || topic < 0 || topic >= static_cast<int>(HelpTopic::Count)) {
+        return;
+    }
+    const wchar_t* text = help_text(static_cast<HelpTopic>(topic));
+    if (text == nullptr || *text == L'\0') {
+        return;
+    }
+    const int margin = metrics.margin;
+    const int max_width =
+        std::min(scale_px(380, dpi), static_cast<int>(context.client.right - context.client.left) -
+                                            margin * 2);
+    if (max_width < scale_px(160, dpi)) {
+        return;
+    }
+    const int pad = scale_px(8, dpi);
+    const int height =
+        wrapped_text_height(canvas.dc(), fonts.small, max_width - pad * 2, text) + pad * 2;
+    int x = anchor.left;
+    int y = anchor.bottom + scale_px(4, dpi);
+    if (x + max_width > context.client.right - margin) {
+        x = context.client.right - margin - max_width;
+    }
+    if (x < context.client.left + margin) {
+        x = context.client.left + margin;
+    }
+    if (y + height > context.client.bottom - metrics.footer) {
+        y = anchor.top - height - scale_px(4, dpi);
+    }
+    const RECT box{x, y, x + max_width, y + height};
+    canvas.fill_round(box, scale_px(6, dpi), palette::panel_alt);
+    canvas.outline_round(box, scale_px(6, dpi), 1, palette::border);
+    const RECT text_rect{box.left + pad, box.top + pad, box.right - pad, box.bottom - pad};
+    canvas.text(fonts.small, palette::text, text_rect, text, DT_LEFT | DT_TOP | DT_WORDBREAK);
+}
+
 void paint_window(Canvas& canvas, const PaintContext& context, std::vector<Hotspot>& hotspots) {
     hotspots.clear();
     if (context.state == nullptr || context.fonts == nullptr) {
@@ -1182,6 +1383,7 @@ void paint_window(Canvas& canvas, const PaintContext& context, std::vector<Hotsp
     }
 
     paint_footer(canvas, context, metrics);
+    paint_help_bubble(canvas, context, metrics, hotspots);
 }
 
 }  // namespace gt::ui
