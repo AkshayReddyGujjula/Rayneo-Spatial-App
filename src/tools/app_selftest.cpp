@@ -714,11 +714,46 @@ void test_orbit() {
         dragged, angled_view, angled_camera, rect, 30, -20);
     dragged.yaw_deg = dragged_angles.yaw_deg;
     dragged.pitch_deg = dragged_angles.pitch_deg;
+    dragged.distance_m = dragged_angles.distance_m;
     const gt::OrbitPoint after_drag = gt::orbit_project(
         angled_view, angled_camera, gt::orbit_screen_quad(dragged).center, rect);
     check(std::abs(after_drag.pixel.x - before_drag.pixel.x - 30) <= 3 &&
               std::abs(after_drag.pixel.y - before_drag.pixel.y + 20) <= 3,
           "dragging a screen in an angled 3D view follows the pointer");
+    bool drag_consistent = true;
+    gt::Layout drag_layout = gt::preset_layout(gt::LayoutPreset::TripleArc);
+    near_screen.vdd_index = 7;
+    drag_layout.screens.push_back(near_screen);
+    for (const float camera_yaw : {-45.0f, 0.0f, 45.0f}) {
+        for (const float camera_pitch : {0.0f, 18.0f, 40.0f}) {
+            gt::OrbitView sample_view;
+            sample_view.yaw_deg = camera_yaw;
+            sample_view.pitch_deg = camera_pitch;
+            const gt::OrbitCamera sample_camera = gt::orbit_camera(sample_view);
+            for (const gt::ScreenLayout& original : drag_layout.screens) {
+                const gt::OrbitPoint start = gt::orbit_project(
+                    sample_view, sample_camera, gt::orbit_screen_quad(original).center, rect);
+                if (start.behind) continue;
+                for (const int dx : {-15, 15}) {
+                    for (const int dy : {-10, 10}) {
+                        gt::ScreenLayout moved = original;
+                        const gt::OrbitDragAngles moved_angles = gt::orbit_drag_angles(
+                            original, sample_view, sample_camera, rect, dx, dy);
+                        moved.yaw_deg = moved_angles.yaw_deg;
+                        moved.pitch_deg = moved_angles.pitch_deg;
+                        moved.distance_m = moved_angles.distance_m;
+                        const gt::OrbitPoint finish = gt::orbit_project(
+                            sample_view, sample_camera, gt::orbit_screen_quad(moved).center, rect);
+                        const bool follows = !finish.behind &&
+                            std::abs(finish.pixel.x - start.pixel.x - dx) <= 4 &&
+                            std::abs(finish.pixel.y - start.pixel.y - dy) <= 4;
+                        drag_consistent &= follows;
+                    }
+                }
+            }
+        }
+    }
+    check(drag_consistent, "small 3D drags stay under the pointer across orbit views");
 }
 
 }  // namespace
