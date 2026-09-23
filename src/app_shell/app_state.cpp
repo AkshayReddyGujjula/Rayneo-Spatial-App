@@ -244,12 +244,13 @@ void stop_engine_for_quit(AppState& state) {
     }
     state.engine.request_stop();
     // Bounded wait: quitting must not orphan the engine (and its Parsec
-    // desktops). The client terminates an owned engine after its 8 s grace;
-    // a foreign engine that ignores the quit request is reported and left
-    // alone. 12 s covers the grace plus reap slack. The wait pumps messages
-    // so session teardown stays answerable; nested commands are ignored
-    // while quitting (see on_close/execute).
-    const double deadline = steady_now_s() + 12.0;
+    // desktops). The client terminates an owned engine after its 45 s grace
+    // (a full display restore takes 13-35 s); a foreign engine that ignores
+    // the quit request is reported and left alone. 60 s covers the grace
+    // plus reap slack. The wait pumps messages so session teardown stays
+    // answerable; nested commands are ignored while quitting
+    // (see on_close/execute).
+    const double deadline = steady_now_s() + 60.0;
     for (;;) {
         state.now_s = steady_now_s();
         poll_engine(state);
@@ -475,8 +476,9 @@ void poll_engine(AppState& state) {
                     state.add_event(L"engine stopped");
                     state.clear_banner();
                     // The engine restores the taskbar itself on a clean
-                    // exit, but a quit during its restore terminates it
-                    // mid-run: the controller owns the last word.
+                    // exit, but a forced kill after the stop grace can
+                    // still cut a slow restore short: the controller owns
+                    // the last word.
                     restore_taskbar_after_churn(state);
                 }
                 break;
