@@ -312,6 +312,7 @@ verification is synthetic plus field-CSV forensics.
 | revert-screen-size-to-original-1.7m | User verdict: original screens better than shrunk 1.6 m | default + triple preset, suite green |
 | ui-minimalist-help-marks-plus-roomy-spacing | 24 px help chips -> 16 px faint glyphs; wider spacing rhythm throughout | 9/9 green |
 | ui-draggable-splitters-between-sections-persisted | 5 persisted splitters (4 row + column divider), live drag, minimums kept | selftest round-trip, 9/9 green |
+| ui-splitter-edge-cases-plus-clamp-guards | Legacy/malformed/degenerate prefs tests; pin boundaries when shrunk below minimums | 9/9 green |
 
 Pin-drift investigation (row 22 above): exonerated the estimator by measurement rather than shipping a
 guess. Reverted fixes: shorter still/holdoff gates (harsh drift 16.0 -> 27.6 deg: learns motion into

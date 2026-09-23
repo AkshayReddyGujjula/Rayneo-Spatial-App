@@ -213,6 +213,10 @@ void paint_splitter(Canvas& canvas, AppState& state, SplitterTrack& track, int i
     track.origin_px = origin_px;
     track.min_px = origin_px + (first_min - first_px);
     track.max_px = origin_px + (second_px - second_min);
+    if (track.max_px < track.min_px) {
+        // Window shrunk below the neighbours' minimums: pin the boundary.
+        track.min_px = track.max_px = origin_px;
+    }
     track.span_px = std::max(1, span_px);
     track.first_px = first_px;
     track.second_px = second_px;
@@ -1602,6 +1606,9 @@ void paint_window(Canvas& canvas, const PaintContext& context, std::vector<Hotsp
             track.origin_px = cx;
             track.min_px = left + scale_px(300, context.dpi) + metrics.gap / 2;
             track.max_px = right - scale_px(360, context.dpi) + metrics.gap / 2;
+            if (track.max_px < track.min_px) {
+                track.min_px = track.max_px = track.origin_px;
+            }
             track.span_px = std::max(1, content_w);
             track.span_start_px = left + metrics.gap / 2;
             track.column = 2;
