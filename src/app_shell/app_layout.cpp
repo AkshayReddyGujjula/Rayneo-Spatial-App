@@ -1,9 +1,12 @@
 #include "app_shell/app_layout.h"
 
+#include "util/utf8_path.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <iterator>
 #include <set>
 
@@ -133,26 +136,26 @@ Layout preset_layout(LayoutPreset preset) {
     Layout layout;
     switch (preset) {
         case LayoutPreset::Single:
-            layout.screens = {make_screen("centre", 1, 0.0f, 2.0f, 1.7f, 1)};
+            layout.screens = {make_screen("centre", 1, 0.0f, 2.0f, 1.6f, 1)};
             break;
         case LayoutPreset::TripleArc:
             layout = default_layout();
             break;
         case LayoutPreset::QuadArc:
             layout.screens = {
-                make_screen("left", 1, -67.5f, 2.0f, 1.7f, 0),
-                make_screen("centre-left", 2, -22.5f, 2.0f, 1.7f, 3),
-                make_screen("centre-right", 3, 22.5f, 2.0f, 1.7f, 1),
-                make_screen("right", 4, 67.5f, 2.0f, 1.7f, 2),
+                make_screen("left", 1, -67.5f, 2.0f, 1.6f, 0),
+                make_screen("centre-left", 2, -22.5f, 2.0f, 1.6f, 3),
+                make_screen("centre-right", 3, 22.5f, 2.0f, 1.6f, 1),
+                make_screen("right", 4, 67.5f, 2.0f, 1.6f, 2),
             };
             break;
         case LayoutPreset::FiveArc:
             layout.screens = {
-                make_screen("far-left", 1, -90.0f, 2.2f, 1.7f, 0),
-                make_screen("left", 2, -45.0f, 2.0f, 1.7f, 3),
-                make_screen("centre", 3, 0.0f, 2.0f, 1.7f, 1),
-                make_screen("right", 4, 45.0f, 2.0f, 1.7f, 2),
-                make_screen("far-right", 5, 90.0f, 2.2f, 1.7f, 4),
+                make_screen("far-left", 1, -90.0f, 2.2f, 1.6f, 0),
+                make_screen("left", 2, -45.0f, 2.0f, 1.6f, 3),
+                make_screen("centre", 3, 0.0f, 2.0f, 1.6f, 1),
+                make_screen("right", 4, 45.0f, 2.0f, 1.6f, 2),
+                make_screen("far-right", 5, 90.0f, 2.2f, 1.6f, 4),
             };
             break;
         case LayoutPreset::WideArc:
@@ -206,7 +209,7 @@ bool add_screen(Layout& layout, std::string& error) {
     }
     ScreenLayout screen;
     if (layout.screens.empty()) {
-        screen = make_screen(id, vdd_index, 0.0f, 2.0f, 1.7f, 1);
+        screen = make_screen(id, vdd_index, 0.0f, 2.0f, 1.6f, 1);
     } else {
         const ScreenLayout& last = layout.screens.back();
         screen = make_screen(id, vdd_index, std::min(180.0f, last.yaw_deg + 30.0f),
@@ -515,6 +518,113 @@ std::string layout_summary(const Layout& layout) {
                   layout.capture_policy.active_fps, layout.capture_policy.mid_fps,
                   layout.capture_policy.idle_fps);
     return std::string(buffer);
+}
+
+namespace {
+
+bool preset_char_ok(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+           c == ' ' || c == '-' || c == '_' || c == '.';
+}
+
+std::filesystem::path preset_file_path(const std::string& presets_dir, const std::string& name) {
+    return path_from_utf8(presets_dir) / (name + ".json");
+}
+
+}  // namespace
+
+bool layout_preset_name_valid(const std::string& name, std::string& error) {
+    if (name.empty() || name.size() > 64) {
+        error = "preset name must contain 1 to 64 characters";
+        return false;
+    }
+    for (char c : name) {
+        if (!preset_char_ok(c)) {
+            error = "preset name may only contain letters, digits, space, '-', '_' and '.'";
+            return false;
+        }
+    }
+    if (name.front() == ' ' || name.front() == '.' || name.back() == ' ' || name.back() == '.') {
+        error = "preset name must not start or end with a space or dot";
+        return false;
+    }
+    if (name.find("..") != std::string::npos) {
+        error = "preset name must not contain '..'";
+        return false;
+    }
+    return true;
+}
+
+std::vector<std::string> list_layout_presets(const std::string& presets_dir) {
+    std::vector<std::string> names;
+    std::error_code error;
+    std::filesystem::directory_iterator it(path_from_utf8(presets_dir), error);
+    if (error) {
+        return names;
+    }
+    const std::filesystem::directory_iterator end;
+    for (; it != end; it.increment(error)) {
+        if (error) {
+            break;
+        }
+        if (!it->is_regular_file(error) || error) {
+            continue;
+        }
+        if (it->path().extension() != ".json") {
+            continue;
+        }
+        std::string stem_error;
+        const std::string stem = utf8_from_path(it->path().stem());
+        if (!layout_preset_name_valid(stem, stem_error)) {
+            continue;
+        }
+        names.push_back(stem);
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+bool save_layout_preset(const std::string& presets_dir, const std::string& name,
+                        const Layout& layout, std::string& error) {
+    if (!layout_preset_name_valid(name, error)) {
+        return false;
+    }
+    std::error_code directory_error;
+    std::filesystem::create_directories(path_from_utf8(presets_dir), directory_error);
+    if (directory_error) {
+        error = "could not create the presets directory";
+        return false;
+    }
+    return save_layout(utf8_from_path(preset_file_path(presets_dir, name)), layout, error);
+}
+
+bool load_layout_preset(const std::string& presets_dir, const std::string& name, Layout& layout,
+                        std::string& error) {
+    if (!layout_preset_name_valid(name, error)) {
+        return false;
+    }
+    Layout candidate;
+    std::string load_error;
+    if (!load_layout(utf8_from_path(preset_file_path(presets_dir, name)), candidate, load_error)) {
+        error = "could not load preset '" + name + "': " + load_error;
+        return false;
+    }
+    layout = std::move(candidate);
+    return true;
+}
+
+bool delete_layout_preset(const std::string& presets_dir, const std::string& name,
+                          std::string& error) {
+    if (!layout_preset_name_valid(name, error)) {
+        return false;
+    }
+    std::error_code remove_error;
+    const bool removed = std::filesystem::remove(preset_file_path(presets_dir, name), remove_error);
+    if (remove_error || !removed) {
+        error = "could not delete preset '" + name + "'";
+        return false;
+    }
+    return true;
 }
 
 }  // namespace gt

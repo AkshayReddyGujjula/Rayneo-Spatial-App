@@ -1,5 +1,7 @@
 #include "app_shell/app_config.h"
 
+#include "app_shell/app_layout.h"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -182,6 +184,9 @@ bool validate_app_config(const AppConfig& config, std::string& error) {
         error = "layout_path must be 1..512 printable characters";
         return false;
     }
+    if (!layout_preset_name_valid(config.active_preset, error)) {
+        return false;
+    }
     if (!valid_text(config.calibration_path, kMaxTextLength)) {
         error = "calibration_path must be 1..512 printable characters";
         return false;
@@ -225,6 +230,7 @@ std::string app_config_to_json_text(const AppConfig& config) {
     const Json document{
         {"version", config.version},
         {"layout_path", config.layout_path},
+        {"active_preset", config.active_preset},
         {"calibration_path", config.calibration_path},
         {"log_dir", config.log_dir},
         {"monitor_index", config.monitor_index},
@@ -285,6 +291,13 @@ bool load_app_config(const std::filesystem::path& path, AppConfig& config, std::
             error = "field 'last_mode' must be none, workspace or preview";
             return false;
         }
+    }
+    if (document.contains("active_preset")) {
+        if (!document.at("active_preset").is_string()) {
+            error = "field 'active_preset' must be a string";
+            return false;
+        }
+        parsed.active_preset = document.at("active_preset").get<std::string>();
     }
     if (document.contains("window")) {
         const Json& window = document.at("window");

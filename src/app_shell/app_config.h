@@ -36,6 +36,7 @@ struct LogRotationPolicy {
 struct AppConfig {
     int version = 1;
     std::string layout_path = "config/layouts/default.json";
+    std::string active_preset = "triple";  // last-applied user preset (presets/<name>.json)
     std::string calibration_path = "config/orientation.json";
     std::string log_dir = "logs";
     int monitor_index = -1;  // -1 = let the engine pick the glasses display

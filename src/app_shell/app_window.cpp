@@ -1099,6 +1099,41 @@ void AppWindow::execute(int id, int arg) {
             }
             break;
         }
+        case kUiPresetSave: {
+            std::string preset_name;
+            if (!prompt_preset_name(preset_name)) {
+                break;
+            }
+            std::string preset_error;
+            if (!save_layout_preset(layout_presets_dir(state_), preset_name, state_.layout,
+                                    preset_error)) {
+                state_.set_banner(wide_from_utf8(preset_error), Severity::Error);
+                break;
+            }
+            refresh_layout_presets(state_);
+            state_.loaded_preset = preset_name;
+            state_.config.active_preset = preset_name;
+            if (state_.config_valid && !save_config_to_disk(state_, error)) {
+                state_.set_banner(error, Severity::Warning);
+                break;
+            }
+            state_.show_toast(L"Preset '" + wide_from_utf8(preset_name) + L"' saved");
+            break;
+        }
+        case kUiPresetDelete: {
+            if (state_.loaded_preset.empty()) {
+                break;
+            }
+            const std::string doomed = state_.loaded_preset;
+            std::string preset_error;
+            if (!delete_layout_preset(layout_presets_dir(state_), doomed, preset_error)) {
+                state_.set_banner(wide_from_utf8(preset_error), Severity::Error);
+                break;
+            }
+            refresh_layout_presets(state_);
+            state_.show_toast(L"Preset '" + wide_from_utf8(doomed) + L"' deleted");
+            break;
+        }
         case kUiCloseToTray:
             state_.config.close_to_tray = !state_.config.close_to_tray;
             if (!save_config_to_disk(state_, error)) {
@@ -1136,6 +1171,31 @@ void AppWindow::execute(int id, int arg) {
             } else if (id >= kUiScreenBase && id < kUiScreenBase + 8) {
                 state_.selected_screen = static_cast<size_t>(id - kUiScreenBase);
                 state_.focus_id = id;
+            } else if (id >= kUiUserPresetBase && id < kUiUserPresetBase + 32) {
+                const size_t index = static_cast<size_t>(id - kUiUserPresetBase);
+                if (index < state_.preset_names.size()) {
+                    const std::string& name = state_.preset_names[index];
+                    Layout preset;
+                    std::string preset_error;
+                    if (!load_layout_preset(layout_presets_dir(state_), name, preset,
+                                            preset_error)) {
+                        state_.set_banner(wide_from_utf8(preset_error), Severity::Error);
+                    } else {
+                        state_.layout = std::move(preset);
+                        state_.selected_screen = 0;
+                        state_.layout_dirty = true;
+                        state_.loaded_preset = name;
+                        state_.config.active_preset = name;
+                        if (state_.config_valid) {
+                            std::wstring config_error;
+                            if (!save_config_to_disk(state_, config_error)) {
+                                state_.set_banner(config_error, Severity::Warning);
+                            }
+                        }
+                        state_.show_toast(L"Preset '" + wide_from_utf8(name) +
+                                          L"' loaded; Save and reload to write it");
+                    }
+                }
             } else if (id == kUiEditorCanvas) {
                 state_.focus_id = id;
             }
@@ -1229,6 +1289,143 @@ void AppWindow::update_animation_timer() {
 
 void AppWindow::add_event(const std::wstring& text) {
     state_.add_event(text);
+}
+
+namespace {
+
+constexpr WORD kPresetDlgEdit = 1001;
+constexpr WORD kPresetDlgError = 1002;
+
+struct PresetNameDialog {
+    std::wstring initial;
+    std::wstring result;
+    bool accepted = false;
+};
+
+void dlg_push_u16(std::vector<BYTE>& blob, WORD value) {
+    blob.push_back(static_cast<BYTE>(value & 0xFF));
+    blob.push_back(static_cast<BYTE>((value >> 8) & 0xFF));
+}
+
+void dlg_push_u32(std::vector<BYTE>& blob, DWORD value) {
+    dlg_push_u16(blob, static_cast<WORD>(value & 0xFFFF));
+    dlg_push_u16(blob, static_cast<WORD>((value >> 16) & 0xFFFF));
+}
+
+void dlg_push_wstr(std::vector<BYTE>& blob, const wchar_t* text) {
+    for (const wchar_t* p = text;; ++p) {
+        dlg_push_u16(blob, static_cast<WORD>(*p));
+        if (*p == L'\0') {
+            break;
+        }
+    }
+}
+
+void dlg_align_u32(std::vector<BYTE>& blob) {
+    while (blob.size() % 4 != 0) {
+        blob.push_back(0);
+    }
+}
+
+void dlg_push_item(std::vector<BYTE>& blob, DWORD style, short x, short y, short cx, short cy,
+                   WORD id, WORD class_atom, const wchar_t* text) {
+    dlg_align_u32(blob);
+    dlg_push_u32(blob, style);
+    dlg_push_u32(blob, 0);
+    dlg_push_u16(blob, static_cast<WORD>(x));
+    dlg_push_u16(blob, static_cast<WORD>(y));
+    dlg_push_u16(blob, static_cast<WORD>(cx));
+    dlg_push_u16(blob, static_cast<WORD>(cy));
+    dlg_push_u16(blob, id);
+    dlg_push_u16(blob, 0xFFFF);
+    dlg_push_u16(blob, class_atom);
+    dlg_push_wstr(blob, text);
+    dlg_push_u16(blob, 0);
+}
+
+std::vector<BYTE> build_preset_name_template() {
+    std::vector<BYTE> blob;
+    dlg_push_u32(blob, DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU);
+    dlg_push_u32(blob, 0);
+    dlg_push_u16(blob, 5);
+    dlg_push_u16(blob, 0);
+    dlg_push_u16(blob, 0);
+    dlg_push_u16(blob, 178);
+    dlg_push_u16(blob, 74);
+    dlg_push_u16(blob, 0);
+    dlg_push_u16(blob, 0);
+    dlg_push_wstr(blob, L"Save preset");
+    dlg_push_u16(blob, 8);
+    dlg_push_wstr(blob, L"MS Shell Dlg");
+    dlg_push_item(blob, WS_CHILD | WS_VISIBLE | SS_LEFT, 7, 7, 164, 8, 0xFFFF, 0x0082,
+                  L"Preset &name:");
+    dlg_push_item(blob, WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 7, 17,
+                  164, 14, kPresetDlgEdit, 0x0081, L"");
+    dlg_push_item(blob, WS_CHILD | WS_VISIBLE | SS_LEFT, 7, 33, 164, 18, kPresetDlgError, 0x0082,
+                  L"");
+    dlg_push_item(blob, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 67, 56, 50, 14,
+                  IDOK, 0x0080, L"OK");
+    dlg_push_item(blob, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 121, 56, 50, 14,
+                  IDCANCEL, 0x0080, L"Cancel");
+    return blob;
+}
+
+}  // namespace
+
+INT_PTR CALLBACK AppWindow::preset_name_dlg_proc(HWND dlg, UINT message, WPARAM wparam,
+                                                 LPARAM lparam) {
+    if (message == WM_INITDIALOG) {
+        SetWindowLongPtrW(dlg, DWLP_USER, lparam);
+        const PresetNameDialog* state = reinterpret_cast<PresetNameDialog*>(lparam);
+        SendDlgItemMessageW(dlg, kPresetDlgEdit, EM_SETLIMITTEXT, 64, 0);
+        if (state != nullptr && !state->initial.empty()) {
+            SetDlgItemTextW(dlg, kPresetDlgEdit, state->initial.c_str());
+            SendDlgItemMessageW(dlg, kPresetDlgEdit, EM_SETSEL, 0, -1);
+        }
+        return TRUE;
+    }
+    if (message != WM_COMMAND) {
+        return FALSE;
+    }
+    const WORD id = LOWORD(wparam);
+    if (id == IDCANCEL) {
+        EndDialog(dlg, IDCANCEL);
+        return TRUE;
+    }
+    if (id != IDOK) {
+        return FALSE;
+    }
+    wchar_t buffer[65] = {};
+    GetDlgItemTextW(dlg, kPresetDlgEdit, buffer, 65);
+    std::string error;
+    const std::string name = utf8_from_wide(buffer);
+    if (!layout_preset_name_valid(name, error)) {
+        SetDlgItemTextW(dlg, kPresetDlgError, wide_from_utf8(error).c_str());
+        MessageBeep(MB_ICONWARNING);
+        return TRUE;
+    }
+    PresetNameDialog* state =
+        reinterpret_cast<PresetNameDialog*>(GetWindowLongPtrW(dlg, DWLP_USER));
+    if (state != nullptr) {
+        state->result = buffer;
+        state->accepted = true;
+    }
+    EndDialog(dlg, IDOK);
+    return TRUE;
+}
+
+bool AppWindow::prompt_preset_name(std::string& name) {
+    PresetNameDialog state;
+    state.initial = wide_from_utf8(state_.loaded_preset);
+    const std::vector<BYTE> templ = build_preset_name_template();
+    const INT_PTR rc = DialogBoxIndirectParamW(
+        instance_, reinterpret_cast<const DLGTEMPLATE*>(templ.data()), hwnd_, preset_name_dlg_proc,
+        reinterpret_cast<LPARAM>(&state));
+    if (rc != IDOK || !state.accepted) {
+        return false;
+    }
+    name = utf8_from_wide(state.result);
+    return true;
 }
 
 }  // namespace gt::ui

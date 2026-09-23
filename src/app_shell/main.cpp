@@ -67,6 +67,7 @@ bool bootstrap(gt::AppState& state, std::string& fatal_error) {
     if (state.selected_screen >= state.layout.screens.size()) {
         state.selected_screen = 0;
     }
+    gt::refresh_layout_presets(state);
     gt::run_expensive_diagnostics(state);
     return true;
 }

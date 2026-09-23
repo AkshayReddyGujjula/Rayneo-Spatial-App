@@ -675,6 +675,15 @@ void paint_layout_panel(Canvas& canvas, const PaintContext& context, const Metri
               ui_preset_id(preset), 0, 0);
     }
     end_block(scale_px(8, dpi));
+    for (size_t index = 0; index < state.preset_names.size() && index < 32; ++index) {
+        std::wstring label = wide_from_utf8(state.preset_names[index]);
+        if (state.preset_names[index] == state.loaded_preset) {
+            label += L" *";
+        }
+        place(scale_px(static_cast<int>(label.size()) * 7 + 22, dpi), chip_height,
+              ui_user_preset_id(index), static_cast<int>(index), 3);
+    }
+    end_block(scale_px(8, dpi));
     for (size_t index = 0; index < state.layout.screens.size(); ++index) {
         place(scale_px(96, dpi), chip_height, ui_screen_id(index), static_cast<int>(index), 1);
     }
@@ -684,6 +693,8 @@ void paint_layout_panel(Canvas& canvas, const PaintContext& context, const Metri
     place(scale_px(96, dpi), button_h, kUiRemoveScreen, 0, 2);
     place(scale_px(126, dpi), button_h, kUiSaveLayout, 0, 2);
     place(scale_px(96, dpi), button_h, kUiRevertLayout, 0, 2);
+    place(scale_px(150, dpi), button_h, kUiPresetSave, 0, 2);
+    place(scale_px(130, dpi), button_h, kUiPresetDelete, 0, 2);
     end_block(scale_px(6, dpi));
     const int summary_h = scale_px(16, dpi);
 
@@ -701,6 +712,15 @@ void paint_layout_panel(Canvas& canvas, const PaintContext& context, const Metri
             draw_chip(canvas, rc, wide_from_utf8(layout_preset_name(preset)), palette::accent,
                       state.focus_id == item.id, state.hover_id == item.id, fonts.small);
             add_clipped_hotspot(hotspots, item.id, 0, rc, view, kScrollLayout);
+        } else if (item.kind == 3) {
+            const std::string& name = state.preset_names[static_cast<size_t>(item.arg)];
+            std::wstring label = wide_from_utf8(name);
+            if (name == state.loaded_preset) {
+                label += L" *";
+            }
+            draw_chip(canvas, rc, label, palette::accent, state.focus_id == item.id,
+                      state.hover_id == item.id, fonts.small);
+            add_clipped_hotspot(hotspots, item.id, item.arg, rc, view, kScrollLayout);
         } else if (item.kind == 1) {
             const ScreenLayout& screen = state.layout.screens[static_cast<size_t>(item.arg)];
             const bool selected = static_cast<size_t>(item.arg) == state.selected_screen;
@@ -732,6 +752,16 @@ void paint_layout_panel(Canvas& canvas, const PaintContext& context, const Metri
             draw_button(canvas, rc, L"Save and reload", ButtonStyle::Primary,
                         state.focus_id == item.id, state.hover_id == item.id, true, fonts.small);
             add_clipped_hotspot(hotspots, item.id, 0, rc, view, kScrollLayout);
+        } else if (item.id == kUiPresetSave) {
+            draw_button(canvas, rc, L"Save as preset", ButtonStyle::Secondary,
+                        state.focus_id == item.id, state.hover_id == item.id, true, fonts.small);
+            add_clipped_hotspot(hotspots, item.id, 0, rc, view, kScrollLayout);
+        } else if (item.id == kUiPresetDelete) {
+            const bool can_delete = !state.loaded_preset.empty();
+            draw_button(canvas, rc, L"Delete preset", ButtonStyle::Danger,
+                        state.focus_id == item.id, state.hover_id == item.id, can_delete,
+                        fonts.small);
+            add_clipped_hotspot(hotspots, item.id, 0, rc, view, kScrollLayout, can_delete);
         } else {
             draw_button(canvas, rc, L"Revert", ButtonStyle::Ghost, state.focus_id == item.id,
                         state.hover_id == item.id, true, fonts.small);

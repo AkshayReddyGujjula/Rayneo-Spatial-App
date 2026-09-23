@@ -234,6 +234,26 @@ bool recover_display_topology(AppState& state) {
     return false;
 }
 
+std::string layout_presets_dir(const AppState& state) {
+    return narrow_utf8(state.paths.layout_path.parent_path() / "presets");
+}
+
+void refresh_layout_presets(AppState& state) {
+    state.preset_names = list_layout_presets(layout_presets_dir(state));
+    if (!state.loaded_preset.empty()) {
+        bool still_there = false;
+        for (const std::string& name : state.preset_names) {
+            if (name == state.loaded_preset) {
+                still_there = true;
+                break;
+            }
+        }
+        if (!still_there) {
+            state.loaded_preset.clear();
+        }
+    }
+}
+
 void stop_engine_for_quit(AppState& state) {
     if (!state.engine.busy()) {
         return;
