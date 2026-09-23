@@ -9,7 +9,10 @@
 namespace gt {
 namespace {
 
-constexpr double kStopGraceSeconds = 8.0;
+// Measured display-restore time is 13-35 s; the grace must cover a full
+// restore or quit kills the engine mid-run (stranded virtual desktops and
+// a bogus Failed state). Termination stays as a last resort after this.
+constexpr double kStopGraceSeconds = 45.0;
 constexpr double kStartTimeoutSeconds = 30.0;
 constexpr UINT kQueryTimeoutMs = 250;
 
@@ -357,7 +360,7 @@ void EngineClient::poll(double now_s) {
         snapshot_.uptime_s = 0.0;
         close_process();
         if (kill_reported_) {
-            // The 8 s grace already expired and the termination was reported
+            // The stop grace already expired and the termination was reported
             // as Failed; the reaped exit must not downgrade it to Stopped.
             snapshot_.state = EngineProcessState::Failed;
             stop_requested_ = false;

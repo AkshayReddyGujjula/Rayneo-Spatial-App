@@ -142,8 +142,8 @@ struct AppState {
     bool starting = false;
     // Taskbar auto-hide lifecycle: captured at engine start, re-applied
     // after every display recovery and engine exit. The engine restores it
-    // too, but its restore can be terminated mid-run on quit (8 s grace vs
-    // a 13-35 s restore), so the controller owns the last word. -1 = none.
+    // too, but a forced kill after the 45 s stop grace can still cut a slow
+    // restore short, so the controller owns the last word. -1 = none.
     int taskbar_state_at_engine_start = -1;
     // Poll deadline for the sticky re-check: Explorer flips the tray
     // seconds after churn, so each poll re-asserts until this passes.
