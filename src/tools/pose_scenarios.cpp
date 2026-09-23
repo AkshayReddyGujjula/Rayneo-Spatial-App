@@ -870,6 +870,24 @@ int main() {
         std::snprintf(label, sizeof(label), "noiseless closure dir %+.0f stays systematic-only", sgn);
         check(std::fabs(yf) < 0.05f, label, yf, 0.05f);
     }
+
+    // --- 18: repeated look-arounds must not walk the centre off --------------
+    std::printf("\n-- scenario 18: 20x right-screen look-around and back --\n");
+    {
+        HeadSim sim = make_sim(0xC0FFEE18u);
+        float worst = 0.0f;
+        for (int cycle = 0; cycle < 20; ++cycle) {
+            sim.move(90.0f, 0.25f, 0.25f, Vec3{0.0f, 0.0f, 1.0f});  // ~45 deg out
+            sim.hold(1.0f);
+            sim.move(90.0f, 0.25f, 0.25f, Vec3{0.0f, 0.0f, -1.0f});  // back
+            sim.hold(2.0f);
+            worst = std::max(worst, std::fabs(sim.yaw()));
+        }
+        const float yf = sim.yaw();
+        std::printf("  after 20 look-arounds: yaw %.4f deg, worst excursion %.4f deg\n", yf, worst);
+        print_bias(sim, "at end");
+        check(std::fabs(yf) < 1.0f, "repeated look-arounds keep the centre", yf, 1.0f);
+    }
     std::printf("\npose_scenarios: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
