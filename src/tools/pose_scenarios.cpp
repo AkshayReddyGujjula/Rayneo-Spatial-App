@@ -740,6 +740,136 @@ int main() {
         check(std::fabs(sm_travel - raw_travel) < 0.5f, "the full pan travel survives smoothing",
               std::fabs(sm_travel - raw_travel), 0.5f);
     }
+
+    // --- 16: five minutes of realistic computer use must not need recenter ---
+    std::printf("\n-- scenario 16: 5 min computer use, thermal bias ramp, net-zero true yaw --\n");
+    for (int harsh = 0; harsh <= 1; ++harsh) {
+        HeadSim sim = make_sim(harsh != 0 ? 0xC0FFEE17u : 0xC0FFEE16u);
+        // Thermal-style bias ramp on the yaw package axis, on top of the
+        // harness's random walk. The harsh variant triples the ramp and the
+        // walk and adds continuous 2 Hz sway through every hold, mimicking a
+        // warming sensor on a fidgety wearer.
+        const float kRampTotal = harsh != 0 ? 0.5f : 0.15f;
+        constexpr float kSessionS = 300.0f;
+        const float kRampPerSample = kRampTotal / (kSessionS * kRateHz);
+        if (harsh != 0) {
+            sim.bias_walk_degs = 1.5e-3f;
+            sim.sway = true;
+            sim.sway_amp_degs = 1.0f;
+            sim.sway_hz = 2.0f;
+        }
+        auto apply_ramp = [&](float t_prev) {
+            const float samples = (sim.t - t_prev) / kDt;
+            sim.bias_pkg_degs.y += kRampPerSample * samples;
+        };
+        std::mt19937 pick(0x51AB16u);
+        std::uniform_real_distribution<float> glance(-8.0f, 8.0f);
+        std::uniform_real_distribution<float> pause(2.0f, 6.0f);
+        std::uniform_real_distribution<float> small_pause(0.3f, 1.0f);
+        uint64_t adapt_samples = 0;
+        uint64_t total_samples = 0;
+        auto poll_adapt = [&](float t_prev) {
+            const uint64_t n =
+                static_cast<uint64_t>(std::lround((sim.t - t_prev) / kDt));
+            total_samples += n;
+            // Sampled once per motion primitive; the duty estimate below is
+            // coarse but sufficient to show starvation vs engagement.
+            const int st = sim.est.adapt_state();
+            if (st == 1 || st == 2) {
+                adapt_samples += n;
+            }
+        };
+        const float t_start = sim.t;
+        float t_prev = t_start;
+        int look_arounds = 0;
+        while (sim.t - t_start < kSessionS) {
+            const float g = glance(pick);
+            const float rate = 40.0f + std::fabs(g) * 4.0f;
+            const float ramp = 0.15f;
+            const float sustain = std::max(0.0f, std::fabs(g) / rate - ramp);
+            const Vec3 axis{0.0f, 0.0f, g >= 0.0f ? 1.0f : -1.0f};
+            sim.move(rate, ramp, sustain, axis);
+            apply_ramp(t_prev);
+            poll_adapt(t_prev);
+            t_prev = sim.t;
+            sim.hold(small_pause(pick));
+            apply_ramp(t_prev);
+            poll_adapt(t_prev);
+            t_prev = sim.t;
+            sim.move(rate, ramp, sustain, Vec3{0.0f, 0.0f, g >= 0.0f ? -1.0f : 1.0f});
+            apply_ramp(t_prev);
+            poll_adapt(t_prev);
+            t_prev = sim.t;
+            // Every ~30 s a bigger look-around with a pitch component.
+            if (look_arounds * 30.0f < sim.t - t_start) {
+                ++look_arounds;
+                sim.move(60.0f, 0.25f, 0.25f, Vec3{0.0f, 0.0f, 1.0f});
+                apply_ramp(t_prev);
+                t_prev = sim.t;
+                sim.move(30.0f, 0.2f, 0.1f, Vec3{0.0f, 1.0f, 0.0f});
+                apply_ramp(t_prev);
+                t_prev = sim.t;
+                sim.move(30.0f, 0.2f, 0.1f, Vec3{0.0f, -1.0f, 0.0f});
+                apply_ramp(t_prev);
+                t_prev = sim.t;
+                sim.move(60.0f, 0.25f, 0.25f, Vec3{0.0f, 0.0f, -1.0f});
+                apply_ramp(t_prev);
+                t_prev = sim.t;
+            }
+            sim.hold(pause(pick));
+            apply_ramp(t_prev);
+            poll_adapt(t_prev);
+            t_prev = sim.t;
+        }
+        sim.hold(3.0f);
+        const float drift = std::fabs(sim.yaw());
+        const Vec3 bias = sim.est.gyro_bias_degs();
+        const float bias_err = std::fabs(bias.y - sim.bias_pkg_degs.y);
+        const double duty =
+            total_samples > 0 ? 100.0 * static_cast<double>(adapt_samples) / total_samples : 0.0;
+        std::printf("  5-min drift %.4f deg, bias err %.4f deg/s, adapt duty %.1f%%, rollbacks %u\n",
+                    drift, bias_err, duty, static_cast<unsigned>(sim.est.escape_rollbacks()));
+        print_bias(sim, "at end");
+        std::printf("  [%s variant]\n", harsh != 0 ? "harsh (10x-stress, print-only)" : "nominal");
+        if (harsh == 0) {
+            check(drift < 3.0f, "five minutes of computer use stays recenter-free", drift, 3.0f);
+        }
+    }
+
+    // --- 17: noiseless pan-and-return closure (systematic bound) ------------
+    // With zero noise, zero bias and zero walk, any pan-and-return residual is
+    // purely systematic (routine adaptation engaging on the LPF's ramp
+    // edges). It must stay an order of magnitude below the noisy envelope
+    // (scenarios 1/2, < 0.3 deg) so per-pan systematics can never accumulate
+    // into session drift.
+    std::printf("\n-- scenario 17: noiseless +60/-60 pan-return closure --\n");
+    for (int dir = 0; dir <= 1; ++dir) {
+        HeadSim sim = make_sim(dir == 0 ? 0xC0FFEEA1u : 0xC0FFEEA2u);
+        sim.bias_walk_degs = 0.0f;
+        sim.white = std::normal_distribution<float>{0.0f, 0.0f};
+        sim.bias_pkg_degs = Vec3{};
+        sim.est.configure(PoseEstimator::Config{});
+        sim.hold(kWarmupS);
+        const float sgn = dir == 0 ? 1.0f : -1.0f;
+        const float y0 = sim.yaw();
+        sim.move(sgn * 60.0f, 1.0f, 0.0f, Vec3{0.0f, 0.0f, 1.0f});
+        const float y1 = sim.yaw();
+        sim.hold(2.0f);
+        const float y2 = sim.yaw();
+        sim.move(-sgn * 60.0f, 1.0f, 0.0f, Vec3{0.0f, 0.0f, 1.0f});
+        sim.hold(3.0f);
+        const float yf = sim.yaw();
+        std::printf("  dir %+.0f: start %.5f -> after pan %.5f -> hold %.5f -> final %.5f\n", sgn,
+                    y0, y1, y2, yf);
+        {
+            const Vec3 b = sim.est.gyro_bias_degs();
+            std::printf("    end bias (%.6f, %.6f, %.6f), adapt=%d still=%d\n", b.x, b.y, b.z,
+                        sim.est.adapt_state(), sim.est.still() ? 1 : 0);
+        }
+        char label[96];
+        std::snprintf(label, sizeof(label), "noiseless closure dir %+.0f stays systematic-only", sgn);
+        check(std::fabs(yf) < 0.05f, label, yf, 0.05f);
+    }
     std::printf("\npose_scenarios: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
