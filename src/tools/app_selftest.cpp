@@ -280,6 +280,9 @@ void test_app_config(const std::filesystem::path& directory) {
     bad = defaults;
     bad.monitor_index = 42;
     check(!gt::validate_app_config(bad, error), "an out-of-range monitor index is rejected");
+    bad = defaults;
+    bad.splits.column = 2.0f;
+    check(!gt::validate_app_config(bad, error), "an out-of-range split fraction is rejected");
 
     const std::filesystem::path path = directory / "app.json";
     gt::AppConfig config = defaults;
@@ -295,6 +298,13 @@ void test_app_config(const std::filesystem::path& directory) {
     config.telemetry_rotation = {256u << 10, 4};
     config.last_engine_error = "engine exited with code 1";
     config.window = {120, 80, 1440, 900, true};
+    config.splits.column = 0.33f;
+    config.splits.left[0] = 0.4f;
+    config.splits.left[1] = 0.3f;
+    config.splits.left[2] = 0.3f;
+    config.splits.right[0] = 0.25f;
+    config.splits.right[1] = 0.35f;
+    config.splits.right[2] = 0.4f;
     check(gt::save_app_config(path, config, error), "preferences save");
     check(!std::filesystem::exists(std::filesystem::path(path.string() + ".tmp")),
           "the temporary file is gone after a successful save");
@@ -311,7 +321,10 @@ void test_app_config(const std::filesystem::path& directory) {
               loaded.engine_log_rotation.max_files == 2 &&
               loaded.telemetry_rotation.max_files == 4 &&
               loaded.last_engine_error == config.last_engine_error &&
-              loaded.window.x == 120 && loaded.window.width == 1440 && loaded.window.maximized,
+              loaded.window.x == 120 && loaded.window.width == 1440 && loaded.window.maximized &&
+              std::fabs(loaded.splits.column - 0.33f) < 1e-6f &&
+              std::fabs(loaded.splits.left[1] - 0.3f) < 1e-6f &&
+              std::fabs(loaded.splits.right[2] - 0.4f) < 1e-6f,
           "every preference round-trips");
 
     const std::string before = read_text(path);

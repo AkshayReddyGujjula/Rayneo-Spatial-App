@@ -54,6 +54,10 @@ enum UiId : int {
     kUiScrollBase = 500,
     kUiUserPresetBase = 600,
     kUiHelpBase = 700,
+    // Help ids run to kUiHelpBase + 7 * 64; splitters live above that range:
+    // 0/1 = left-column gaps, 2/3 = right-column gaps, 4 = column divider.
+    kUiSplitBase = 1200,
+    kUiSplitCount = 5,
 };
 
 inline int ui_user_preset_id(size_t index) {
@@ -108,6 +112,23 @@ enum ScrollPanel : int {
     kScrollLayout = 3,
     kScrollFields = 4,
     kScrollPanelCount = 5,
+};
+
+// Splitter drag geometry, refreshed by the paint pass (same cache pattern as
+// ScrollPortal). Fractions live in AppConfig::splits; the track carries the
+// pixel limits derived from the live layout and panel minimums.
+struct SplitterTrack {
+    RECT zone{};
+    int origin_px = 0;  // boundary position when the drag starts
+    int min_px = 0;     // drag limits in client px
+    int max_px = 0;
+    int span_px = 1;  // content px the fractions divide
+    int first_px = 0;   // adjacent sizes at drag start (rows) or unused (column)
+    int second_px = 0;
+    int span_start_px = 0;  // content start in client px (column divider)
+    int column = 0;         // 0 = left gaps, 1 = right gaps, 2 = column divider
+    int index = 0;          // gap index within the column (rows) or 0
+    bool valid = false;
 };
 
 struct ScrollPortal {
@@ -199,6 +220,8 @@ struct AppState {
     ScrollPortal scroll[kScrollPanelCount];
     int drag_scroll_panel = -1;
     int drag_scroll_grab = 0;
+    SplitterTrack split_track[kUiSplitCount];
+    int drag_splitter = -1;
 
     void add_event(const std::wstring& text);
     void set_banner(const std::wstring& text, Severity severity);

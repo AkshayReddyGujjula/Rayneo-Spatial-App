@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
@@ -33,6 +34,49 @@ Json window_to_json(const WindowPlacement& window) {
         {"height", window.height},
         {"maximized", window.maximized},
     };
+}
+
+bool read_float(const Json& object, const char* key, float& out, std::string& error);
+
+Json splits_to_json(const SplitFractions& splits) {
+    return Json{
+        {"column", splits.column},
+        {"left", {splits.left[0], splits.left[1], splits.left[2]}},
+        {"right", {splits.right[0], splits.right[1], splits.right[2]}},
+    };
+}
+
+bool read_splits(const Json& document, SplitFractions& out, std::string& error) {
+    if (!document.contains("splits")) {
+        return true;
+    }
+    const Json& splits = document.at("splits");
+    if (!splits.is_object()) {
+        error = "field 'splits' must be an object";
+        return false;
+    }
+    if (!read_float(splits, "column", out.column, error)) {
+        return false;
+    }
+    for (const char* key : {"left", "right"}) {
+        if (!splits.contains(key)) {
+            continue;
+        }
+        const Json& triple = splits.at(key);
+        if (!triple.is_array() || triple.size() != 3) {
+            error = std::string("field 'splits.") + key + "' must be an array of 3 numbers";
+            return false;
+        }
+        float* target = key[0] == 'l' ? out.left : out.right;
+        for (size_t i = 0; i < 3; ++i) {
+            if (!triple[i].is_number()) {
+                error = std::string("field 'splits.") + key + "' must be an array of 3 numbers";
+                return false;
+            }
+            target[i] = triple[i].get<float>();
+        }
+    }
+    return true;
 }
 
 Json policy_to_json(const LogRotationPolicy& policy) {
@@ -87,6 +131,18 @@ bool read_int(const Json& object, const char* key, int& out, std::string& error)
         return false;
     }
     out = static_cast<int>(wide);
+    return true;
+}
+
+bool read_float(const Json& object, const char* key, float& out, std::string& error) {
+    if (!object.contains(key)) {
+        return true;
+    }
+    if (!object.at(key).is_number()) {
+        error = std::string("field '") + key + "' must be a number";
+        return false;
+    }
+    out = object.at(key).get<float>();
     return true;
 }
 
@@ -199,6 +255,15 @@ bool validate_app_config(const AppConfig& config, std::string& error) {
         error = "monitor_index must be -1 (auto) or 0..15";
         return false;
     }
+    const float* parts[7] = {&config.splits.column, &config.splits.left[0], &config.splits.left[1],
+                             &config.splits.left[2], &config.splits.right[0], &config.splits.right[1],
+                             &config.splits.right[2]};
+    for (const float* part : parts) {
+        if (!std::isfinite(*part) || *part < -1.0f || *part > 1.0f) {
+            error = "split fractions must be -1 (automatic) or a 0..1 share";
+            return false;
+        }
+    }
     if (config.health_poll_ms < kMinHealthPollMs || config.health_poll_ms > kMaxHealthPollMs) {
         error = "health_poll_ms must be 500..10000 (polling is capped at 2 Hz)";
         return false;
@@ -242,6 +307,7 @@ std::string app_config_to_json_text(const AppConfig& config) {
         {"telemetry_log", policy_to_json(config.telemetry_rotation)},
         {"last_engine_error", config.last_engine_error},
         {"window", window_to_json(config.window)},
+        {"splits", splits_to_json(config.splits)},
     };
     return document.dump(2) + "\n";
 }
@@ -312,6 +378,9 @@ bool load_app_config(const std::filesystem::path& path, AppConfig& config, std::
             !read_bool(window, "maximized", parsed.window.maximized, error)) {
             return false;
         }
+    }
+    if (!read_splits(document, parsed.splits, error)) {
+        return false;
     }
     if (!clamp_loaded(parsed, error) || !validate_app_config(parsed, error)) {
         return false;

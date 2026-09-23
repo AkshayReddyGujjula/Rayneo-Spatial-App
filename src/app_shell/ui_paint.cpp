@@ -185,6 +185,54 @@ void distribute_heights(int available, int gap, const int desired[3], const int 
     }
 }
 
+// User splitter fractions override the built-in desired heights (normalized,
+// so sums stay 1 even for hand-edited files). distribute_heights still
+// enforces the minimums, so a dragged layout degrades gracefully when the
+// window shrinks.
+void apply_split_fractions(int desired[3], const float fracs[3], int available, int gap) {
+    if (fracs[0] < 0.0f || fracs[1] < 0.0f || fracs[2] < 0.0f) {
+        return;
+    }
+    const float sum = fracs[0] + fracs[1] + fracs[2];
+    if (!(sum > 0.0f)) {
+        return;
+    }
+    const int panels = std::max(0, available - gap * 2);
+    for (int i = 0; i < 3; ++i) {
+        desired[i] = static_cast<int>(std::lround(fracs[i] / sum * panels));
+    }
+}
+
+// Paints one splitter grip, registers its hotspot, and caches the drag track.
+// Boundary motion is pre-clamped so neither neighbour drops below its minimum.
+void paint_splitter(Canvas& canvas, AppState& state, SplitterTrack& track, int id,
+                    const RECT& zone, int origin_px, int first_px, int second_px, int first_min,
+                    int second_min, int span_px, int span_start_px, int column, int index,
+                    bool vertical) {
+    track.zone = zone;
+    track.origin_px = origin_px;
+    track.min_px = origin_px + (first_min - first_px);
+    track.max_px = origin_px + (second_px - second_min);
+    track.span_px = std::max(1, span_px);
+    track.first_px = first_px;
+    track.second_px = second_px;
+    track.span_start_px = span_start_px;
+    track.column = column;
+    track.index = index;
+    track.valid = true;
+    const bool active = state.hover_id == id || state.drag_splitter == id - kUiSplitBase;
+    const COLORREF color = active ? palette::accent : palette::border_strong;
+    if (vertical) {
+        const int cx = (zone.left + zone.right) / 2;
+        RECT line{cx - 1, zone.top, cx + 2, zone.bottom};
+        canvas.fill(line, color);
+    } else {
+        const int cy = (zone.top + zone.bottom) / 2;
+        RECT line{zone.left, cy - 1, zone.right, cy + 2};
+        canvas.fill(line, color);
+    }
+}
+
 void draw_panel_frame(Canvas& canvas, const RECT& rect, const FontSet& fonts, UINT dpi,
                       const wchar_t* title) {
     canvas.fill_round(rect, scale_px(8, dpi), palette::panel);
@@ -1448,14 +1496,22 @@ void paint_window(Canvas& canvas, const PaintContext& context, std::vector<Hotsp
         paint_help_bubble(canvas, context, metrics, hotspots);
         return;
     }
-    const int left_width = metrics.left_width;
+    const int content_w = right - left;
+    int left_width = metrics.left_width;
+    if (context.state->config.splits.column >= 0.0f) {
+        left_width = std::clamp(
+            static_cast<int>(std::lround(context.state->config.splits.column * content_w)),
+            scale_px(300, context.dpi), std::max(scale_px(300, context.dpi), content_w - scale_px(360, context.dpi)));
+    }
     const int right_left = left + left_width + metrics.gap;
     const int right_width = right - right_left;
     const int available_height = content_bottom - content_top;
     const int min_panel = scale_px(60, context.dpi);
 
-    const int desired_left[3] = {scale_px(348, context.dpi), scale_px(264, context.dpi),
-                                 scale_px(248, context.dpi)};
+    int desired_left[3] = {scale_px(348, context.dpi), scale_px(264, context.dpi),
+                             scale_px(248, context.dpi)};
+    apply_split_fractions(desired_left, context.state->config.splits.left, available_height,
+                          metrics.gap);
     const int minimum_left[3] = {scale_px(150, context.dpi), scale_px(170, context.dpi),
                                  scale_px(110, context.dpi)};
     int left_h[3] = {0, 0, 0};
@@ -1480,8 +1536,10 @@ void paint_window(Canvas& canvas, const PaintContext& context, std::vector<Hotsp
         hide_portal(context, kScrollDiagnostics);
     }
 
-    const int desired_right[3] = {scale_px(184, context.dpi), scale_px(328, context.dpi),
-                                  scale_px(320, context.dpi)};
+    int desired_right[3] = {scale_px(184, context.dpi), scale_px(328, context.dpi),
+                              scale_px(320, context.dpi)};
+    apply_split_fractions(desired_right, context.state->config.splits.right, available_height,
+                          metrics.gap);
     const int minimum_right[3] = {scale_px(120, context.dpi), scale_px(100, context.dpi),
                                   scale_px(140, context.dpi)};
     int right_h[3] = {0, 0, 0};
@@ -1503,6 +1561,59 @@ void paint_window(Canvas& canvas, const PaintContext& context, std::vector<Hotsp
         paint_fields_panel(canvas, context, metrics, fields_rect, hotspots);
     } else {
         hide_portal(context, kScrollFields);
+    }
+
+    {
+        AppState& state = *context.state;
+        const int panels_px = std::max(1, available_height - metrics.gap * 2);
+        const int grip = scale_px(9, context.dpi);
+        for (int i = 0; i < kUiSplitCount; ++i) {
+            state.split_track[i].valid = false;
+        }
+        const RECT left_rects[3] = {status_rect, engine_rect, diagnostics_rect};
+        for (int k = 0; k < 2; ++k) {
+            if (left_h[k] < min_panel || left_h[k + 1] < min_panel) {
+                continue;
+            }
+            const int cy = left_rects[k].bottom + metrics.gap / 2;
+            RECT zone{left, cy - grip / 2, left + left_width, cy + grip / 2 + grip % 2};
+            paint_splitter(canvas, state, state.split_track[k], kUiSplitBase + k, zone, cy,
+                           left_h[k], left_h[k + 1], minimum_left[k], minimum_left[k + 1],
+                           panels_px, content_top, 0, k, false);
+            add_hotspot(hotspots, kUiSplitBase + k, 0, zone);
+        }
+        const RECT right_rects[3] = {layout_rect, editor_rect, fields_rect};
+        for (int k = 0; k < 2; ++k) {
+            if (right_h[k] < min_panel || right_h[k + 1] < min_panel) {
+                continue;
+            }
+            const int cy = right_rects[k].bottom + metrics.gap / 2;
+            RECT zone{right_left, cy - grip / 2, right_left + right_width, cy + grip / 2 + grip % 2};
+            paint_splitter(canvas, state, state.split_track[2 + k], kUiSplitBase + 2 + k, zone, cy,
+                           right_h[k], right_h[k + 1], minimum_right[k], minimum_right[k + 1],
+                           panels_px, content_top, 1, k, false);
+            add_hotspot(hotspots, kUiSplitBase + 2 + k, 0, zone);
+        }
+        {
+            const int cx = left + left_width + metrics.gap / 2;
+            RECT zone{cx - grip / 2, content_top, cx + grip / 2 + grip % 2, content_bottom};
+            SplitterTrack& track = state.split_track[4];
+            track.zone = zone;
+            track.origin_px = cx;
+            track.min_px = left + scale_px(300, context.dpi) + metrics.gap / 2;
+            track.max_px = right - scale_px(360, context.dpi) + metrics.gap / 2;
+            track.span_px = std::max(1, content_w);
+            track.span_start_px = left + metrics.gap / 2;
+            track.column = 2;
+            track.index = 0;
+            track.valid = true;
+            const bool active =
+                state.hover_id == kUiSplitBase + 4 || state.drag_splitter == 4;
+            const int lx = (zone.left + zone.right) / 2;
+            RECT line{lx - 1, zone.top, lx + 2, zone.bottom};
+            canvas.fill(line, active ? palette::accent : palette::border_strong);
+            add_hotspot(hotspots, kUiSplitBase + 4, 0, zone);
+        }
     }
 
     paint_footer(canvas, context, metrics);
