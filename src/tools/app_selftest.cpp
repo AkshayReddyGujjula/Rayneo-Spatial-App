@@ -10,6 +10,7 @@
 #include "app_shell/app_config.h"
 #include "app_shell/app_layout.h"
 #include "app_shell/engine_commands.h"
+#include "util/utf8_path.h"
 #include "app_shell/telemetry.h"
 
 #include <cmath>
@@ -522,6 +523,51 @@ void test_telemetry() {
           "adaptation states have stable labels");
 }
 
+void test_user_presets(const std::filesystem::path& directory) {
+    std::printf("app_selftest: named user presets\n");
+    std::string error;
+    check(gt::layout_preset_name_valid("main setup", error), "spaces are allowed in preset names");
+    check(gt::layout_preset_name_valid("triple", error), "the default active preset is valid");
+    check(!gt::layout_preset_name_valid("", error), "an empty preset name is rejected");
+    check(!gt::layout_preset_name_valid("../escape", error), "slashes are rejected");
+    check(!gt::layout_preset_name_valid("a..b", error), "dot-dot is rejected");
+    check(!gt::layout_preset_name_valid(".hidden", error), "a leading dot is rejected");
+    check(!gt::layout_preset_name_valid("bad:name", error), "colons are rejected");
+    check(!gt::layout_preset_name_valid(std::string(65, 'x'), error),
+          "a 65-character name is rejected");
+
+    const std::string presets = gt::utf8_from_path(directory / "presets");
+    check(gt::list_layout_presets(presets).empty(), "a missing presets directory lists nothing");
+    gt::Layout triple = gt::preset_layout(gt::LayoutPreset::TripleArc);
+    check(gt::save_layout_preset(presets, "main setup", triple, error), "a preset saves");
+    gt::Layout single = gt::preset_layout(gt::LayoutPreset::Single);
+    check(gt::save_layout_preset(presets, "solo", single, error), "a second preset saves");
+    const std::vector<std::string> names = gt::list_layout_presets(presets);
+    check(names.size() == 2 && names[0] == "main setup" && names[1] == "solo",
+          "presets list back sorted");
+    gt::Layout loaded;
+    check(gt::load_layout_preset(presets, "main setup", loaded, error) &&
+              loaded.screens.size() == 3,
+          "a preset round-trips");
+    check(!gt::load_layout_preset(presets, "missing", loaded, error),
+          "a missing preset fails to load");
+    check(!gt::save_layout_preset(presets, "../escape", triple, error),
+          "an evil name cannot escape the presets directory");
+    check(!std::filesystem::exists(directory / "escape.json"), "no file escaped the directory");
+    gt::Layout invalid;
+    check(!gt::save_layout_preset(presets, "broken", invalid, error),
+          "an invalid layout is not saved as a preset");
+    check(gt::delete_layout_preset(presets, "solo", error), "a preset deletes");
+    check(!gt::delete_layout_preset(presets, "solo", error), "deleting twice fails");
+    check(gt::list_layout_presets(presets).size() == 1, "the deleted preset is gone");
+
+    gt::AppConfig config;
+    check(config.active_preset == "triple", "the default active preset is triple");
+    check(gt::validate_app_config(config, error), "the default config still validates");
+    config.active_preset = "../escape";
+    check(!gt::validate_app_config(config, error), "an evil active preset fails validation");
+}
+
 }  // namespace
 
 int main() {
@@ -546,6 +592,7 @@ int main() {
     test_status_freshness();
     test_app_config(directory);
     test_presets_and_screens();
+    test_user_presets(directory);
     test_field_normalisation();
     test_log_rotation(directory);
     test_telemetry();

@@ -60,4 +60,17 @@ bool set_layout_field(Layout& layout, ScreenLayout& screen, LayoutField field, f
 std::string format_layout_field_value(LayoutField field, float value);
 std::string layout_summary(const Layout& layout);
 
+// Named user presets: validated Layout files stored as <name>.json inside a
+// presets directory (normally <config>/layouts/presets). The engine keeps
+// loading the single live layout file; applying a preset copies its content
+// into the editor, and the existing save path pushes it live.
+bool layout_preset_name_valid(const std::string& name, std::string& error);
+std::vector<std::string> list_layout_presets(const std::string& presets_dir);
+bool save_layout_preset(const std::string& presets_dir, const std::string& name,
+                        const Layout& layout, std::string& error);
+bool load_layout_preset(const std::string& presets_dir, const std::string& name, Layout& layout,
+                        std::string& error);
+bool delete_layout_preset(const std::string& presets_dir, const std::string& name,
+                          std::string& error);
+
 }  // namespace gt

@@ -82,6 +82,9 @@ private:
     const Hotspot* hotspot(int id, int arg) const;
     const Hotspot* hotspot_at(int x, int y) const;
     void add_event(const std::wstring& text);
+    bool prompt_preset_name(std::string& name);
+    static INT_PTR CALLBACK preset_name_dlg_proc(HWND dlg, UINT message, WPARAM wparam,
+                                                 LPARAM lparam);
 
     AppState state_;
     FontSet fonts_;

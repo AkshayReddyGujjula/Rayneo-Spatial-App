@@ -68,11 +68,11 @@ T required(const Json& object, const char* key) {
 Layout default_layout() {
     Layout layout;
     layout.screens = {
-        ScreenLayout{"left", 1, -45.0f, 0.0f, 0.0f, 2.0f, 1.7f, 0.95625f,
+        ScreenLayout{"left", 1, -45.0f, 0.0f, 0.0f, 2.0f, 1.6f, 0.9f,
                      {0.90f, 0.25f, 0.25f}},
-        ScreenLayout{"centre", 2, 0.0f, 0.0f, 0.0f, 2.0f, 1.7f, 0.95625f,
+        ScreenLayout{"centre", 2, 0.0f, 0.0f, 0.0f, 2.0f, 1.6f, 0.9f,
                      {0.24f, 0.45f, 0.95f}},
-        ScreenLayout{"right", 3, 45.0f, 0.0f, 0.0f, 2.0f, 1.7f, 0.95625f,
+        ScreenLayout{"right", 3, 45.0f, 0.0f, 0.0f, 2.0f, 1.6f, 0.9f,
                      {0.25f, 0.85f, 0.35f}},
     };
     return layout;

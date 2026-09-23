@@ -43,12 +43,19 @@ enum UiId : int {
     kUiPreviewWithoutHeadTracking = 17,
     kUiQuit = 18,
     kUiRecoverDisplays = 19,
+    kUiPresetSave = 20,
+    kUiPresetDelete = 21,
     kUiPresetBase = 100,
     kUiFieldBase = 200,
     kUiScreenBase = 300,
     kUiEditorCanvas = 400,
     kUiScrollBase = 500,
+    kUiUserPresetBase = 600,
 };
+
+inline int ui_user_preset_id(size_t index) {
+    return kUiUserPresetBase + static_cast<int>(index);
+}
 
 inline int ui_preset_id(LayoutPreset preset) {
     return kUiPresetBase + static_cast<int>(preset);
@@ -132,6 +139,8 @@ struct AppState {
     Layout layout;
     bool layout_dirty = false;
     size_t selected_screen = 0;
+    std::vector<std::string> preset_names;
+    std::string loaded_preset;
 
     EngineClient engine;
     EngineStatusFile engine_status;
@@ -188,6 +197,8 @@ bool start_engine(AppState& state, LaunchMode mode, std::wstring& error);
 void stop_engine(AppState& state);
 bool save_layout_to_disk(AppState& state, std::wstring& error);
 bool revert_layout_from_disk(AppState& state, std::wstring& error);
+std::string layout_presets_dir(const AppState& state);
+void refresh_layout_presets(AppState& state);
 bool save_config_to_disk(AppState& state, std::wstring& error);
 bool reload_app_config(AppState& state, std::wstring& error);
 void stop_engine_for_quit(AppState& state);

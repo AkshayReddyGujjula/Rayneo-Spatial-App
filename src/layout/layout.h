@@ -13,8 +13,8 @@ struct ScreenLayout {
     float pitch_deg = 0.0f;
     float roll_deg = 0.0f;
     float distance_m = 2.0f;
-    float width_m = 1.7f;
-    float height_m = 0.95625f;
+    float width_m = 1.6f;
+    float height_m = 0.9f;
     std::array<float, 3> color{0.24f, 0.45f, 0.95f};
 };
 
