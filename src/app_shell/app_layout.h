@@ -53,6 +53,10 @@ const wchar_t* layout_field_label(LayoutField field);
 const char* layout_field_key(LayoutField field);
 float layout_field_value(const Layout& layout, const ScreenLayout& screen, LayoutField field);
 bool layout_field_range(LayoutField field, float& minimum, float& maximum, float& step);
+// Distance uses a geometric scale, giving useful pointer precision around
+// typical workspace depths while retaining the full 0.25-20 m range.
+float layout_slider_fraction(LayoutField field, float value);
+float layout_slider_value(LayoutField field, float fraction);
 // Applies the value and normalises every coupled field (capture FPS ordering,
 // enter > leave, yaw wrapping) so the result still validates.
 bool set_layout_field(Layout& layout, ScreenLayout& screen, LayoutField field, float value,

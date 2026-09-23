@@ -595,14 +595,10 @@ void AppWindow::on_mouse_move(int x, int y) {
         if (state_.drag_field >= 0) {
             const Hotspot* spot = hotspot(kUiFieldBase + state_.drag_field, -1);
             if (spot != nullptr && spot->full.right > spot->full.left) {
-                float minimum = 0.0f;
-                float maximum = 0.0f;
-                float step = 0.0f;
                 const auto field = static_cast<LayoutField>(state_.drag_field);
-                layout_field_range(field, minimum, maximum, step);
                 const float fraction = static_cast<float>(x - spot->full.left) /
                                        static_cast<float>(spot->full.right - spot->full.left);
-                const float value = minimum + std::clamp(fraction, 0.0f, 1.0f) * (maximum - minimum);
+                const float value = layout_slider_value(field, fraction);
                 if (!state_.layout.screens.empty() &&
                     state_.selected_screen < state_.layout.screens.size()) {
                     std::string error;
@@ -630,22 +626,31 @@ void AppWindow::on_mouse_move(int x, int y) {
             if (editor_spot == nullptr) {
                 return;
             }
-            const EditorGeometry geometry = editor_geometry(state_.layout, editor_spot->rect, dpi_);
             if (static_cast<size_t>(state_.drag_screen) < state_.layout.screens.size()) {
                 ScreenLayout& screen = state_.layout.screens[static_cast<size_t>(state_.drag_screen)];
                 std::string error;
-                float yaw = 0.0f;
+                float yaw = screen.yaw_deg;
+                float pitch = screen.pitch_deg;
                 if (state_.editor_3d) {
-                    yaw = state_.drag_start_yaw +
-                          static_cast<float>(x - state_.drag_origin.x) * 0.25f;
+                    ScreenLayout start_screen = screen;
+                    start_screen.yaw_deg = state_.drag_start_yaw;
+                    start_screen.pitch_deg = state_.drag_start_pitch;
+                    OrbitView orbit;
+                    orbit.yaw_deg = state_.orbit_yaw_deg;
+                    orbit.pitch_deg = state_.orbit_pitch_deg;
+                    orbit.distance_m = state_.orbit_distance_m;
+                    const OrbitDragAngles angles = orbit_drag_angles(
+                        start_screen, orbit, orbit_camera(orbit), editor_spot->rect,
+                        x - state_.drag_origin.x, y - state_.drag_origin.y);
+                    yaw = angles.yaw_deg;
+                    pitch = angles.pitch_deg;
                 } else {
+                    const EditorGeometry geometry = editor_geometry(state_.layout, editor_spot->rect, dpi_);
                     yaw = editor_yaw_from_point(geometry, POINT{x, y});
+                    pitch = state_.drag_start_pitch +
+                            static_cast<float>(state_.drag_origin.y - y) * 0.25f;
                 }
                 set_layout_field(state_.layout, screen, LayoutField::Yaw, yaw, error);
-                const float pitch =
-                    std::clamp(state_.drag_start_pitch +
-                                   static_cast<float>(state_.drag_origin.y - y) * 0.25f,
-                               -89.0f, 89.0f);
                 set_layout_field(state_.layout, screen, LayoutField::Pitch, pitch, error);
                 state_.layout_dirty = true;
             }

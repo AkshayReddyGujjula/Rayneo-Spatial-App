@@ -9,7 +9,9 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace gt {
@@ -22,6 +24,14 @@ struct OrbitVec3 {
 
 inline OrbitVec3 orbit_sub(OrbitVec3 a, OrbitVec3 b) {
     return OrbitVec3{a.x - b.x, a.y - b.y, a.z - b.z};
+}
+
+inline OrbitVec3 orbit_add(OrbitVec3 a, OrbitVec3 b) {
+    return OrbitVec3{a.x + b.x, a.y + b.y, a.z + b.z};
+}
+
+inline OrbitVec3 orbit_scale(OrbitVec3 v, float scale) {
+    return OrbitVec3{v.x * scale, v.y * scale, v.z * scale};
 }
 
 inline float orbit_dot(OrbitVec3 a, OrbitVec3 b) {
@@ -144,30 +154,138 @@ inline OrbitQuad orbit_screen_quad(const ScreenLayout& screen) {
     return quad;
 }
 
-// Nearest projected screen centre within radius_px, preferring the nearer
-// screen on ties. Returns -1 when nothing is close.
+inline float orbit_edge_distance_sq(int x, int y, POINT a, POINT b) {
+    const float dx = static_cast<float>(b.x - a.x);
+    const float dy = static_cast<float>(b.y - a.y);
+    const float length_sq = dx * dx + dy * dy;
+    if (length_sq < 1e-4f) {
+        const float px = static_cast<float>(x - a.x);
+        const float py = static_cast<float>(y - a.y);
+        return px * px + py * py;
+    }
+    const float along = std::clamp(
+        (static_cast<float>(x - a.x) * dx + static_cast<float>(y - a.y) * dy) / length_sq,
+        0.0f, 1.0f);
+    const float px = static_cast<float>(x - a.x) - along * dx;
+    const float py = static_cast<float>(y - a.y) - along * dy;
+    return px * px + py * py;
+}
+
+// Select the visible projected face, including its interior and a small edge
+// tolerance. Overlapping faces select the one nearest the editor camera.
 inline int orbit_hit_test(const Layout& layout, const OrbitView& view, const OrbitCamera& camera,
                           const RECT& rect, int x, int y, int radius_px) {
     int best = -1;
-    float best_distance = static_cast<float>(radius_px);
-    float best_depth = 0.0f;
+    float best_distance_sq = std::numeric_limits<float>::infinity();
+    float best_depth = std::numeric_limits<float>::infinity();
+    const float tolerance_sq = static_cast<float>(radius_px * radius_px);
     for (size_t i = 0; i < layout.screens.size(); ++i) {
         const OrbitQuad quad = orbit_screen_quad(layout.screens[i]);
-        const OrbitPoint projected = orbit_project(view, camera, quad.center, rect);
-        if (projected.behind) {
+        POINT corners[4];
+        bool visible = true;
+        for (int corner = 0; corner < 4; ++corner) {
+            const OrbitPoint projected = orbit_project(view, camera, quad.corners[corner], rect);
+            if (projected.behind) {
+                visible = false;
+                break;
+            }
+            corners[corner] = projected.pixel;
+        }
+        if (!visible) {
             continue;
         }
-        const float dx = static_cast<float>(projected.pixel.x - x);
-        const float dy = static_cast<float>(projected.pixel.y - y);
-        const float distance = std::sqrt(dx * dx + dy * dy);
-        if (distance < best_distance - 1e-3f ||
-            (distance <= best_distance + 1e-3f && projected.depth_m > best_depth)) {
-            best_distance = distance;
-            best_depth = projected.depth_m;
+        bool has_positive = false;
+        bool has_negative = false;
+        float edge_distance_sq = std::numeric_limits<float>::infinity();
+        for (int corner = 0; corner < 4; ++corner) {
+            const POINT a = corners[corner];
+            const POINT b = corners[(corner + 1) % 4];
+            const float side = static_cast<float>(b.x - a.x) * static_cast<float>(y - a.y) -
+                               static_cast<float>(b.y - a.y) * static_cast<float>(x - a.x);
+            has_positive |= side > 0.0f;
+            has_negative |= side < 0.0f;
+            edge_distance_sq = std::min(edge_distance_sq, orbit_edge_distance_sq(x, y, a, b));
+        }
+        const bool inside = !(has_positive && has_negative);
+        const float distance_sq = inside ? 0.0f : edge_distance_sq;
+        if (distance_sq > tolerance_sq) {
+            continue;
+        }
+        const float depth = orbit_project(view, camera, quad.center, rect).depth_m;
+        if (distance_sq < best_distance_sq - 1e-3f ||
+            (std::fabs(distance_sq - best_distance_sq) <= 1e-3f && depth < best_depth)) {
+            best_distance_sq = distance_sq;
+            best_depth = depth;
             best = static_cast<int>(i);
         }
     }
     return best;
+}
+
+struct OrbitDragAngles {
+    float yaw_deg = 0.0f;
+    float pitch_deg = 0.0f;
+};
+
+// Drag the selected screen's centre along the pointer in the current camera
+// view. The screen stays at its chosen head distance; the separate Distance
+// slider changes that radius. Choose the ray/sphere intersection closest to
+// the starting screen so an oblique camera cannot flip it to the far side.
+inline OrbitDragAngles orbit_drag_angles(const ScreenLayout& screen, const OrbitView& view,
+                                          const OrbitCamera& camera, const RECT& rect,
+                                          int delta_x, int delta_y) {
+    OrbitDragAngles result{screen.yaw_deg, screen.pitch_deg};
+    if (delta_x == 0 && delta_y == 0) {
+        return result;
+    }
+    constexpr float kPi = 3.14159265358979323846f;
+    const float width = static_cast<float>(rect.right - rect.left);
+    const float height = static_cast<float>(rect.bottom - rect.top);
+    if (width <= 0.0f || height <= 0.0f || screen.distance_m <= 0.0f) {
+        return result;
+    }
+    const OrbitVec3 start = orbit_screen_quad(screen).center;
+    const OrbitPoint projected = orbit_project(view, camera, start, rect);
+    if (projected.behind) {
+        return result;
+    }
+    const float focal = std::min(width, height) * 0.5f /
+                        std::tan(view.fov_deg * 0.5f * kPi / 180.0f);
+    const float x = static_cast<float>(projected.pixel.x + delta_x);
+    const float y = static_cast<float>(projected.pixel.y + delta_y);
+    const float horizontal = (x - static_cast<float>(rect.left) - width * 0.5f) / focal;
+    const float vertical = -(y - static_cast<float>(rect.top) - height * 0.5f) / focal;
+    const OrbitVec3 ray = orbit_norm(orbit_add(
+        camera.forward,
+        orbit_add(orbit_scale(camera.right, horizontal), orbit_scale(camera.up, vertical))));
+    const float along = -orbit_dot(camera.origin, ray);
+    const float c = orbit_dot(camera.origin, camera.origin) -
+                    screen.distance_m * screen.distance_m;
+    const float discriminant = along * along - c;
+    OrbitVec3 point;
+    if (discriminant >= 0.0f) {
+        const float root = std::sqrt(discriminant);
+        const float near_t = along - root;
+        const float far_t = along + root;
+        const OrbitVec3 near_point = orbit_add(camera.origin, orbit_scale(ray, near_t));
+        const OrbitVec3 far_point = orbit_add(camera.origin, orbit_scale(ray, far_t));
+        const OrbitVec3 near_delta = orbit_sub(near_point, start);
+        const OrbitVec3 far_delta = orbit_sub(far_point, start);
+        point = (near_t > 0.0f &&
+                 (far_t <= 0.0f || orbit_dot(near_delta, near_delta) <=
+                                        orbit_dot(far_delta, far_delta)))
+                    ? near_point : far_point;
+    } else {
+        // The pointer has moved beyond the sphere's projected silhouette.
+        // Stop at the nearest reachable point rather than jumping or reversing.
+        point = orbit_scale(orbit_norm(orbit_add(camera.origin,
+                                                orbit_scale(ray, std::max(0.0f, along)))),
+                            screen.distance_m);
+    }
+    result.yaw_deg = std::atan2(point.x, point.y) * 180.0f / kPi;
+    result.pitch_deg = std::asin(std::clamp(point.z / screen.distance_m, -1.0f, 1.0f)) *
+                       180.0f / kPi;
+    return result;
 }
 
 }  // namespace gt
