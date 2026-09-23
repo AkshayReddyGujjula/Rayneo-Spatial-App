@@ -555,6 +555,29 @@ void AppWindow::ensure_focus_visible() {
 void AppWindow::on_mouse_move(int x, int y) {
     state_.now_s = steady_now_s();
     if (state_.drag_active) {
+        if (state_.drag_splitter >= 0 && state_.drag_splitter < kUiSplitCount) {
+            SplitterTrack& track = state_.split_track[state_.drag_splitter];
+            if (track.valid) {
+                const int pos = track.column == 2 ? x : y;
+                const int at = std::clamp(pos, track.min_px, track.max_px);
+                if (track.column == 2) {
+                    state_.config.splits.column =
+                        static_cast<float>(at - track.span_start_px) / track.span_px;
+                } else {
+                    const int delta = at - track.origin_px;
+                    const int h0 = track.first_px + delta;
+                    const int h1 = track.second_px - delta;
+                    const int h2 = track.span_px - track.first_px - track.second_px;
+                    float* fracs = track.column == 0 ? state_.config.splits.left
+                                                     : state_.config.splits.right;
+                    fracs[track.index] = static_cast<float>(h0) / track.span_px;
+                    fracs[track.index + 1] = static_cast<float>(h1) / track.span_px;
+                    fracs[track.index == 0 ? 2 : 0] = static_cast<float>(h2) / track.span_px;
+                }
+                invalidate();
+            }
+            return;
+        }
         if (state_.drag_scroll_panel >= 0 &&
             state_.drag_scroll_panel < kScrollPanelCount) {
             const ScrollPortal& portal = state_.scroll[state_.drag_scroll_panel];
@@ -666,6 +689,18 @@ void AppWindow::on_lbutton_down(int x, int y) {
         invalidate();
         return;
     }
+    if (spot->id >= kUiSplitBase && spot->id < kUiSplitBase + kUiSplitCount) {
+        const int index = spot->id - kUiSplitBase;
+        if (state_.split_track[index].valid) {
+            state_.drag_splitter = index;
+            state_.drag_active = true;
+            pending_click_id_ = kUiNone;
+            SetCapture(hwnd_);
+            on_mouse_move(x, y);
+        }
+        invalidate();
+        return;
+    }
     pending_click_id_ = spot->id;
     pending_click_arg_ = spot->arg;
     set_focus(spot->id);
@@ -712,13 +747,19 @@ void AppWindow::on_lbutton_down(int x, int y) {
 
 void AppWindow::on_lbutton_up(int x, int y) {
     if (state_.drag_active) {
+        const bool moved_splitter = state_.drag_splitter >= 0;
         state_.drag_active = false;
         state_.drag_field = -1;
         state_.drag_screen = -1;
         state_.orbiting = false;
         state_.drag_scroll_panel = -1;
+        state_.drag_splitter = -1;
         pending_click_id_ = kUiNone;
         ReleaseCapture();
+        if (moved_splitter && state_.config_valid) {
+            std::wstring ignored;
+            save_config_to_disk(state_, ignored);
+        }
         invalidate();
         return;
     }
@@ -836,6 +877,10 @@ void AppWindow::on_set_cursor() {
     }
     if (spot->id == kUiEditorCanvas) {
         SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+        return;
+    }
+    if (spot->id >= kUiSplitBase && spot->id < kUiSplitBase + kUiSplitCount) {
+        SetCursor(LoadCursorW(nullptr, spot->id == kUiSplitBase + 4 ? IDC_SIZEWE : IDC_SIZENS));
         return;
     }
     if (spot->id >= static_cast<int>(kUiScrollBase) &&

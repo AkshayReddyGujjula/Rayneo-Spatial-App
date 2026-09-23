@@ -28,6 +28,15 @@ struct WindowPlacement {
     bool maximized = false;
 };
 
+// Dashboard splitter positions as fractions (-1 = automatic). Persisted so a
+// user-arranged layout survives restarts; normalized at use, so hand edits
+// that do not sum to 1 still behave sanely.
+struct SplitFractions {
+    float column = -1.0f;  // left width share of the content row
+    float left[3] = {-1.0f, -1.0f, -1.0f};   // status/engine/diagnostics heights
+    float right[3] = {-1.0f, -1.0f, -1.0f};  // layout/editor/fields heights
+};
+
 struct LogRotationPolicy {
     uint64_t max_bytes = 1u << 20;  // 1 MiB
     int max_files = 3;              // rotated generations kept (1..9)
@@ -48,6 +57,7 @@ struct AppConfig {
     LogRotationPolicy telemetry_rotation{4u << 20, 3};
     std::string last_engine_error;
     WindowPlacement window;
+    SplitFractions splits;
 };
 
 inline constexpr int kMinHealthPollMs = 500;
