@@ -349,6 +349,10 @@ int main(int argc, char** argv) {
     print_axis("yaw", result.yaw);
     print_axis("nod", result.nod);
     print_axis("tilt", result.tilt);
+    std::printf("[cal] quality: up_vs_yaw=%.2fdeg nod_level_err=%.2fdeg nod_tilt_err=%.2fdeg "
+                "handedness=%.2fdeg (smaller is straighter; redo wobbly steps)\n",
+                result.up_vs_yaw_deg, result.nod_level_error_deg, result.nod_tilt_error_deg,
+                result.handedness_error_deg);
     if (!result.ok) {
         std::printf("[cal] FAIL %s: %s\n", result.code.c_str(), result.message.c_str());
         std::printf("No calibration file was changed. Repeat the tool and follow the named step carefully.\n");
