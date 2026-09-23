@@ -29,12 +29,12 @@ spatial_desk.exe  (renderer engine: D3D11, VDD desktops, capture, IMU)
 
 ## 2. Build and run
 
-Always build in a private Ninja directory (never the shared `build/`), inside the MSVC environment:
+Always build in a private Ninja directory (never the shared `build/`), inside a Developer Command Prompt for VS 2022. Set `VCPKG_ROOT` to your local vcpkg checkout:
 
 ```cmd
-call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+set "VCPKG_ROOT=C:\path\to\vcpkg"
 cmake -S . -B build\agent-app -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
-  -DCMAKE_TOOLCHAIN_FILE="C:/Users/aksha/Desktop/GitHub/tools/vcpkg/scripts/buildsystems/vcpkg.cmake"
+  -DCMAKE_TOOLCHAIN_FILE="%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake"
 cmake --build build\agent-app
 ctest --test-dir build\agent-app --output-on-failure
 ```

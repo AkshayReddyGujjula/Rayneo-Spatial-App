@@ -1,5 +1,7 @@
 # RayNeo GT head-alignment calibration - design
 
+> Historical design note. The guided calibration is now implemented in `orientation_calibrate.exe`; see `docs/WINDOWS-APP.md` for current usage. The earlier hard-coded axis discussion below records the original investigation.
+
 **Problem.** After the repo's package mapping `[x, -z, y]` the mapped "body" frame `B` has
 `+Z ~= up` (verified), so the fused quaternion's *vertical* is correct. What was never
 measured is the constant mounting rotation **about that vertical** - i.e. where the head's

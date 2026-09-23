@@ -1,5 +1,7 @@
 # RayNeo GT Spatial Workspace — Handoff
 
+> Historical handoff from 2026-09-20. Its "current state", open issues, setup paths, and next steps describe that earlier snapshot and are not the current project status. Start with the repository README and `docs/WINDOWS-APP.md`.
+
 Author: previous agent session (Command Code), 2026-09-20.
 Audience: the next coding agent (Codex) + Akshay.
 Everything below is either **VERIFIED** (with evidence) or explicitly marked **ASSUMED**.
