@@ -44,6 +44,7 @@ add_library(rayneo_core STATIC
   src/imu/fusion.cpp
   src/imu/orientation_calibration.cpp
   src/imu/pose_estimator.cpp
+  src/imu/pose_smoother.cpp
 )
 target_include_directories(rayneo_core PUBLIC src)
 target_link_libraries(rayneo_core PUBLIC hidapi::hidapi)

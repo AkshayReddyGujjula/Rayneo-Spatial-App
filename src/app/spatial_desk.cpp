@@ -1,6 +1,7 @@
 #include "app/engine_protocol.h"
 #include "capture/desktop_duplication.h"
 #include "imu/imu_source.h"
+#include "imu/pose_smoother.h"
 #include "imu/orientation_calibration.h"
 #include "layout/layout.h"
 #include "render/renderer.h"
@@ -81,6 +82,7 @@ struct Options {
     float fov = 46.0f;
     bool fov_explicit = false;
     bool no_imu = false;
+    bool smoothing = true;
     double seconds = 0.0;
     std::string log_path;
     std::string calibration_path;
@@ -103,6 +105,7 @@ struct AppState {
     bool virtual_displays = true;
     int screen_count = 0;
     gt::ImuSource* imu = nullptr;
+    gt::PoseSmoother view_smoother;
     bool yaw_tracking = true;
     bool pitch_tracking = true;
     bool capture_yaw_hold = false;
@@ -226,6 +229,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                     case kHotkeyRecenter:
                         if (g_app->imu != nullptr) {
                             g_app->imu->recenter();
+                            g_app->view_smoother.reset();
                             std::printf("  recentered\n");
                         }
                         break;
@@ -258,6 +262,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         case gt::kEngineMessageRecenter:
             if (g_app != nullptr && g_app->imu != nullptr) {
                 g_app->imu->recenter();
+                g_app->view_smoother.reset();
                 std::printf("  recentered (controller)\n");
             }
             return 0;
@@ -332,6 +337,7 @@ void print_usage() {
         "  --fov DEG     virtual horizontal field of view (default 46)\n"
         "  --seconds N   exit after N seconds (0 = run until quit)\n"
         "  --no-imu      run without head tracking (fixed camera)\n"
+        "  --no-smoothing  disable 1-euro view smoothing (raw pose to renderer)\n"
         "  --freeze-still / --no-freeze-still  obsolete, accepted and ignored (the pose path\n"
         "                is always live; the gyro bias owns steady error)\n"
         "  --log FILE     append a diagnostic CSV (elapsed, gyro, bias, view pose, rest,\n"
@@ -357,6 +363,8 @@ bool parse_args(int argc, char** argv, Options& opt, bool& show_help) {
             opt.fov_explicit = true;
         } else if (std::strcmp(a, "--no-imu") == 0) {
             opt.no_imu = true;
+        } else if (std::strcmp(a, "--no-smoothing") == 0) {
+            opt.smoothing = false;
         } else if (std::strcmp(a, "--freeze-still") == 0 ||
                    std::strcmp(a, "--no-freeze-still") == 0) {
             std::printf("note: %s is obsolete and ignored; the pose path is always live\n", a);
@@ -1093,6 +1101,7 @@ int wmain(int argc, wchar_t** argv) {
     bool engine_failed = false;
     std::string fatal_detail;
 
+    double prev_elapsed = -1.0;
     while (!state.quit) {
         MSG message;
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -1367,6 +1376,12 @@ int wmain(int argc, wchar_t** argv) {
 
         renderer.set_signs(signs);
         renderer.wait_for_frame();
+        if (!opt.no_imu && opt.smoothing) {
+            const float frame_dt =
+                (prev_elapsed < 0.0) ? (1.0f / 60.0f) : static_cast<float>(elapsed - prev_elapsed);
+            head = state.view_smoother.update(head, frame_dt);
+        }
+        prev_elapsed = elapsed;
         renderer.render(head, opt.fov, static_cast<float>(elapsed));
         if (!renderer.present()) {
             std::printf("present failed, exiting\n");
