@@ -2,6 +2,7 @@
 
 #include "app/engine_protocol.h"
 #include "app_shell/clock.h"
+#include "app_shell/ui_orbit.h"
 #include "app_shell/ui_paint.h"
 
 #include <shellapi.h>
@@ -587,6 +588,20 @@ void AppWindow::on_mouse_move(int x, int y) {
                     state_.layout_dirty = true;
                 }
             }
+        } else if (state_.orbiting) {
+            state_.orbit_yaw_deg += static_cast<float>(x - state_.orbit_origin.x) * 0.4f;
+            state_.orbit_pitch_deg =
+                std::clamp(state_.orbit_pitch_deg +
+                                static_cast<float>(y - state_.orbit_origin.y) * 0.4f,
+                            -80.0f, 80.0f);
+            while (state_.orbit_yaw_deg > 180.0f) {
+                state_.orbit_yaw_deg -= 360.0f;
+            }
+            while (state_.orbit_yaw_deg < -180.0f) {
+                state_.orbit_yaw_deg += 360.0f;
+            }
+            state_.orbit_origin = POINT{x, y};
+            invalidate();
         } else if (state_.drag_screen >= 0) {
             const Hotspot* editor_spot = hotspot(kUiEditorCanvas, -1);
             if (editor_spot == nullptr) {
@@ -596,7 +611,13 @@ void AppWindow::on_mouse_move(int x, int y) {
             if (static_cast<size_t>(state_.drag_screen) < state_.layout.screens.size()) {
                 ScreenLayout& screen = state_.layout.screens[static_cast<size_t>(state_.drag_screen)];
                 std::string error;
-                const float yaw = editor_yaw_from_point(geometry, POINT{x, y});
+                float yaw = 0.0f;
+                if (state_.editor_3d) {
+                    yaw = state_.drag_start_yaw +
+                          static_cast<float>(x - state_.drag_origin.x) * 0.25f;
+                } else {
+                    yaw = editor_yaw_from_point(geometry, POINT{x, y});
+                }
                 set_layout_field(state_.layout, screen, LayoutField::Yaw, yaw, error);
                 const float pitch =
                     std::clamp(state_.drag_start_pitch +
@@ -649,14 +670,30 @@ void AppWindow::on_lbutton_down(int x, int y) {
     pending_click_arg_ = spot->arg;
     set_focus(spot->id);
     if (spot->id == kUiEditorCanvas) {
-        const EditorGeometry geometry = editor_geometry(state_.layout, spot->rect, dpi_);
-        const int screen = editor_screen_hit_test(state_.layout, geometry, POINT{x, y},
-                                                  scale_px(14, dpi_));
+        int screen = -1;
+        if (state_.editor_3d) {
+            OrbitView orbit;
+            orbit.yaw_deg = state_.orbit_yaw_deg;
+            orbit.pitch_deg = state_.orbit_pitch_deg;
+            orbit.distance_m = state_.orbit_distance_m;
+            screen = orbit_hit_test(state_.layout, orbit, orbit_camera(orbit), spot->rect, x, y,
+                                    scale_px(14, dpi_));
+        } else {
+            const EditorGeometry geometry = editor_geometry(state_.layout, spot->rect, dpi_);
+            screen = editor_screen_hit_test(state_.layout, geometry, POINT{x, y},
+                                            scale_px(14, dpi_));
+        }
         if (screen >= 0) {
             state_.selected_screen = static_cast<size_t>(screen);
             state_.drag_screen = screen;
             state_.drag_origin = POINT{x, y};
             state_.drag_start_pitch = state_.layout.screens[static_cast<size_t>(screen)].pitch_deg;
+            state_.drag_start_yaw = state_.layout.screens[static_cast<size_t>(screen)].yaw_deg;
+            state_.drag_active = true;
+            SetCapture(hwnd_);
+        } else if (state_.editor_3d) {
+            state_.orbiting = true;
+            state_.orbit_origin = POINT{x, y};
             state_.drag_active = true;
             SetCapture(hwnd_);
         }
@@ -678,6 +715,7 @@ void AppWindow::on_lbutton_up(int x, int y) {
         state_.drag_active = false;
         state_.drag_field = -1;
         state_.drag_screen = -1;
+        state_.orbiting = false;
         state_.drag_scroll_panel = -1;
         pending_click_id_ = kUiNone;
         ReleaseCapture();
@@ -703,6 +741,13 @@ void AppWindow::on_mouse_wheel(int delta) {
     POINT cursor{};
     GetCursorPos(&cursor);
     ScreenToClient(hwnd_, &cursor);
+    const Hotspot* canvas_spot = hotspot_at(cursor.x, cursor.y);
+    if (canvas_spot != nullptr && canvas_spot->id == kUiEditorCanvas && state_.editor_3d) {
+        const float factor = delta > 0 ? 0.9f : 1.1f;
+        state_.orbit_distance_m = std::clamp(state_.orbit_distance_m * factor, 2.5f, 20.0f);
+        invalidate();
+        return;
+    }
     const int panel = panel_at(cursor.x, cursor.y);
     if (panel >= 0 && state_.scroll[panel].visible) {
         const ScrollPortal& portal = state_.scroll[panel];
@@ -759,6 +804,11 @@ void AppWindow::on_key_down(WPARAM key, bool shift) {
             activate_focused();
             return;
         case VK_ESCAPE:
+            if (state_.editor_fullscreen) {
+                state_.editor_fullscreen = false;
+                invalidate();
+                return;
+            }
             on_close();
             return;
         case 'S':
@@ -1099,6 +1149,12 @@ void AppWindow::execute(int id, int arg) {
             }
             break;
         }
+        case kUiEditorFullscreen:
+            state_.editor_fullscreen = !state_.editor_fullscreen;
+            break;
+        case kUiEditorDimToggle:
+            state_.editor_3d = !state_.editor_3d;
+            break;
         case kUiPresetSave: {
             std::string preset_name;
             if (!prompt_preset_name(preset_name)) {

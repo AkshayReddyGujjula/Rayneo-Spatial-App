@@ -1,6 +1,7 @@
 #include "app_shell/ui_paint.h"
 
 #include "app_shell/ui_help.h"
+#include "app_shell/ui_orbit.h"
 #include "app/engine_protocol.h"
 
 #include <algorithm>
@@ -909,6 +910,114 @@ void paint_layout_panel(Canvas& canvas, const PaintContext& context, const Metri
     canvas.pop_clip();
 }
 
+void paint_editor_3d(Canvas& canvas, const PaintContext& context, const Metrics& metrics,
+                       const RECT& canvas_rect) {
+    const AppState& state = *context.state;
+    const FontSet& fonts = *context.fonts;
+    const UINT dpi = context.dpi;
+    (void)metrics;
+    OrbitView view;
+    view.yaw_deg = state.orbit_yaw_deg;
+    view.pitch_deg = state.orbit_pitch_deg;
+    view.distance_m = state.orbit_distance_m;
+    const OrbitCamera camera = orbit_camera(view);
+    canvas.push_clip(canvas_rect);
+    const COLORREF grid_color = RGB(32, 40, 54);
+    for (int step = -4; step <= 6; ++step) {
+        const OrbitVec3 xa{static_cast<float>(step), -2.0f, -1.0f};
+        const OrbitVec3 xb{static_cast<float>(step), 6.0f, -1.0f};
+        const OrbitVec3 ya{-4.0f, static_cast<float>(step) - 1.0f, -1.0f};
+        const OrbitVec3 yb{6.0f, static_cast<float>(step) - 1.0f, -1.0f};
+        const OrbitPoint pa = orbit_project(view, camera, xa, canvas_rect);
+        const OrbitPoint pb = orbit_project(view, camera, xb, canvas_rect);
+        const OrbitPoint pc = orbit_project(view, camera, ya, canvas_rect);
+        const OrbitPoint pd = orbit_project(view, camera, yb, canvas_rect);
+        HPEN pen = CreatePen(PS_SOLID, 1, grid_color);
+        const HGDIOBJ saved = SelectObject(canvas.dc(), pen);
+        if (!pa.behind && !pb.behind) {
+            MoveToEx(canvas.dc(), pa.pixel.x, pa.pixel.y, nullptr);
+            LineTo(canvas.dc(), pb.pixel.x, pb.pixel.y);
+        }
+        if (!pc.behind && !pd.behind) {
+            MoveToEx(canvas.dc(), pc.pixel.x, pc.pixel.y, nullptr);
+            LineTo(canvas.dc(), pd.pixel.x, pd.pixel.y);
+        }
+        SelectObject(canvas.dc(), saved);
+        DeleteObject(pen);
+    }
+    const OrbitPoint head = orbit_project(view, camera, OrbitVec3{0.0f, 0.0f, 0.0f}, canvas_rect);
+    if (!head.behind) {
+        draw_dot(canvas, head.pixel.x, head.pixel.y, scale_px(5, dpi), palette::accent);
+        RECT head_label =
+            rect_of(head.pixel.x - scale_px(40, dpi), head.pixel.y + scale_px(6, dpi),
+                    scale_px(80, dpi), scale_px(14, dpi));
+        canvas.text(fonts.small, palette::text_faint, head_label, L"head",
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    struct DepthItem {
+        size_t index;
+        float depth;
+    };
+    std::vector<DepthItem> order;
+    for (size_t i = 0; i < state.layout.screens.size(); ++i) {
+        const OrbitQuad quad = orbit_screen_quad(state.layout.screens[i]);
+        const OrbitPoint centre = orbit_project(view, camera, quad.center, canvas_rect);
+        if (!centre.behind) {
+            order.push_back(DepthItem{i, centre.depth_m});
+        }
+    }
+    std::sort(order.begin(), order.end(),
+              [](const DepthItem& a, const DepthItem& b) { return a.depth > b.depth; });
+    for (const DepthItem& item : order) {
+        const ScreenLayout& screen = state.layout.screens[item.index];
+        const OrbitQuad quad = orbit_screen_quad(screen);
+        POINT points[4];
+        bool visible = true;
+        for (int corner = 0; corner < 4; ++corner) {
+            const OrbitPoint projected = orbit_project(view, camera, quad.corners[corner],
+                                                       canvas_rect);
+            if (projected.behind) {
+                visible = false;
+                break;
+            }
+            points[corner] = projected.pixel;
+        }
+        if (!visible) {
+            continue;
+        }
+        const int red = static_cast<int>(screen.color[0] * 255.0f);
+        const int green = static_cast<int>(screen.color[1] * 255.0f);
+        const int blue = static_cast<int>(screen.color[2] * 255.0f);
+        const COLORREF tint = RGB(red, green, blue);
+        const COLORREF fill =
+            RGB(red / 3, green / 3, blue / 3);
+        const bool selected = item.index == state.selected_screen;
+        HBRUSH brush = CreateSolidBrush(fill);
+        HGDIOBJ saved_brush = SelectObject(canvas.dc(), brush);
+        Polygon(canvas.dc(), points, 4);
+        SelectObject(canvas.dc(), saved_brush);
+        DeleteObject(brush);
+        POINT outline[5] = {points[0], points[1], points[2], points[3], points[0]};
+        HPEN pen = CreatePen(PS_SOLID, selected ? scale_px(3, dpi) : scale_px(2, dpi),
+                             selected ? palette::accent : tint);
+        const HGDIOBJ saved_pen = SelectObject(canvas.dc(), pen);
+        Polyline(canvas.dc(), outline, 5);
+        SelectObject(canvas.dc(), saved_pen);
+        DeleteObject(pen);
+        const OrbitPoint centre = orbit_project(view, camera, quad.center, canvas_rect);
+        wchar_t label[64];
+        const std::wstring id_text = wide_from_utf8(screen.id);
+        std::swprintf(label, std::size(label), L"%s  %.0f deg", id_text.c_str(),
+                      static_cast<double>(screen.yaw_deg));
+        RECT label_rect = rect_of(centre.pixel.x - scale_px(70, dpi),
+                                  centre.pixel.y - scale_px(28, dpi), scale_px(140, dpi),
+                                  scale_px(15, dpi));
+        canvas.text(fonts.small, selected ? palette::text : palette::text_dim, label_rect, label,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    canvas.pop_clip();
+}
+
 void paint_editor_panel(Canvas& canvas, const PaintContext& context, const Metrics& metrics,
                         const RECT& rect, std::vector<Hotspot>& hotspots) {
     const AppState& state = *context.state;
@@ -927,6 +1036,9 @@ void paint_editor_panel(Canvas& canvas, const PaintContext& context, const Metri
     canvas.fill_round(canvas_rect, scale_px(8, dpi), palette::canvas);
     canvas.outline_round(canvas_rect, scale_px(8, dpi), 1, palette::border);
 
+    if (state.editor_3d) {
+        paint_editor_3d(canvas, context, metrics, canvas_rect);
+    } else {
     const EditorGeometry geometry = editor_geometry(state.layout, canvas_rect, dpi);
     canvas.push_clip(canvas_rect);
 
@@ -1051,20 +1163,52 @@ void paint_editor_panel(Canvas& canvas, const PaintContext& context, const Metri
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     canvas.pop_clip();
+    }
 
     RECT hint = rect_of(rect.left + metrics.pad, canvas_rect.bottom + scale_px(4, dpi),
                         rect.right - rect.left - metrics.pad * 2, scale_px(26, dpi));
-    std::wstring hint_text = L"Drag a screen left/right for yaw, up/down for pitch. "
-                             L"Tab to the arc and use the arrow keys for keyboard control.";
+    std::wstring hint_text =
+        state.editor_3d
+            ? L"Drag a screen to move it; drag empty space to orbit, scroll to zoom. "
+              L"Tab to the view for arrow-key control."
+            : L"Drag a screen left/right for yaw, up/down for pitch. "
+              L"Tab to the arc and use the arrow keys for keyboard control.";
     canvas.text(fonts.small, palette::text_faint, hint, ellipsize(hint_text, 150),
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    RECT help_editor = rect_of(rect.right - metrics.pad - scale_px(24, dpi),
-                                 rect.top + metrics.pad + scale_px(1, dpi), scale_px(24, dpi),
-                                 scale_px(20, dpi));
-    draw_chip(canvas, help_editor, L"?", palette::text_faint,
+    const int title_y = rect.top + metrics.pad + scale_px(1, dpi);
+    const int title_chip_h = scale_px(20, dpi);
+    const int title_help_w = scale_px(24, dpi);
+    RECT help_canvas =
+        rect_of(rect.right - metrics.pad - title_help_w, title_y, title_help_w, title_chip_h);
+    draw_chip(canvas, help_canvas, L"?", palette::text_faint,
               state.focus_id == ui_help_id(5, 0), state.hover_id == ui_help_id(5, 0), fonts.small);
-    add_hotspot(hotspots, ui_help_id(5, 0), static_cast<int>(HelpTopic::EditorCanvas), help_editor);
+    add_hotspot(hotspots, ui_help_id(5, 0), static_cast<int>(HelpTopic::EditorCanvas), help_canvas);
+    const int fs_w = state.editor_fullscreen ? scale_px(112, dpi) : scale_px(92, dpi);
+    RECT fs_chip = rect_of(help_canvas.left - metrics.gap - fs_w, title_y, fs_w, title_chip_h);
+    draw_chip(canvas, fs_chip, state.editor_fullscreen ? L"Exit fullscreen" : L"Fullscreen",
+              palette::accent, state.focus_id == kUiEditorFullscreen,
+              state.hover_id == kUiEditorFullscreen, fonts.small);
+    add_hotspot(hotspots, kUiEditorFullscreen, 0, fs_chip);
+    RECT help_fs = rect_of(fs_chip.left - metrics.gap - title_help_w, title_y, title_help_w,
+                           title_chip_h);
+    draw_chip(canvas, help_fs, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(5, 2), state.hover_id == ui_help_id(5, 2), fonts.small);
+    add_hotspot(hotspots, ui_help_id(5, 2), static_cast<int>(HelpTopic::EditorFullscreen),
+                help_fs);
+    const int dim_w = scale_px(44, dpi);
+    RECT dim_chip = rect_of(help_fs.left - metrics.gap - dim_w, title_y, dim_w, title_chip_h);
+    draw_chip(canvas, dim_chip, state.editor_3d ? L"3D" : L"2D",
+              state.editor_3d ? palette::accent : palette::text_faint,
+              state.focus_id == kUiEditorDimToggle, state.hover_id == kUiEditorDimToggle,
+              fonts.small);
+    add_hotspot(hotspots, kUiEditorDimToggle, 0, dim_chip);
+    RECT help_dim = rect_of(dim_chip.left - metrics.gap - title_help_w, title_y, title_help_w,
+                            title_chip_h);
+    draw_chip(canvas, help_dim, L"?", palette::text_faint,
+              state.focus_id == ui_help_id(5, 1), state.hover_id == ui_help_id(5, 1), fonts.small);
+    add_hotspot(hotspots, ui_help_id(5, 1), static_cast<int>(HelpTopic::EditorDimToggle),
+                help_dim);
 
     Hotspot editor;
     editor.id = kUiEditorCanvas;
@@ -1325,6 +1469,18 @@ void paint_window(Canvas& canvas, const PaintContext& context, std::vector<Hotsp
         context.client.bottom - metrics.footer - scale_px(8, context.dpi);
     const int left = context.client.left + metrics.margin;
     const int right = context.client.right - metrics.margin;
+    if (context.state->editor_fullscreen) {
+        RECT editor_rect = rect_of(left, content_top, right - left, content_bottom - content_top);
+        paint_editor_panel(canvas, context, metrics, editor_rect, hotspots);
+        hide_portal(context, kScrollStatus);
+        hide_portal(context, kScrollEngine);
+        hide_portal(context, kScrollDiagnostics);
+        hide_portal(context, kScrollLayout);
+        hide_portal(context, kScrollFields);
+        paint_footer(canvas, context, metrics);
+        paint_help_bubble(canvas, context, metrics, hotspots);
+        return;
+    }
     const int left_width = metrics.left_width;
     const int right_left = left + left_width + metrics.gap;
     const int right_width = right - right_left;

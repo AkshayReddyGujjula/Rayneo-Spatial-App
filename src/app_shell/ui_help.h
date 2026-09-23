@@ -52,6 +52,8 @@ enum class HelpTopic {
     FieldEnterDeg,
     FieldLeaveDeg,
     HeaderRefresh,
+    EditorFullscreen,
+    EditorDimToggle,
     Count,
 };
 
@@ -158,9 +160,15 @@ inline const wchar_t* help_text(HelpTopic topic) {
             return L"Throws away unsaved editor changes and reloads the last saved file. "
                    L"Use it when an experiment goes sideways.";
         case HelpTopic::EditorCanvas:
-            return L"Top-down view: you are the dot, screens are the coloured bars. Drag "
-                   L"a bar left/right for yaw, up/down for pitch; Tab here for arrow-key "
-                   L"control.";
+            return L"Arrangement preview: you are the dot, screens are the coloured "
+                   L"shapes. Drag a screen to move it, Tab here for arrow-key control. "
+                   L"In 3D, drag empty space to orbit and scroll to zoom.";
+        case HelpTopic::EditorFullscreen:
+            return L"Expands the arrangement editor to fill the whole window for fine "
+                   L"adjustments. Press Esc or the button again to dock it back.";
+        case HelpTopic::EditorDimToggle:
+            return L"Switches the editor between the flat top-down map (2D) and the "
+                   L"orbitable perspective view (3D). Both edit the same layout.";
         case HelpTopic::FieldYaw:
             return L"Sideways angle of the selected screen in degrees. Negative moves it "
                    L"left, positive right; -45/0/+45 is the classic triple arc.";
