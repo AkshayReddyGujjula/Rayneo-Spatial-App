@@ -73,11 +73,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Buffer> cursor_constant_buffer_;
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizer_;
     Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depth_state_;
-    Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depth_disabled_state_;
     Microsoft::WRL::ComPtr<ID3D11DepthStencilState> cursor_depth_state_;
     Microsoft::WRL::ComPtr<ID3D11BlendState> cursor_blend_state_;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler_;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> white_texture_;
 
     struct ScreenDraw {
         UINT vertex_start = 0;
@@ -99,8 +97,6 @@ private:
 
     uint32_t width_ = 0;
     uint32_t height_ = 0;
-    UINT line_vertex_count_ = 0;
-    UINT crosshair_vertex_start_ = 0;
     HANDLE frame_latency_waitable_ = nullptr;
     CameraSigns signs_;
 };

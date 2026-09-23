@@ -4,6 +4,10 @@ out/
 *.user
 references/
 scratch/
+dist/
 *.csv
+# stray compiler outputs (e.g. object files dropped at the repo root)
+*.obj
+*.pdb
 # per-device orientation calibration (regenerate with orientation_calibrate.exe)
 config/orientation.json
