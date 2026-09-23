@@ -177,6 +177,7 @@ struct AppState {
     bool orbiting = false;
     POINT orbit_origin{};
     float drag_start_yaw = 0.0f;
+    float drag_start_distance = 0.0f;
 
     EngineClient engine;
     EngineStatusFile engine_status;

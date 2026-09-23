@@ -635,6 +635,7 @@ void AppWindow::on_mouse_move(int x, int y) {
                     ScreenLayout start_screen = screen;
                     start_screen.yaw_deg = state_.drag_start_yaw;
                     start_screen.pitch_deg = state_.drag_start_pitch;
+                    start_screen.distance_m = state_.drag_start_distance;
                     OrbitView orbit;
                     orbit.yaw_deg = state_.orbit_yaw_deg;
                     orbit.pitch_deg = state_.orbit_pitch_deg;
@@ -644,6 +645,8 @@ void AppWindow::on_mouse_move(int x, int y) {
                         x - state_.drag_origin.x, y - state_.drag_origin.y);
                     yaw = angles.yaw_deg;
                     pitch = angles.pitch_deg;
+                    set_layout_field(state_.layout, screen, LayoutField::Distance,
+                                     angles.distance_m, error);
                 } else {
                     const EditorGeometry geometry = editor_geometry(state_.layout, editor_spot->rect, dpi_);
                     yaw = editor_yaw_from_point(geometry, POINT{x, y});
@@ -729,6 +732,8 @@ void AppWindow::on_lbutton_down(int x, int y) {
             state_.drag_origin = POINT{x, y};
             state_.drag_start_pitch = state_.layout.screens[static_cast<size_t>(screen)].pitch_deg;
             state_.drag_start_yaw = state_.layout.screens[static_cast<size_t>(screen)].yaw_deg;
+            state_.drag_start_distance =
+                state_.layout.screens[static_cast<size_t>(screen)].distance_m;
             state_.drag_active = true;
             SetCapture(hwnd_);
         } else if (state_.editor_3d) {

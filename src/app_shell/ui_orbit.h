@@ -225,16 +225,18 @@ inline int orbit_hit_test(const Layout& layout, const OrbitView& view, const Orb
 struct OrbitDragAngles {
     float yaw_deg = 0.0f;
     float pitch_deg = 0.0f;
+    float distance_m = 0.0f;
 };
 
 // Drag the selected screen's centre along the pointer in the current camera
-// view. The screen stays at its chosen head distance; the separate Distance
-// slider changes that radius. Choose the ray/sphere intersection closest to
-// the starting screen so an oblique camera cannot flip it to the far side.
+// view at the starting camera depth. A fixed head-distance sphere has a
+// silhouette: dragging a side screen outward could stop after only 2-3 px.
+// A camera-facing plane keeps the screen under the pointer; the Depth slider
+// remains available to fine-tune its resulting head distance.
 inline OrbitDragAngles orbit_drag_angles(const ScreenLayout& screen, const OrbitView& view,
                                           const OrbitCamera& camera, const RECT& rect,
                                           int delta_x, int delta_y) {
-    OrbitDragAngles result{screen.yaw_deg, screen.pitch_deg};
+    OrbitDragAngles result{screen.yaw_deg, screen.pitch_deg, screen.distance_m};
     if (delta_x == 0 && delta_y == 0) {
         return result;
     }
@@ -244,8 +246,8 @@ inline OrbitDragAngles orbit_drag_angles(const ScreenLayout& screen, const Orbit
     if (width <= 0.0f || height <= 0.0f || screen.distance_m <= 0.0f) {
         return result;
     }
-    const OrbitVec3 start = orbit_screen_quad(screen).center;
-    const OrbitPoint projected = orbit_project(view, camera, start, rect);
+    const OrbitPoint projected = orbit_project(
+        view, camera, orbit_screen_quad(screen).center, rect);
     if (projected.behind) {
         return result;
     }
@@ -255,36 +257,16 @@ inline OrbitDragAngles orbit_drag_angles(const ScreenLayout& screen, const Orbit
     const float y = static_cast<float>(projected.pixel.y + delta_y);
     const float horizontal = (x - static_cast<float>(rect.left) - width * 0.5f) / focal;
     const float vertical = -(y - static_cast<float>(rect.top) - height * 0.5f) / focal;
-    const OrbitVec3 ray = orbit_norm(orbit_add(
+    const OrbitVec3 ray = orbit_add(
         camera.forward,
-        orbit_add(orbit_scale(camera.right, horizontal), orbit_scale(camera.up, vertical))));
-    const float along = -orbit_dot(camera.origin, ray);
-    const float c = orbit_dot(camera.origin, camera.origin) -
-                    screen.distance_m * screen.distance_m;
-    const float discriminant = along * along - c;
-    OrbitVec3 point;
-    if (discriminant >= 0.0f) {
-        const float root = std::sqrt(discriminant);
-        const float near_t = along - root;
-        const float far_t = along + root;
-        const OrbitVec3 near_point = orbit_add(camera.origin, orbit_scale(ray, near_t));
-        const OrbitVec3 far_point = orbit_add(camera.origin, orbit_scale(ray, far_t));
-        const OrbitVec3 near_delta = orbit_sub(near_point, start);
-        const OrbitVec3 far_delta = orbit_sub(far_point, start);
-        point = (near_t > 0.0f &&
-                 (far_t <= 0.0f || orbit_dot(near_delta, near_delta) <=
-                                        orbit_dot(far_delta, far_delta)))
-                    ? near_point : far_point;
-    } else {
-        // The pointer has moved beyond the sphere's projected silhouette.
-        // Stop at the nearest reachable point rather than jumping or reversing.
-        point = orbit_scale(orbit_norm(orbit_add(camera.origin,
-                                                orbit_scale(ray, std::max(0.0f, along)))),
-                            screen.distance_m);
-    }
+        orbit_add(orbit_scale(camera.right, horizontal), orbit_scale(camera.up, vertical)));
+    const OrbitVec3 point = orbit_add(camera.origin, orbit_scale(ray, projected.depth_m));
+    const float distance = std::sqrt(orbit_dot(point, point));
+    if (distance < 1e-6f) return result;
     result.yaw_deg = std::atan2(point.x, point.y) * 180.0f / kPi;
-    result.pitch_deg = std::asin(std::clamp(point.z / screen.distance_m, -1.0f, 1.0f)) *
+    result.pitch_deg = std::asin(std::clamp(point.z / distance, -1.0f, 1.0f)) *
                        180.0f / kPi;
+    result.distance_m = distance;
     return result;
 }
 
