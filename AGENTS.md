@@ -97,7 +97,7 @@ calibration), `gt_imu_probe.exe` (protocol probe), plus the test binaries below.
 | 17 | "Glasses display was not found" (exit 1) on every start after the user picked "Disconnect this display" on the glasses in Settings | The engine only scans *active* monitors, so a connected-but-detached display is invisible; the disconnect persists in the display database across starts | Pre-flight and post-takeover recovery: `find_detached_glasses_display` (EDID of detached adapters) + two-phase `reattach_detached_glasses` (attach at an overlap-free slot, then best-effort move home; the contract is attached, not placed). Unbranded-TCL-as-primary can never match the wrong panel. Measured live: /internal repro NOT-FOUND -> reattach OK -> FOUND at auto-placement, move home LANDED at (442,-1080); overlapping staged slot is auto-relocated by Windows ((0,0)->(-1920,0)), a free slot is honored. `vdd_selftest` matcher table + detached-really-detached invariant |
 | 18 | Recovery still missed: takeover-time disappearance (pre-flight passed, glasses gone post-takeover, one-shot find silent); taskbar still unhid on escape | A recalled disconnect lands *asynchronously* after the takeover, so the single-shot recovery fired while the adapter was still flagged attached; Explorer recreates the tray seconds after the restore, flipping auto-hide after a set-and-check passed | Recovery runs on every pass of the 15 s post-takeover wait; both failure sites dump `describe_display_landscape` (GDI adapters + named inactive QDC paths: flap vs deactivation). Taskbar re-apply requires 3 s steady within 15 s and both shutdown paths log captured/before/after (`vdd_selftest` landscape check; dump verified live) |
 | 19 | Landscape dump showed the deeper disconnect (no TCL EDID anywhere in GDI; SmartGlasses only as inactive CCD paths) and exposed two lifecycle holes: the engine's guard restore is terminated mid-run on quit (8 s grace vs 13-35 s restore), and the controller auto-recovers under a live foreign engine | Recalled disconnect nukes the GDI EDID association; controller quit path never re-applied the taskbar; Failed-branch recovery races a live process | `reactivate_glasses_path` (stored-then-preferred modes, endpoint-mapped strict verify, saved rollback) wired into pre-flight, wait loop and controller Start; controller owns taskbar last word (capture at start, track-while-Running, re-apply on recovery/exit + 10 s sticky poll); Failed-branch recovery gated on process exit with deferred retry; fallback moved outside the wait loop (review-verified: 8 BUGs + 7 CONCERNs triaged, 12 accepted; live 30s run: disappearance recurred and CCD reactivation fired mid-takeover, 6/6 criteria PASS; mid-session taskbar flip caught and re-applied, captured=1 before=0 after=1) |
-| 20 | Reported need to recenter roughly every 5 min ("pin drift") | No IMU-path mechanism found: GT bias rock-stable post-calibration (0.008 deg/s wander per 22 s flat), still-drift 0.007 deg/s in the field, 5-min realistic-use sim drifts 0.28 deg, noiseless pan-return systematic bounded at 0.025 deg; apparent still-segment drift in CSVs was motion onset before the still flag cleared | Scenarios 16 (5-min session, < 3.0 deg) and 17 (noiseless closure, < 0.05 deg) lock the bounds; two candidate fixes (shorter gates: 27.6 deg; raw routine target: tremor 0.074 deg) both proven harmful and reverted. Still open: needs a long-session `--log` CSV plus a precise symptom description (axis, degrees, usage) to find the real source - candidates are glasses slip, the nod-as-roll tilt, or asymmetric pan residuals |
+| 20 | Centre screen off-centre after looking around (reported as ~5 min recenter need) | Adaptation starvation: the symmetric 0.5 s deviation EMA took ~2.5 s to drain after a pan, so 1-2 s look-around holds never reached eligibility; the bias sat frozen for 80 s while true bias wandered, walking the centre off ~1.5 deg per 20 look-arounds (scenario 18 failed 1.44 deg pre-fix) | Asymmetric dev EMA (rise 0.5 s, fall 0.08 s): eligibility recovers ~1 s after a pan, noise-flicker behaviour unchanged (scenario 18: 0.62 deg; scenario 16 nominal: 0.28 -> 0.04 deg; full suite green) |
 | 20 | "Nodding only tilts the screens" (no visible pitch) | Two stacked causes, both telemetry-verified: the calibration file carries the wearer's ~4 deg habitual nod lean (M[1][0]=0.07, same magnitude across two calibrations but varying in direction, so no static file cancels it), coupling ~7% of every nod into roll; and the default centre screen exactly fills the view (46.0x26.8 deg vs 46x26.9 FOV), hiding the correct dominant pitch slide while the small roll glares | Default screens shrunk to 1.6x0.9 m (visible edges, per-user approval); fresh calibration aligns the file with current habit; tool prints pairwise axis quality (`[cal] quality:`); nod against a vertical edge. View/estimator math proven exact (10-agent review + log forensics). Flat-surface calibration explicitly rejected: with no head there are no head axes (Standing lesson 12) |
 | 21 | "Engine failure" on every quit; engine.log ends mid-restore | Controller stop grace (8 s) shorter than the display restore it must wait out (13-35 s measured): quit always TerminateProcess'd the engine mid-restore (stranded virtual desktops + bogus Failed state). Bug 19 had only papered over the taskbar aftermath | Stop grace 8 -> 45 s, quit wait 12 -> 60 s (message-pumped; the kill stays as a last resort) |
 
@@ -190,7 +190,8 @@ change.
 | >=50 ms IMU gap during startup | pre-gap and post-gap samples never form one calibration window |
 | Diagonal 0.3/0.3/0.3 deg/s residual for 5 s | bias norm < 0.1 deg/s (vector gate, not per-axis gate) |
 | Display 1-euro smoothing, 8 Hz tremor (scenario 15) | raw 0.124 deg p2p -> smoothed 0.040 deg; converge 0.004 deg; 30 deg travel survives | ratio < 0.5; residual < 0.06 deg; converge < 0.1 deg |
-| 5-min computer use, net-zero yaw (scenario 16) | 0.285 deg drift; bias err 0.023 deg/s; adapt duty 77% | drift < 3.0 deg |
+| 5-min computer use, net-zero yaw (scenario 16) | 0.038 deg drift (0.285 pre-fix); bias err 0.023 deg/s; adapt duty 77% | drift < 3.0 deg |
+| 20 look-arounds and back (scenario 18) | 0.62 deg final (1.44 pre-fix) | abs(final) < 1.0 deg |
 | Noiseless pan-return closure (scenario 17) | +/-0.025 deg final | abs(final) < 0.05 deg |
 
 **Lessons from this round, in the order they were learned:**
@@ -221,6 +222,7 @@ change.
     thermal drift.
 11. Rest evidence is invalid across missing samples or detected motion. Reset qualification and
     rollback confirmation at those boundaries; never stitch apparently quiet fragments together.
+12. Smoothing has a direction: a symmetric tail that is correct for noise can still starve recovery after real motion. Make only the falling edge fast - the rising edge keeps the flicker protection.
 12. A faithful renderer can still *look* wrong: a view-filling screen hides the dominant motion
     axis while a small cross-coupling glares. When the logs say the pose is right but the eyes
     disagree, check (a) the calibration file's off-axis terms against fresh telemetry and (b)
@@ -245,7 +247,7 @@ Run inside the MSVC environment: `call "C:\Program Files (x86)\Microsoft Visual 
 |---|---|
 | `camera_selftest` | Frame conversion, the sign triple, single-axis and combined orientation cases |
 | `pose_selftest` | Tilted-recenter coupling, contiguous-vs-fragmented startup calibration and its timeout, accelerometer-blocked rest, bias clamp, reconfigure resets, swing/twist helpers, drift-absorption behaviour, 20-cycle pan-and-settle accumulation |
-| `pose_scenarios` | Seventeen synthetic worn-head scenarios through the real estimator: pan-and-return both ways, small moves, slow and fast pans, residual bias, breathing, diagonal, recenter, the 1.0 deg/s ambiguous turn and its rollback guard (11), always-live micro adjustments (12), persistent bias step (13), and motion-gated rollback crossing (14), display-side smoothing (15), 5-min session drift (16), and noiseless closure (17) |
+| `pose_scenarios` | Eighteen synthetic worn-head scenarios through the real estimator: pan-and-return both ways, small moves, slow and fast pans, residual bias, breathing, diagonal, recenter, the 1.0 deg/s ambiguous turn and its rollback guard (11), always-live micro adjustments (12), persistent bias step (13), and motion-gated rollback crossing (14), display-side smoothing (15), 5-min session drift (16), noiseless closure (17), and repeated look-around walk-off (18) |
 | `orientation_calibration_selftest` | Guided-calibration maths, rejection gates, file round-trip, version handling |
 | `protocol_selftest` | 66/99 framing and `99 65` decoding |
 | `layout_selftest` | Layout parsing/validation, geometry, capture-policy constraints |
@@ -306,6 +308,7 @@ verification is synthetic plus field-CSV forensics.
 | fullscreen-orbitable-3d-arrangement-view | Fullscreen 3D monitor arrangement editor with mouse orbit | view_selftest + app_selftest |
 | display-side-1-euro-view-smoothing-plus-scenario15 | `PoseSmoother` (rotational 1-euro) between pose and renderer; `--no-smoothing` opt-out; diagnostics stay raw; recenter resets | scenario 15: tremor 0.124 -> 0.040 deg, converge 0.004 deg |
 | scenarios-16-17-five-minute-drift-plus-noiseless-closure | 5-min session bound (< 3.0 deg) + noiseless closure bound (< 0.05 deg); no estimator change | scenario 16: 0.285 deg; scenario 17: 0.025 deg |
+| fix-look-around-walkoff-asymmetric-dev-ema-plus-scenario18 | Starvation fix (dev EMA fall 0.08 s) + scenario 18 | 18: 1.44 -> 0.62 deg; 16: 0.28 -> 0.04 deg |
 
 Pin-drift investigation (row 20 above): exonerated the estimator by measurement rather than shipping a
 guess. Reverted fixes: shorter still/holdoff gates (harsh drift 16.0 -> 27.6 deg: learns motion into
@@ -313,9 +316,10 @@ the bias) and raw-rate routine target (tremor residual 0.040 -> 0.074 deg: coupl
 flickering gate). Standing addition: the LPF routine target is load-bearing against tremor, and the
 gates are load-bearing against motion pollution - both were re-proven tonight.
 
-Open when the session ended: the user's ~5 min recenter symptom still needs a precise description
-(which axis, how many degrees, after what usage) plus a long-session `--log` CSV; glasses slipped
-vs nod-tilt vs asymmetric pan residuals are the remaining candidates.
+Pin-drift fix (row 20): the user confirmed the symptom is centre-off-after-looking-around, which
+reproduced in sim (scenario 18, 1.44 deg) and led to the starvation root cause and the asymmetric-EMA
+fix, verified in sim on MSVC and g++. Remaining field verification (glasses): a 10-min `--log` run
+with look-arounds, plus the nod-tilt check.
 
 ## 8. Definition of done for any change
 
