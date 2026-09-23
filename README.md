@@ -1,90 +1,89 @@
 # RayNeo Spatial
 
-A Windows C++20 / Direct3D 11 spatial workspace for the RayNeo GT AR glasses: several real Windows
-virtual monitors (default three, at yaw −45° / 0° / +45°) rendered as world-locked screens on the
-glasses, head-tracked in 3DoF from the glasses' own IMU, edited and controlled from a native
-dashboard.
+### A head-tracked Windows desktop for RayNeo GT glasses
 
+RayNeo Spatial turns multiple Windows desktops into a spatial workspace on the RayNeo GT. The glasses' IMU tracks your head in 3DoF; a Direct3D 11 renderer places the screens around you, while a native Windows dashboard controls the layout and engine.
+
+> **Platform:** Windows 10 (1809+) or Windows 11, x64. This is a source-built project; the repository does not include a driver or a prebuilt release.
+
+## What it does
+
+| | |
+|---|---|
+| **Spatial screens** | Arrange 1–8 screens with configurable yaw, pitch, roll, distance, size, and field of view. The default layout is a three-screen arc at −45°, 0°, and +45°. |
+| **Real Windows desktops** | Use the separately installed Parsec Virtual Display Driver (VDD) to create monitors that Windows apps can use. |
+| **Head tracking** | Decode the GT's IMU stream, calibrate the sensor-to-head orientation, estimate pose, and recenter from the dashboard or hotkey. |
+| **Desktop capture** | Capture each virtual monitor with DXGI Desktop Duplication, with a GDI fallback. |
+| **Native controller** | Edit layouts, start and stop the workspace, use the tray controls, and inspect device and engine diagnostics. |
+| **Preview mode** | Check the renderer without creating virtual monitors. Preview screens are labelled test screens, not Windows desktops. |
+
+### How the pieces fit
+
+```text
+RayNeo GT IMU ── HID protocol ── calibration + pose estimation ──┐
+                                                                │
+Windows apps ── Parsec VDD monitors ── DXGI / GDI capture ──────┼── D3D11 renderer ── GT display
+                                                                │
+Native dashboard ── layout, commands, status, diagnostics ──────┘
 ```
-RayNeo Spatial.exe   controller: dashboard, visual layout editor, tray, diagnostics  (WIN32 subsystem)
-spatial_desk.exe     renderer engine: D3D11 swapchain, Parsec virtual desktops, capture, IMU
-orientation_calibrate.exe   guided sensor-to-head calibration (writes config/orientation.json)
-gt_imu_probe.exe     protocol probe
-```
 
-The controller never renders and never changes system state on its own: it launches the engine,
-sends it private window messages, reads a small status file, and reports what the machine actually
-has (RayNeo display, HID interface, Parsec VDD driver, calibration file, telemetry).
+`RayNeo Spatial.exe` is the controller. It launches and steers `spatial_desk.exe`, the rendering engine. `orientation_calibrate.exe` creates the per-device calibration file; `gt_imu_probe.exe` is a protocol diagnostic tool.
 
-## Quick start
+## Get started
+
+### 1. Prepare the machine
+
+- Connect RayNeo GT glasses and set Windows projection to **Extend** (`Win+P`). The glasses need to be an active, separate display.
+- Install Visual Studio 2022 Build Tools with the C++ toolchain, CMake 3.25+, Ninja, and [vcpkg](https://github.com/microsoft/vcpkg). The vcpkg manifest installs `hidapi` and `nlohmann-json` during configuration.
+- To use **Start workspace**, install the signed Parsec VDD separately. The driver is not bundled or installed by this project. You can use **Start preview** without it.
+
+### 2. Build and test
+
+From a **Developer Command Prompt for VS 2022**, set `VCPKG_ROOT` to your vcpkg checkout, then run:
 
 ```cmd
-:: build (private Ninja directory per developer/agent; MSVC environment required)
-call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-cmake -S . -B build\agent-app -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
-  -DCMAKE_TOOLCHAIN_FILE="C:/Users/aksha/Desktop/GitHub/tools/vcpkg/scripts/buildsystems/vcpkg.cmake"
-cmake --build build\agent-app
-ctest --test-dir build\agent-app --output-on-failure
+set "VCPKG_ROOT=C:\path\to\vcpkg"
+cmake -S . -B build\rayneo -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_TOOLCHAIN_FILE="%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake"
+cmake --build build\rayneo
+ctest --test-dir build\rayneo --output-on-failure
 ```
+
+Use a dedicated Ninja build directory if another developer or agent is building this repository. The checked-in CMake preset also reads `VCPKG_ROOT` if you prefer `cmake --preset default` for a solo build.
+
+### 3. Run the app
+
+Stage the controller, engine, config, and required DLL in one portable folder:
 
 ```powershell
-# portable folder (controller + engine + config + notices), then run the GUI from there
-powershell -ExecutionPolicy Bypass -File scripts\stage-portable.ps1 -BuildDir build\agent-app
+powershell -ExecutionPolicy Bypass -File scripts\stage-portable.ps1 -BuildDir build\rayneo
 ```
 
-1. Put the glasses in **Extend** mode (`Win+P` → Extend).
-2. Start `RayNeo Spatial.exe`.
-3. If orientation calibration is missing, press **Run calibration** and follow the console prompts.
-4. **Start workspace** for real Parsec virtual desktops, or **Start preview** for a renderer-only
-   check without the VDD driver. The two actions are separate on purpose; the app never falls back
-   from one to the other silently.
+Run `dist\RayNeoSpatial\RayNeo Spatial.exe`. Follow the dashboard's **Run calibration** action while wearing the glasses, then choose **Start workspace** for real virtual desktops or **Start preview** for a renderer check. Calibration is saved as `config/orientation.json` in the running folder and is intentionally excluded from Git.
 
-Full details — setup, pinning, Extend mode, calibration, the VDD limitation, preview mode, recovery
-and the manual hardware checks — are in [docs/WINDOWS-APP.md](docs/WINDOWS-APP.md).
+See [Windows app guide](docs/WINDOWS-APP.md) for controls, layout editing, diagnostics, recovery, and manual hardware checks.
 
-## What the controller does
+## Design notes
 
-| Area | Behaviour |
+The sensor quaternion is right-handed with Z up; the Direct3D scene is left-handed with Y up. The camera converts between those frames and uses an earth-frame relative rotation so recentering while tilted does not mix yaw into pitch and roll. The sensor mounting comes from a measured calibration file rather than a hard-coded axis guess.
+
+The pose path remains live even during tiny head movements. Rest detection controls gyro-bias adaptation, not whether the pose is published. With the magnetometer disabled in a distorted indoor field, a very slow steady yaw and gyro bias cannot always be distinguished; the estimator favors preserving deliberate pans and exposes recentering when needed. The measured scenarios and the tuning trade-offs are documented in [AGENTS.md](AGENTS.md).
+
+## Repository guide
+
+| Path | Purpose |
 |---|---|
-| Engine lifecycle | Launches `spatial_desk.exe` with the resolved layout/calibration/log/status paths, captures its console to `logs/engine.log`, polls it at ≤ 2 Hz, stops it with a graceful quit message |
-| Commands | Recenter, yaw toggle, pitch toggle, layout reload, quit — private window messages, plus a state query so the UI shows the engine's real tracking state |
-| Layout editing | Presets (single, triple arc, quad arc, five arc, wide arc), drag editor for yaw/pitch, sliders for yaw/pitch/roll/distance/width/height/FOV/capture rates/hysteresis, 1–8 screens with unique ids and vdd indices |
-| Persistence | `config/layouts/default.json` through `gt::validate_layout` + `gt::save_layout` (atomic), `config/app.json` for preferences (validated, atomic) |
-| Diagnostics | Engine state, orientation calibration, Parsec VDD availability, RayNeo HID discovery, latest telemetry CSV row, engine log, bounded log rotation |
-| Shell integration | Stable AppUserModelID (`RayNeo.Spatial.Desktop`), notification-area icon with Show / Start / Stop / Recenter / Quit, manual pinning from the taskbar or a Start Menu shortcut helper |
-| Efficiency | Event-driven idle UI, one health timer floored at 500 ms, an animation timer that exists only during a transition, one off-screen buffer per window size |
+| `src/app_shell/` | Native Win32 dashboard, tray, lifecycle, diagnostics |
+| `src/app/` | Renderer engine and controller command protocol |
+| `src/imu/` | GT HID protocol, calibration, fusion, pose estimator |
+| `src/render/` | Camera transform, screen geometry, D3D11 renderer |
+| `src/capture/` | DXGI capture and GDI fallback |
+| `src/vdd/` | Parsec VDD client and display topology |
+| `src/layout/` | Layout schema, validation, persistence |
+| `src/tools/` | Calibration, probe, and regression executables |
+| `docs/` | [Windows app guide](docs/WINDOWS-APP.md), [protocol notes](docs/PROTOCOL-NOTES.md), [calibration](docs/orientation-calibration.md), [third-party notices](docs/THIRD_PARTY_NOTICES.md) |
 
-## Repository map
+Nine CTest suites cover camera frames, pose behavior, synthetic head-motion scenarios, calibration, protocol decoding, layout, VDD logic, projection, and the controller model. They are repeatable offline checks; actual display, driver, and worn-glasses behavior requires the hardware setup above.
 
-```
-src/app/            spatial_desk.cpp (engine), engine_protocol.h (controller contract)
-src/app_shell/      controller: window, tray, engine client, diagnostics, app model, theme
-src/imu/            HID protocol, fusion, pose estimator, orientation calibration
-src/render/         camera frame maths, renderer, screen geometry
-src/capture/        DXGI Desktop Duplication (+ GDI fallback)
-src/vdd/            Parsec VDD client and display configuration
-src/layout/         layout schema, validation, atomic save
-src/tools/          probes and the test binaries (see below)
-config/             app.json, layouts/*.json, orientation.json (per device, not committed)
-resources/          version resource + DPI manifest (the icon is drawn at runtime)
-scripts/            portable staging, Start Menu shortcut helper
-docs/               WINDOWS-APP.md, PROTOCOL-NOTES.md, orientation-calibration.md, notices
-```
+## Dependencies and attribution
 
-## Tests
-
-| Suite | Covers |
-|---|---|
-| `camera_selftest` | frame conversion, the load-bearing sign triple |
-| `pose_selftest` | pose regression, startup calibration, drift absorption, pan-and-settle |
-| `pose_scenarios` | fourteen synthetic worn-head scenarios through the real estimator |
-| `orientation_calibration_selftest` | guided calibration maths, rejection gates, file round-trip |
-| `protocol_selftest` | 66/99 framing and `99 65` decoding |
-| `layout_selftest` | layout parsing/validation, geometry, capture-policy constraints |
-| `vdd_selftest` | Parsec VDD protocol, cleanup order, index parsing |
-| `view_selftest` | offline "virtual glasses" projection with numeric assertions and PPM frames |
-| `app_selftest` | controller model: config validation/round-trip, atomic save, presets, screen add/remove invariants, field normalisation, log rotation, engine command constants, status-file and telemetry parsing |
-
-Invariants, bug history and the estimator trade-offs live in `AGENTS.md`; protocol details live in
-`docs/PROTOCOL-NOTES.md`. The controller does not change pose fusion, camera-frame handling,
-calibration maths or drift behaviour, and `app_selftest` is the only new test suite.
+The app uses [hidapi](https://github.com/libusb/hidapi), [nlohmann/json](https://github.com/nlohmann/json), Windows APIs, and the protocol of the separately installed [Parsec VDD](https://github.com/nomi-san/parsec-vdd). See [third-party notices](docs/THIRD_PARTY_NOTICES.md). RayNeo Spatial is an independent project and is not an official RayNeo product.
