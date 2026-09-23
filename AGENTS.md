@@ -309,6 +309,9 @@ verification is synthetic plus field-CSV forensics.
 | display-side-1-euro-view-smoothing-plus-scenario15 | `PoseSmoother` (rotational 1-euro) between pose and renderer; `--no-smoothing` opt-out; diagnostics stay raw; recenter resets | scenario 15: tremor 0.124 -> 0.040 deg, converge 0.004 deg |
 | scenarios-16-17-five-minute-drift-plus-noiseless-closure | 5-min session bound (< 3.0 deg) + noiseless closure bound (< 0.05 deg); no estimator change | scenario 16: 0.285 deg; scenario 17: 0.025 deg |
 | fix-look-around-walkoff-asymmetric-dev-ema-plus-scenario18 | Starvation fix (dev EMA fall 0.08 s) + scenario 18 | 18: 1.44 -> 0.62 deg; 16: 0.28 -> 0.04 deg |
+| revert-screen-size-to-original-1.7m | User verdict: original screens better than shrunk 1.6 m | default + triple preset, suite green |
+| ui-minimalist-help-marks-plus-roomy-spacing | 24 px help chips -> 16 px faint glyphs; wider spacing rhythm throughout | 9/9 green |
+| ui-draggable-splitters-between-sections-persisted | 5 persisted splitters (4 row + column divider), live drag, minimums kept | selftest round-trip, 9/9 green |
 
 Pin-drift investigation (row 22 above): exonerated the estimator by measurement rather than shipping a
 guess. Reverted fixes: shorter still/holdoff gates (harsh drift 16.0 -> 27.6 deg: learns motion into
@@ -316,10 +319,14 @@ the bias) and raw-rate routine target (tremor residual 0.040 -> 0.074 deg: coupl
 flickering gate). Standing addition: the LPF routine target is load-bearing against tremor, and the
 gates are load-bearing against motion pollution - both were re-proven tonight.
 
-Pin-drift fix (row 20): the user confirmed the symptom is centre-off-after-looking-around, which
-reproduced in sim (scenario 18, 1.44 deg) and led to the starvation root cause and the asymmetric-EMA
-fix, verified in sim on MSVC and g++. Remaining field verification (glasses): a 10-min `--log` run
-with look-arounds, plus the nod-tilt check.
+Pin-drift fix (row 22): the user confirmed centre-off-after-looking-around; reproduced in sim
+(scenario 18, 1.44 deg), root-caused to adaptation starvation, fixed with the asymmetric dev EMA
+(0.62 deg), and field-verified by the user ("so much better", routine duty 6% -> 21%).
+Round 2 (no ship): holdoff 1.0 -> 0.7 (18: 0.62 -> 1.23 deg), smoother retune (bad lag trade),
+and a routine fast-lane with raw-rate gate (scenario 7: 0.23 -> 2.71 deg) all failed - the tuning
+sits exactly on the ridge; every authority widening was reverted. Estimator declared at its floor.
+Remaining field scatter is aim/recenter/slip, not estimator. Checkpoint branch
+`checkpoint/verified-lookaround-fix-2026-09-23` marks the verified state.
 
 ## 8. Definition of done for any change
 
