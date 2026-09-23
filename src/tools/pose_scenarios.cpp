@@ -34,6 +34,7 @@
 // src/imu or src/render is modified.
 
 #include "imu/pose_estimator.h"
+#include "imu/pose_smoother.h"
 
 #include <algorithm>
 #include <cmath>
@@ -671,6 +672,74 @@ int main() {
               bias_after.y, 0.1f);
     }
 
+
+    // --- 15: display-side 1-euro smoothing kills tremor, keeps the pose ------
+    std::printf("\n-- scenario 15: PoseSmoother attenuates tremor, converges exactly --\n");
+    {
+        HeadSim sim = make_sim(0xC0FFEE15u);
+        sim.bias_walk_degs = 0.0f;
+        PoseSmoother smoother;
+        auto yaw_of = [](const Quat& q) { return quat_to_euler(q).yaw_deg; };
+        auto ang_delta = [](float a, float b) {
+            float d = a - b;
+            if (d > 180.0f) d -= 360.0f;
+            if (d < -180.0f) d += 360.0f;
+            return d;
+        };
+        constexpr int kFrameEvery = 8;  // ~59.5 Hz display sampling
+        constexpr float kFrameDt = kFrameEvery * kDt;
+        // Phase A: 8 Hz / 2 deg/s head tremor for 4 s. The live estimator pose
+        // follows it fully; the display-side smoother must knock it down.
+        float raw_min = 1e9f, raw_max = -1e9f, sm_min = 1e9f, sm_max = -1e9f;
+        const int tremor_samples = static_cast<int>(std::lround(4.0f * kRateHz));
+        for (int i = 0; i < tremor_samples; ++i) {
+            const float mag = 2.0f * std::sin(2.0f * kPi * 8.0f * sim.t);
+            sim.step(Vec3{0.0f, 0.0f, mag});
+            if (i % kFrameEvery == 0) {
+                const float raw_yaw = yaw_of(sim.est.quat());
+                const float sm_yaw = yaw_of(smoother.update(sim.est.quat(), kFrameDt));
+                raw_min = std::min(raw_min, raw_yaw);
+                raw_max = std::max(raw_max, raw_yaw);
+                sm_min = std::min(sm_min, sm_yaw);
+                sm_max = std::max(sm_max, sm_yaw);
+            }
+        }
+        const float raw_p2p = raw_max - raw_min;
+        const float sm_p2p = sm_max - sm_min;
+        std::printf("  tremor 8 Hz: raw p2p %.4f deg, smoothed p2p %.4f deg\n", raw_p2p, sm_p2p);
+        check(sm_p2p < 0.5f * raw_p2p, "tremor is attenuated by the display smoother", sm_p2p,
+              0.5f * raw_p2p);
+        check(sm_p2p < 0.06f, "residual tremor stays below visibility", sm_p2p, 0.06f);
+        // Phase B: a 30 deg pan, then a 3 s hold. The smoother must converge
+        // exactly (zero steady-state error) so pinned screens never drift.
+        const float raw_start = yaw_of(sim.est.quat());
+        const float sm_start = yaw_of(smoother.update(sim.est.quat(), kFrameDt));
+        sim.move(60.0f, 0.25f, 0.25f, Vec3{0.0f, 0.0f, 1.0f});
+        const int move_frames = static_cast<int>(std::lround(0.5f / kFrameDt));
+        for (int i = 0; i < move_frames; ++i) {
+            smoother.update(sim.est.quat(), kFrameDt);
+        }
+        float max_lag = 0.0f;
+        const int hold_frames = static_cast<int>(std::lround(3.0f / kFrameDt));
+        for (int i = 0; i < hold_frames; ++i) {
+            for (int k = 0; k < kFrameEvery; ++k) {
+                sim.step(Vec3{});
+            }
+            const float sm_yaw = yaw_of(smoother.update(sim.est.quat(), kFrameDt));
+            max_lag = std::max(max_lag, std::fabs(ang_delta(sm_yaw, yaw_of(sim.est.quat()))));
+        }
+        const float raw_end = yaw_of(sim.est.quat());
+        const float sm_end = yaw_of(smoother.update(sim.est.quat(), kFrameDt));
+        const float raw_travel = ang_delta(raw_end, raw_start);
+        const float sm_travel = ang_delta(sm_end, sm_start);
+        std::printf("  pan: raw travel %.4f deg, smoothed travel %.4f deg, max settle lag %.4f deg\n",
+                    raw_travel, sm_travel, max_lag);
+        check(std::fabs(ang_delta(sm_end, raw_end)) < 0.1f,
+              "smoothed pose converges exactly on hold (no pinned-screen drift)",
+              std::fabs(ang_delta(sm_end, raw_end)), 0.1f);
+        check(std::fabs(sm_travel - raw_travel) < 0.5f, "the full pan travel survives smoothing",
+              std::fabs(sm_travel - raw_travel), 0.5f);
+    }
     std::printf("\npose_scenarios: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
