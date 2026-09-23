@@ -326,8 +326,39 @@ Pin-drift fix (row 22): the user confirmed centre-off-after-looking-around; repr
 Round 2 (no ship): holdoff 1.0 -> 0.7 (18: 0.62 -> 1.23 deg), smoother retune (bad lag trade),
 and a routine fast-lane with raw-rate gate (scenario 7: 0.23 -> 2.71 deg) all failed - the tuning
 sits exactly on the ridge; every authority widening was reverted. Estimator declared at its floor.
-Remaining field scatter is aim/recenter/slip, not estimator. Checkpoint branch
+The earlier session attributed remaining field scatter to aim/recenter/slip without a live
+confirmed event; the later observation below supersedes that certainty. Checkpoint branch
 `checkpoint/verified-lookaround-fix-2026-09-23` marks the verified state.
+
+### Later live drift observation (2026-09-23, 21:13 BST)
+
+The wearer reported another centre/right shift and confirmed the recenter at engine elapsed
+2362-2364 s. The copied live CSV is in `scratch/live-drift-20260923/` (ignored local evidence).
+During elapsed 2304-2359 s, view yaw changed about +1.21 deg while the glasses reported
+dwell-qualified rest for about 98% of samples and routine bias adaptation for about 55%.
+Projecting raw gyro minus the logged bias through this session's `sensor_to_head` matrix and
+integrating at the CSV's sampled cadence predicts about +1.10 deg of camera yaw. No escape
+rollback fired and drift absorption was zero. This rules out a separate accumulated offset in
+the camera, renderer or display smoother: the view is following the integrated corrected gyro.
+It does **not** prove whether that small corrected rate was real slow head movement, true gyro
+bias change, or a changing glasses-to-head fit. With the magnetometer disabled, those causes
+are observationally indistinguishable from this IMU stream alone. The wearer explicitly chose
+preserving intentional slow head turns over treating every slow rate as drift. Do not claim a
+software-only estimator retune can guarantee a permanently fixed yaw under that choice; seek
+an independent heading or stationary reference before changing bias authority. A second
+user-confirmed recenter occurred around elapsed 2797-2798 s; preserve that log for follow-up.
+The wearer then placed the still-running glasses on a stable surface from about 21:27 to
+21:30 BST. In a trimmed stationary interval (elapsed 3222.6-3378.2 s, 9,289 sampled rows),
+reported yaw changed only -0.033 deg, about -0.015 deg/min. Raw-minus-bias gyro projected
+through the active head-up axis predicts -0.034 deg of camera yaw. Rest and routine adaptation
+both qualified for 100% of this interval. The worn-event yaw slope was about 70 times larger.
+This shows the estimator can hold this stationary device in this orientation, making a simple
+constant free-standing sensor drift unlikely. It does not prove the same bias/fit while worn or
+after head movement. The strongest current hypothesis is small real glasses-frame motion while
+worn (head microturns or frame slip); wear-dependent gyro bias is still possible. The IMU stream
+alone cannot distinguish these and cannot guarantee fixed yaw while preserving intentional
+slow head turns. Compare worn and stationary conditions before attributing every recenter to
+hardware thermal drift or declaring another estimator fix.
 
 ## 8. Definition of done for any change
 
