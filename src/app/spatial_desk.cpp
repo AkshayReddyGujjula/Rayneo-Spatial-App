@@ -83,6 +83,7 @@ struct Options {
     bool fov_explicit = false;
     bool no_imu = false;
     bool smoothing = true;
+    int stabilise = gt::kReadingHoldDefault;
     bool mag = true;
     double seconds = 0.0;
     std::string log_path;
@@ -98,6 +99,7 @@ enum HotkeyId : int {
     kHotkeyTogglePitch = 3,
     kHotkeyQuit = 4,
     kHotkeyExitWorkspace = 5,
+    kHotkeyCycleStabilise = 6,
 };
 
 struct AppState {
@@ -107,6 +109,8 @@ struct AppState {
     int screen_count = 0;
     gt::ImuSource* imu = nullptr;
     gt::PoseSmoother view_smoother;
+    gt::PoseSmoother::Config view_smoother_config;
+    int stabilise_level = gt::kReadingHoldDefault;
     bool yaw_tracking = true;
     bool pitch_tracking = true;
     bool capture_yaw_hold = false;
@@ -248,6 +252,14 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                         std::printf("  pitch tracking %s\n",
                                     g_app->pitch_tracking ? "on" : "off (view holds pitch)");
                         break;
+                    case kHotkeyCycleStabilise:
+                        g_app->stabilise_level =
+                            (g_app->stabilise_level + 1) % gt::kReadingHoldLevels;
+                        gt::apply_reading_hold(g_app->stabilise_level, g_app->view_smoother_config);
+                        g_app->view_smoother.configure(g_app->view_smoother_config);
+                        std::printf("  reading stabilisation %s\n",
+                                    gt::reading_hold_name(g_app->stabilise_level));
+                        break;
                     case kHotkeyQuit:
                         g_app->quit = true;
                         break;
@@ -341,6 +353,8 @@ void print_usage() {
         "  --seconds N   exit after N seconds (0 = run until quit)\n"
         "  --no-imu      run without head tracking (fixed camera)\n"
         "  --no-smoothing  disable 1-euro view smoothing (raw pose to renderer)\n"
+        "  --stabilise L   reading stabilisation off|low|medium|high (default medium);\n"
+        "                Ctrl+Alt+S cycles it live\n"
         "  --no-mag        disable the magnetometer heading lock even if calibrated\n"
         "  --freeze-still / --no-freeze-still  obsolete, accepted and ignored (the pose path\n"
         "                is always live; the gyro bias owns steady error)\n"
@@ -353,7 +367,8 @@ void print_usage() {
         "  workspace mode detaches the laptop panel until exit (its windows move to\n"
         "                the center desktop); Ctrl+Shift+\\ exits the engine\n"
         "  global hotkeys: Ctrl+Shift+R recenter, Ctrl+Alt+Y yaw tracking, "
-        "Ctrl+Alt+P pitch tracking, Ctrl+Alt+Q quit, Ctrl+Shift:\\ exit workspace\n");
+        "Ctrl+Alt+P pitch tracking, Ctrl+Alt+S reading stabilisation, Ctrl+Alt+Q quit, "
+        "Ctrl+Shift:\\ exit workspace\n");
 }
 
 bool parse_args(int argc, char** argv, Options& opt, bool& show_help) {
@@ -369,6 +384,19 @@ bool parse_args(int argc, char** argv, Options& opt, bool& show_help) {
             opt.no_imu = true;
         } else if (std::strcmp(a, "--no-smoothing") == 0) {
             opt.smoothing = false;
+        } else if (std::strcmp(a, "--stabilise") == 0 && i + 1 < argc) {
+            const std::string level = argv[++i];
+            bool matched = false;
+            for (int n = 0; n < gt::kReadingHoldLevels; ++n) {
+                if (level == gt::reading_hold_name(n) || level == std::to_string(n)) {
+                    opt.stabilise = n;
+                    matched = true;
+                }
+            }
+            if (!matched) {
+                std::printf("--stabilise expects off, low, medium or high\n");
+                return false;
+            }
         } else if (std::strcmp(a, "--no-mag") == 0) {
             opt.mag = false;
         } else if (std::strcmp(a, "--freeze-still") == 0 ||
@@ -410,6 +438,7 @@ void register_global_hotkeys(HWND hwnd) {
         {kHotkeyRecenter, MOD_CONTROL | MOD_SHIFT, 'R', L"Ctrl+Shift+R (recenter)"},
         {kHotkeyToggleYaw, MOD_CONTROL | MOD_ALT, 'Y', L"Ctrl+Alt+Y (yaw tracking)"},
         {kHotkeyTogglePitch, MOD_CONTROL | MOD_ALT, 'P', L"Ctrl+Alt+P (pitch tracking)"},
+        {kHotkeyCycleStabilise, MOD_CONTROL | MOD_ALT, 'S', L"Ctrl+Alt+S (reading stabilisation)"},
         {kHotkeyQuit, MOD_CONTROL | MOD_ALT, 'Q', L"Ctrl+Alt+Q (quit)"},
         {kHotkeyExitWorkspace, MOD_CONTROL | MOD_SHIFT, VK_OEM_5,
          L"Ctrl+Shift+\\ (exit workspace)"},
@@ -1022,7 +1051,8 @@ int wmain(int argc, wchar_t** argv) {
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
     std::printf("global hotkeys: Ctrl+Shift+R recenter, Ctrl+Alt+Y yaw tracking, "
-                "Ctrl+Alt+P pitch tracking, Ctrl+Alt+Q quit, Ctrl+Shift:\\ exit workspace\n");
+                "Ctrl+Alt+P pitch tracking, Ctrl+Alt+S reading stabilisation, Ctrl+Alt+Q quit, "
+                "Ctrl+Shift:\\ exit workspace\n");
     register_global_hotkeys(hwnd);
 
     gt::Renderer renderer;
@@ -1077,6 +1107,13 @@ int wmain(int argc, wchar_t** argv) {
     g_app = &state;
     state.screen_count = static_cast<int>(layout.screens.size());
     state.virtual_displays = opt.virtual_displays;
+    state.stabilise_level = opt.stabilise;
+    gt::apply_reading_hold(state.stabilise_level, state.view_smoother_config);
+    state.view_smoother.configure(state.view_smoother_config);
+    if (opt.smoothing) {
+        std::printf("reading stabilisation: %s (Ctrl+Alt+S cycles off/low/medium/high)\n",
+                    gt::reading_hold_name(state.stabilise_level));
+    }
     if (!opt.no_imu) {
         imu.set_sensor_to_head(sensor_to_head);
         std::printf("loaded orientation calibration: %s\n", opt.calibration_path.c_str());
@@ -1130,6 +1167,11 @@ int wmain(int argc, wchar_t** argv) {
     std::string fatal_detail;
 
     double prev_elapsed = -1.0;
+    // Late-pose telemetry (1 Hz line): how old the frame-start pose would
+    // have been at render time, and how far the view moved in that interval.
+    double late_gap_ms_sum = 0.0;
+    double late_diff_deg_sum = 0.0;
+    int late_samples = 0;
     while (!state.quit) {
         MSG message;
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -1257,7 +1299,24 @@ int wmain(int argc, wchar_t** argv) {
             state.quit = true;
         }
 
+        // Yaw/pitch holds applied to a raw pose. Called twice per frame: once
+        // here for capture tiering and again after wait_for_frame() with a
+        // fresh pose for rendering (see below).
+        const auto apply_view_holds = [&state](gt::Quat pose) {
+            if (!state.yaw_tracking) {
+                const gt::Quat twist = gt::quat_twist_about(pose, 0.0f, 0.0f, 1.0f);
+                const gt::Quat swing = gt::quat_multiply(gt::quat_conjugate(twist), pose);
+                pose = gt::quat_multiply(state.held_yaw_twist, swing);
+            }
+            if (!state.pitch_tracking) {
+                const gt::Quat twist = gt::quat_twist_about(pose, 1.0f, 0.0f, 0.0f);
+                const gt::Quat swing = gt::quat_multiply(gt::quat_conjugate(twist), pose);
+                pose = gt::quat_multiply(state.held_pitch_twist, swing);
+            }
+            return pose;
+        };
         gt::Quat head = opt.no_imu ? gt::Quat{} : imu.orientation();
+        const SteadyClock::time_point early_pose_time = SteadyClock::now();
         if (state.capture_yaw_hold) {
             state.held_yaw_twist = gt::quat_twist_about(head, 0.0f, 0.0f, 1.0f);
             state.capture_yaw_hold = false;
@@ -1268,16 +1327,7 @@ int wmain(int argc, wchar_t** argv) {
             state.held_pitch_twist = gt::quat_twist_about(head, 1.0f, 0.0f, 0.0f);
             state.capture_pitch_hold = false;
         }
-        if (!state.yaw_tracking) {
-            const gt::Quat twist = gt::quat_twist_about(head, 0.0f, 0.0f, 1.0f);
-            const gt::Quat swing = gt::quat_multiply(gt::quat_conjugate(twist), head);
-            head = gt::quat_multiply(state.held_yaw_twist, swing);
-        }
-        if (!state.pitch_tracking) {
-            const gt::Quat twist = gt::quat_twist_about(head, 1.0f, 0.0f, 0.0f);
-            const gt::Quat swing = gt::quat_multiply(gt::quat_conjugate(twist), head);
-            head = gt::quat_multiply(state.held_pitch_twist, swing);
-        }
+        head = apply_view_holds(head);
 
         const float view_yaw_deg = gt::camera_applied_euler(head, signs).yaw_deg;
         const gt::CapturePolicy& capture_policy = layout.capture_policy;
@@ -1404,6 +1454,17 @@ int wmain(int argc, wchar_t** argv) {
 
         renderer.set_signs(signs);
         renderer.wait_for_frame();
+        // Late pose sample: the pose read above is older by the whole capture
+        // pass plus the swapchain wait (up to a frame). World-locked text
+        // swims by head speed x that age, so render from the newest pose.
+        if (!opt.no_imu) {
+            const gt::Quat late = apply_view_holds(imu.orientation());
+            late_gap_ms_sum +=
+                std::chrono::duration<double, std::milli>(SteadyClock::now() - early_pose_time).count();
+            late_diff_deg_sum += gt::quat_angle_deg(gt::quat_multiply(gt::quat_conjugate(head), late));
+            ++late_samples;
+            head = late;
+        }
         if (!opt.no_imu && opt.smoothing) {
             const float frame_dt =
                 (prev_elapsed < 0.0) ? (1.0f / 60.0f) : static_cast<float>(elapsed - prev_elapsed);
@@ -1466,6 +1527,14 @@ int wmain(int argc, wchar_t** argv) {
                                 imu.mag_dip_deg(), imu.mag_reference_dip_deg(), imu.mag_total_correction_deg(),
                                 static_cast<unsigned>(imu.mag_reacquisitions()), imu.temperature_c());
                 }
+                if (late_samples > 0) {
+                    std::printf("  view: stabilise=%s late-pose gain %.1f ms, %.3f deg/frame\n",
+                                opt.smoothing ? gt::reading_hold_name(state.stabilise_level) : "raw",
+                                late_gap_ms_sum / late_samples, late_diff_deg_sum / late_samples);
+                    late_gap_ms_sum = 0.0;
+                    late_diff_deg_sum = 0.0;
+                    late_samples = 0;
+                }
             }
             frames_at_stat = frames;
             g_status.fps = fps;
@@ -1518,6 +1587,7 @@ int wmain(int argc, wchar_t** argv) {
     UnregisterHotKey(hwnd, kHotkeyRecenter);
     UnregisterHotKey(hwnd, kHotkeyToggleYaw);
     UnregisterHotKey(hwnd, kHotkeyTogglePitch);
+    UnregisterHotKey(hwnd, kHotkeyCycleStabilise);
     UnregisterHotKey(hwnd, kHotkeyQuit);
     UnregisterHotKey(hwnd, kHotkeyExitWorkspace);
     if (diagnostics.is_open()) {

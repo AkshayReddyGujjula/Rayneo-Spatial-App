@@ -102,6 +102,7 @@ calibration), `gt_imu_probe.exe` (protocol probe), plus the test binaries below.
 | 22 | Centre screen off-centre after looking around (reported as ~5 min recenter need) | Adaptation starvation: the symmetric 0.5 s deviation EMA took ~2.5 s to drain after a pan, so 1-2 s look-around holds never reached eligibility; the bias sat frozen for 80 s while true bias wandered, walking the centre off ~1.5 deg per 20 look-arounds (scenario 18 failed 1.44 deg pre-fix) | Asymmetric dev EMA (rise 0.5 s, fall 0.08 s): eligibility recovers ~1 s after a pan, noise-flicker behaviour unchanged (scenario 18: 0.62 deg; scenario 16 nominal: 0.28 -> 0.04 deg; full suite green) |
 | 23 | "Looking up tilts the screens right, looking down tilts them left" - only after a recenter, never at startup | `q * conj(q_ref)` with a reference carrying earth heading psi rotates every head axis by psi, so a nod became sin(psi) roll. Startup references come from the accelerometer (psi = 0), hence fine until the first recenter. Field telemetry 2026-09-25: nod-to-roll coupling 2 deg before recenter, 14.5 / 17.9 / 27.4 deg after successive recenters | Reference split `q_ref = H*T` (heading twist about earth Z, tilt remainder); publish `conj(H)*q*conj(T)`. Earth yaw stays pure yaw (bug 2 guard kept). `pose_selftest` nod after +40 deg headed recenter: axis error 39.98 -> 0.002 deg |
 | 24 | Workspace drifts after turning the chair / slow pans (54 deg/min after one turn, replayed) | Rest was judged from gyro *fluctuation* only; a smooth steady turn at ~15 deg/s has low deviation, qualified as rest, and the escape walked the yaw bias 0.43 -> 1.5 (clamp) -> -0.49 deg/s | Raw-rate ceiling on rest (3 deg/s, motion above 4; the in-band bias norm bound 2.6 + margin, a RAW gate so it cannot lock out; exempt during startup calibration). `pose_selftest` two 360 deg turns out and back: 5.23 -> 0.52 deg; replay of the recording keeps bias at 0.43 |
+| 25 | Small-text reading still swam with the 1-euro on; any sub-0.04 deg smoothing decision was blind | `2 * acos(w)` in float cannot resolve rotations below ~0.04 deg (w rounds to 1), so the 1-euro speed estimate moved in 2.4 deg/s steps at 60 Hz; separately the frame-start pose was rendered after the capture pass and the swapchain wait, and the smoother had no hold at all (31 px/s text motion while reading, replayed) | `quat_angle_deg` (atan2 of the vector part); late pose sample after `wait_for_frame()`; reading hold (soft hysteresis deadband, tanh knee, settle leak) with off/low/medium/high presets, default medium, Ctrl+Alt+S cycles live. `pose_scenarios` 19: 0.01 deg measures 0.010000; reading sway 0.654 -> 0.090 deg; off == plain 1-euro. Replay: 31.0 -> 6.7 px/s |
 
 **Standing lesson:** the IMU path is where the subtle bugs live. Every gating change must be
 accompanied by a synthetic scenario that fails before and passes after, and every claim in a commit
@@ -117,7 +118,7 @@ message must be reproducible from the test output.
   the ~51 uT earth field, and feeding unrotated raw axes caused the 4.8 deg/s spin. Calibrated
   (`orientation_calibrate --mag`, gyro-constrained linear fit) the field is 51.5 uT at 66.7 deg
   dip and its heading tracks the gyro within ~3 deg over 360 deg turns. `MagHeadingLock` (yaw-only,
-  rate-limited 0.5 deg/s, disturbance-gated PI, tau 20 s) pins yaw to the local field when a mag
+  rate-limited 0.5 deg/s, disturbance-gated PI, tau 10 s) pins yaw to the local field when a mag
   calibration exists. Remaining limits: a fixed local distortion is harmless (only direction
   stability matters), but a field that changes while you work (a magnet, a moving laptop lid
   near the head) is gated out rather than corrected; a moving vehicle rotates the earth frame
@@ -204,6 +205,9 @@ change.
 | Display 1-euro smoothing, 8 Hz tremor (scenario 15) | raw 0.124 deg p2p -> smoothed 0.040 deg; converge 0.004 deg; 30 deg travel survives | ratio < 0.5; residual < 0.06 deg; converge < 0.1 deg |
 | 5-min computer use, net-zero yaw (scenario 16) | 0.038 deg drift (0.285 pre-fix); bias err 0.023 deg/s; adapt duty 77% | drift < 3.0 deg |
 | 20 look-arounds and back (scenario 18) | 0.62 deg final (1.44 pre-fix) | abs(final) < 1.0 deg |
+| Reading hold, medium preset (scenario 19) | 0.08 deg / 0.4 Hz sway: 0.654 -> 0.090 deg text motion; turn catch-up 0.017 deg; settle 0.029 deg | < 30% of 1-euro; < 0.05 deg; < 0.05 deg |
+| Reading hold on the worn 2026-09-25 session (`imu_replay --smooth-eval --stabilise N`, 235 s of reading) | off/low/medium/high: 31.0 / 11.1 / 6.7 / 5.2 px/s text motion; p95 frame step 0.025 / 0.015 / 0.010 / 0.008 deg; turn lag rms 1.18 / 1.40 / 1.57 / 1.71 deg | measured, not asserted |
+| Mag lock lag on the same session (10 s mean of the lock error) | tau 20: rms 1.07, p95 1.77 deg; tau 10: rms 0.59, p95 0.86 deg; tau 6: 0.44 / 0.55 deg; reading jitter 31.0 px/s at all three | measured, not asserted |
 | Noiseless pan-return closure (scenario 17) | +/-0.025 deg final | abs(final) < 0.05 deg |
 
 **Lessons from this round, in the order they were learned:**
@@ -259,7 +263,7 @@ Run inside the MSVC environment: `call "C:\Program Files (x86)\Microsoft Visual 
 |---|---|
 | `camera_selftest` | Frame conversion, the sign triple, single-axis and combined orientation cases |
 | `pose_selftest` | Tilted-recenter coupling, contiguous-vs-fragmented startup calibration and its timeout, accelerometer-blocked rest, bias clamp, reconfigure resets, swing/twist helpers, drift-absorption behaviour, 20-cycle pan-and-settle accumulation |
-| `pose_scenarios` | Eighteen synthetic worn-head scenarios through the real estimator: pan-and-return both ways, small moves, slow and fast pans, residual bias, breathing, diagonal, recenter, the 1.0 deg/s ambiguous turn and its rollback guard (11), always-live micro adjustments (12), persistent bias step (13), and motion-gated rollback crossing (14), display-side smoothing (15), 5-min session drift (16), noiseless closure (17), and repeated look-around walk-off (18) |
+| `pose_scenarios` | Nineteen synthetic worn-head scenarios through the real estimator: pan-and-return both ways, small moves, slow and fast pans, residual bias, breathing, diagonal, recenter, the 1.0 deg/s ambiguous turn and its rollback guard (11), always-live micro adjustments (12), persistent bias step (13), and motion-gated rollback crossing (14), display-side smoothing (15), 5-min session drift (16), noiseless closure (17), repeated look-around walk-off (18), and the reading hold plus small-angle precision (19) |
 | `orientation_calibration_selftest` | Guided-calibration maths, rejection gates, file round-trip, version handling |
 | `protocol_selftest` | 66/99 framing and `99 65` decoding |
 | `layout_selftest` | Layout parsing/validation, geometry, capture-policy constraints |
@@ -303,6 +307,15 @@ Every fix MUST come with a regression test that fails without it. Synthetic IMU 
 - **Replay real sessions**: with `--log` the engine writes `logs/imu_raw.csv` (every sample);
   `imu_replay FILE --orientation config/orientation.json [--observe] [--no-mag]` runs it through the
   real estimator. Measure estimator changes on recorded hardware data, not only on synthetic scenarios.
+  `--stats` prints per-interval gate duty (rest/still/routine/escape); `--smooth-eval` replays the
+  display smoother at 60 Hz (`--stabilise N`, `--hold inner,outer,tau`, `--min-cutoff`, `--beta`);
+  `--lock-tau` / `--lock-ki` retune the heading lock. In observe mode the lock's `err` is exactly the
+  gyro-only heading drift, which is how the 2026-09-25 session showed ~20 deg of thermal gyro drift the
+  lock removed.
+- **Measure small rotations with `quat_angle_deg`, never `2 * acos(w)`**: in float the latter reads 0 or
+  0.0396 deg for anything below ~0.04 deg (bug 25).
+- **Regexes over replay output**: `t=` also matches inside `adapt=0`; anchor on ` t=`. A lag metric that
+  reads exactly 0.000 is a parser bug, not a perfect loop.
 - **Shell heredocs eat backslashes here**: a C++ `\n` written through a bash heredoc into a Python
   patch script lands as a real newline and splits the string literal. Use the editor tool for any
   edit containing escapes.

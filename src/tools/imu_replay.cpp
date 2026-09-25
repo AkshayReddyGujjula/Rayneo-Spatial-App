@@ -4,13 +4,16 @@
 //
 //   imu_replay FILE.csv [--orientation config/orientation.json]
 //              [--fit START END] [--fit-bias x,y,z] [--hard-iron x,y,z]
-//              [--no-mag] [--bias-error x,y,z] [--from S] [--print-every S]
+//              [--no-mag] [--observe] [--stats] [--bias-error x,y,z] [--from S]
+//              [--print-every S]
 
 #define _CRT_SECURE_NO_WARNINGS
 #include "imu/mag_heading.h"
 #include "imu/orientation_calibration.h"
 #include "imu/pose_estimator.h"
+#include "imu/pose_smoother.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -27,6 +30,69 @@ namespace {
 bool parse_vec(const char* text, Vec3& out) {
     return std::sscanf(text, "%f,%f,%f", &out.x, &out.y, &out.z) == 3;
 }
+
+float angle_between_deg(const Quat& a, const Quat& b) {
+    const Quat d = quat_multiply(quat_conjugate(a), b);
+    const float v = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+    return 2.0f * std::atan2(v, std::fabs(d.w)) * 57.29578f;
+}
+
+// Display-side evaluation at the renderer's cadence. "Reading" frames are the
+// ones where the raw head speed (0.25 s EMA) is below 3 deg/s; on those the
+// displayed frame-to-frame rotation is what makes text swim. "Turn" frames
+// (above 20 deg/s) measure the lag the smoother adds to deliberate motion.
+struct SmoothEval {
+    PoseSmoother smoother;
+    bool enabled = false;
+    bool have_prev = false;
+    Quat prev_raw;
+    Quat prev_shown;
+    float speed_ema = 0.0f;
+    double read_frames = 0, read_raw_motion = 0, read_shown_motion = 0, read_offset = 0;
+    double turn_frames = 0, turn_lag_sq = 0;
+    float max_offset = 0.0f;
+    std::vector<float> read_steps;
+
+    void frame(const Quat& raw, float dt) {
+        const Quat shown = smoother.update(raw, dt);
+        if (have_prev) {
+            const float raw_step = angle_between_deg(prev_raw, raw);
+            const float shown_step = angle_between_deg(prev_shown, shown);
+            const float k = dt / (0.25f + dt);
+            speed_ema += (raw_step / dt - speed_ema) * k;
+            const float offset = angle_between_deg(shown, raw);
+            max_offset = std::max(max_offset, offset);
+            if (speed_ema < 3.0f) {
+                read_frames += 1;
+                read_raw_motion += raw_step;
+                read_shown_motion += shown_step;
+                read_offset += offset;
+                read_steps.push_back(shown_step);
+            } else if (speed_ema > 20.0f) {
+                turn_frames += 1;
+                turn_lag_sq += offset * offset;
+            }
+        }
+        prev_raw = raw;
+        prev_shown = shown;
+        have_prev = true;
+    }
+
+    void report(float frame_dt) {
+        const double seconds = read_frames * frame_dt;
+        std::sort(read_steps.begin(), read_steps.end());
+        const float p95 = read_steps.empty() ? 0.0f : read_steps[read_steps.size() * 95 / 100];
+        std::printf("smooth-eval: reading %.0f s | raw motion %.3f deg/s | shown motion %.3f deg/s "
+                    "(%.1f px/s) | shown p95 step %.4f deg | mean world offset %.3f deg\n",
+                    seconds, read_raw_motion / std::max(seconds, 1e-9),
+                    read_shown_motion / std::max(seconds, 1e-9),
+                    read_shown_motion / std::max(seconds, 1e-9) / 0.024, p95,
+                    read_offset / std::max(read_frames, 1.0));
+        std::printf("smooth-eval: turning %.0f s | rms lag %.3f deg | max offset %.3f deg\n",
+                    turn_frames * frame_dt, std::sqrt(turn_lag_sq / std::max(turn_frames, 1.0)),
+                    max_offset);
+    }
+};
 
 bool load_csv(const std::string& path, std::vector<ImuSample>& out) {
     std::ifstream in(path);
@@ -69,6 +135,11 @@ int main(int argc, char** argv) {
     bool have_hard_iron = false;
     bool use_mag = true;
     bool observe = false;
+    bool stats = false;
+    SmoothEval eval;
+    float lock_tau = 0.0f;
+    float lock_ki = -1.0f;
+    PoseSmoother::Config smooth_cfg;
     Vec3 bias_error{};
     float from_s = 0.0f;
     float print_every = 10.0f;
@@ -86,6 +157,27 @@ int main(int argc, char** argv) {
             have_hard_iron = parse_vec(argv[++i], hard_iron);
         } else if (!std::strcmp(a, "--observe")) {
             observe = true;
+        } else if (!std::strcmp(a, "--stats")) {
+            stats = true;
+        } else if (!std::strcmp(a, "--smooth-eval")) {
+            eval.enabled = true;
+        } else if (!std::strcmp(a, "--min-cutoff") && i + 1 < argc) {
+            smooth_cfg.min_cutoff_hz = static_cast<float>(std::atof(argv[++i]));
+        } else if (!std::strcmp(a, "--beta") && i + 1 < argc) {
+            smooth_cfg.beta = static_cast<float>(std::atof(argv[++i]));
+        } else if (!std::strcmp(a, "--lock-tau") && i + 1 < argc) {
+            lock_tau = static_cast<float>(std::atof(argv[++i]));
+        } else if (!std::strcmp(a, "--lock-ki") && i + 1 < argc) {
+            lock_ki = static_cast<float>(std::atof(argv[++i]));
+        } else if (!std::strcmp(a, "--stabilise") && i + 1 < argc) {
+            apply_reading_hold(std::atoi(argv[++i]), smooth_cfg);
+        } else if (!std::strcmp(a, "--hold") && i + 1 < argc) {
+            Vec3 h{};
+            if (parse_vec(argv[++i], h)) {
+                smooth_cfg.hold_inner_deg = h.x;
+                smooth_cfg.hold_outer_deg = h.y;
+                smooth_cfg.hold_settle_tau_s = h.z;
+            }
         } else if (!std::strcmp(a, "--no-mag")) {
             use_mag = false;
         } else if (!std::strcmp(a, "--bias-error") && i + 1 < argc) {
@@ -149,8 +241,21 @@ int main(int argc, char** argv) {
     }
 
     cfg.mag_lock.observe_only = observe;
+    if (lock_tau > 0.0f) {
+        cfg.mag_lock.tau_s = lock_tau;
+    }
+    if (lock_ki >= 0.0f) {
+        cfg.mag_lock.integral_gain_scale = lock_ki;
+    }
     PoseEstimator est(cfg);
+    eval.smoother.configure(smooth_cfg);
+    constexpr float kFrameDt = 1.0f / 60.0f;
+    float next_frame = -1.0f;
     float next_print = from_s;
+    // Per-print-interval gate statistics: which rest/adaptation gate was
+    // open, so a stalled bias estimate can be attributed to a specific gate.
+    long n_int = 0, n_rest = 0, n_still = 0, n_routine = 0, n_escape = 0;
+    double sum_dev = 0.0;
     float min_yaw = 1e9f;
     float max_yaw = -1e9f;
     for (auto s : samples) {
@@ -168,6 +273,16 @@ int main(int argc, char** argv) {
             continue;
         }
         const Euler e = est.euler();
+        if (eval.enabled && t >= next_frame) {
+            eval.frame(est.quat(), kFrameDt);
+            next_frame = (next_frame < 0.0f ? t : next_frame) + kFrameDt;
+        }
+        ++n_int;
+        n_rest += est.rest() ? 1 : 0;
+        n_still += est.still() ? 1 : 0;
+        n_routine += est.adapt_state() == 1 ? 1 : 0;
+        n_escape += est.adapt_state() == 2 ? 1 : 0;
+        sum_dev += est.stillness_degs();
         if (t >= next_print) {
             const auto& lock = est.mag_lock();
             const Vec3 b = est.gyro_bias_degs();
@@ -178,10 +293,21 @@ int main(int argc, char** argv) {
                         t, e.yaw_deg, e.pitch_deg, e.roll_deg, est.mag_lock_active() ? "on " : "off",
                         static_cast<int>(lock.state()), lock.error_deg(), lock.integral_degs(), lock.field_ut(),
                         lock.dip_deg(), lock.total_correction_deg(), lock.reacquisitions());
+            if (stats) {
+                const double n = n_int > 0 ? static_cast<double>(n_int) : 1.0;
+                std::printf("   gates: rest=%3.0f%% still=%3.0f%% routine=%3.0f%% escape=%3.0f%% dev=%.2f\n",
+                            100.0 * n_rest / n, 100.0 * n_still / n, 100.0 * n_routine / n,
+                            100.0 * n_escape / n, sum_dev / n);
+            }
+            n_int = n_rest = n_still = n_routine = n_escape = 0;
+            sum_dev = 0.0;
             next_print = t + print_every;
         }
         min_yaw = std::min(min_yaw, e.yaw_deg);
         max_yaw = std::max(max_yaw, e.yaw_deg);
+    }
+    if (eval.enabled) {
+        eval.report(kFrameDt);
     }
     const Euler e = est.euler();
     std::printf("final yaw=%.3f pitch=%.3f roll=%.3f\n", e.yaw_deg, e.pitch_deg, e.roll_deg);

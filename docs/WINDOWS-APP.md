@@ -86,7 +86,8 @@ While the engine runs: **Recenter**, **Yaw tracking** and **Pitch tracking** (st
 from the engine, not guessed), **Reload layout**, and **Stop** (a graceful quit message; a forced
 terminate only happens if the engine ignores it for 8 s and is reported in the status panel).
 The existing global hotkeys keep working: `Ctrl+Shift+R` recenter, `Ctrl+Alt+Y` yaw,
-`Ctrl+Alt+P` pitch, `Ctrl+Alt+Q` quit.
+`Ctrl+Alt+P` pitch, `Ctrl+Alt+S` reading stabilisation (cycles off / low / medium / high; the
+engine starts at medium and logs each change), `Ctrl+Alt+Q` quit.
 
 ### Keyboard
 
