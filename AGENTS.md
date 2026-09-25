@@ -240,7 +240,7 @@ change.
 11. Rest evidence is invalid across missing samples or detected motion. Reset qualification and
     rollback confirmation at those boundaries; never stitch apparently quiet fragments together.
 12. Smoothing has a direction: a symmetric tail that is correct for noise can still starve recovery after real motion. Make only the falling edge fast - the rising edge keeps the flicker protection.
-12. A faithful renderer can still *look* wrong: a view-filling screen hides the dominant motion
+13. A faithful renderer can still *look* wrong: a view-filling screen hides the dominant motion
     axis while a small cross-coupling glares. When the logs say the pose is right but the eyes
     disagree, check (a) the calibration file's off-axis terms against fresh telemetry and (b)
     whether the layout leaves any visual margin. Never calibrate off-head: head axes exist only
@@ -253,7 +253,7 @@ agents may be building — it uses the shared `build/`):
 
 ```
 cmake -S . -B build/agent-X -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DCMAKE_TOOLCHAIN_FILE="C:/Users/aksha/Desktop/GitHub/tools/vcpkg/scripts/buildsystems/vcpkg.cmake"
+  -DCMAKE_TOOLCHAIN_FILE="%VCPKG_ROOT%/scripts/buildsystems/vcpkg.cmake"
 cmake --build build/agent-X
 ctest --test-dir build/agent-X --output-on-failure
 ```
@@ -294,12 +294,10 @@ Every fix MUST come with a regression test that fails without it. Synthetic IMU 
   install packages, drivers or system tooling, and do not modify anything outside the repo.
 - **The glasses' display path is flaky**: it appears/disappears; `Win+P -> Extend` restores it.
 
----
-
 - **File locking on Desktop**: `LNK1168` (cannot open exe), `LNK1201` (program database) and
   `C1083`/`C1041` (obj/pdb) errors here are a file scanner, not a code problem. `del` the exe and
   pdb and relink, or configure a build directory outside the Desktop tree
-  (`-B C:/Users/aksha/AppData/Local/Temp/rayneo-build`), which has never failed.
+  (for example `-B %TEMP%/rayneo-build`), which has never failed.
 - **Windows PowerShell 5.1 quoting in patch scripts**: a double backslash inside a single-quoted
   string is literal, so writing a C++ `\n` through `\\n` in a patch script produces a *literal*
   backslash-n in the output (this defect shipped twice). Verify by reading the compiled string back
@@ -366,7 +364,7 @@ confirmed event; the later observation below supersedes that certainty. Checkpoi
 ### Later live drift observation (2026-09-23, 21:13 BST)
 
 The wearer reported another centre/right shift and confirmed the recenter at engine elapsed
-2362-2364 s. The copied live CSV is in `scratch/live-drift-20260923/` (ignored local evidence).
+2362-2364 s. The live CSV was local, ignored evidence and has since been discarded; the figures below are what it showed.
 During elapsed 2304-2359 s, view yaw changed about +1.21 deg while the glasses reported
 dwell-qualified rest for about 98% of samples and routine bias adaptation for about 55%.
 Projecting raw gyro minus the logged bias through this session's `sensor_to_head` matrix and
@@ -379,7 +377,7 @@ are observationally indistinguishable from this IMU stream alone. The wearer exp
 preserving intentional slow head turns over treating every slow rate as drift. Do not claim a
 software-only estimator retune can guarantee a permanently fixed yaw under that choice; seek
 an independent heading or stationary reference before changing bias authority. A second
-user-confirmed recenter occurred around elapsed 2797-2798 s; preserve that log for follow-up.
+user-confirmed recenter occurred around elapsed 2797-2798 s.
 The wearer then placed the still-running glasses on a stable surface from about 21:27 to
 21:30 BST. In a trimmed stationary interval (elapsed 3222.6-3378.2 s, 9,289 sampled rows),
 reported yaw changed only -0.033 deg, about -0.015 deg/min. Raw-minus-bias gyro projected
