@@ -41,7 +41,8 @@ bool build_engine_launch_command(const std::string& engine_executable,
                                  const std::string& engine_log_path,
                                  const std::string& telemetry_path, LaunchMode mode,
                                  bool head_tracking, int monitor_index, float fov_deg,
-                                 EngineLaunchCommand& command, std::string& error);
+                                 EngineLaunchCommand& command, std::string& error,
+                                 const ViewComfort& comfort = ViewComfort{});
 
 struct EngineStatusFile {
     bool parsed = false;

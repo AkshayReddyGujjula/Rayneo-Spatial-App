@@ -16,6 +16,16 @@ const char* engine_message_name(unsigned message) {
             return "toggle-pitch";
         case kEngineMessageReloadLayout:
             return "reload-layout";
+        case kEngineMessageSetStabilise:
+            return "set-stabilise";
+        case kEngineMessageSetDimMode:
+            return "set-dim-mode";
+        case kEngineMessageSetScreenBrightness:
+            return "set-screen-brightness";
+        case kEngineMessageSetNightTint:
+            return "set-night-tint";
+        case kEngineMessageCursorToCenter:
+            return "cursor-to-center";
         default:
             return "unknown";
     }

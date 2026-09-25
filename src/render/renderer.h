@@ -57,6 +57,16 @@ public:
     void wait_for_frame();
     bool present();
     void set_signs(const CameraSigns& signs) { signs_ = signs; }
+    // Colour multiplier for one screen and its cursor (brightness x tint).
+    void set_screen_color(size_t screen_index, float r, float g, float b) {
+        if (screen_index < screen_draws_.size()) {
+            float* c = screen_draws_[screen_index].color;
+            c[0] = r;
+            c[1] = g;
+            c[2] = b;
+        }
+    }
+    size_t screen_count() const { return screen_draws_.size(); }
 
 private:
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
@@ -73,6 +83,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Buffer> constant_buffer_;
     Microsoft::WRL::ComPtr<ID3D11Buffer> cursor_vertex_buffer_;
     Microsoft::WRL::ComPtr<ID3D11Buffer> cursor_constant_buffer_;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> screen_color_buffer_;
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizer_;
     Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depth_state_;
     Microsoft::WRL::ComPtr<ID3D11DepthStencilState> cursor_depth_state_;
@@ -95,6 +106,7 @@ private:
         CursorShapeMode cursor_mode = CursorShapeMode::Color;
         Microsoft::WRL::ComPtr<ID3D11Texture2D> cursor_texture;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cursor_view;
+        float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     };
     std::vector<ScreenDraw> screen_draws_;
 

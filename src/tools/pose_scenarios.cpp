@@ -990,6 +990,73 @@ int main() {
                     raw_end - start_raw, h_end - start_held, std::fabs(h_end - raw_end));
         check(std::fabs(h_end - raw_end) < 0.05f, "held view converges on the world-locked pose",
               std::fabs(h_end - raw_end), 0.05f);
+
+        // Ultra: steadier than medium on a larger 0.3 deg sway, no snap on a
+        // turn, and still converges on the world-locked pose (slow leak).
+        HeadSim usim = make_sim(0xC0FFEE1Au);
+        usim.bias_walk_degs = 0.0f;
+        PoseSmoother medium;
+        PoseSmoother ultra;
+        PoseSmoother::Config medium_cfg;
+        PoseSmoother::Config ultra_cfg;
+        apply_reading_hold(2, medium_cfg);
+        apply_reading_hold(4, ultra_cfg);
+        medium.configure(medium_cfg);
+        ultra.configure(ultra_cfg);
+        usim.sway = true;
+        usim.sway_hz = 0.4f;
+        usim.sway_amp_degs = 0.3f * 2.0f * kPi * 0.4f;
+        double medium_motion = 0.0;
+        double ultra_motion = 0.0;
+        Quat prev_m{};
+        Quat prev_u{};
+        for (int f = 0; f < sway_frames; ++f) {
+            for (int k = 0; k < kFrameEvery; ++k) {
+                usim.step(Vec3{});
+            }
+            const Quat m = medium.update(usim.est.quat(), kFrameDt);
+            const Quat u = ultra.update(usim.est.quat(), kFrameDt);
+            if (f > 0) {
+                medium_motion += quat_angle_deg(quat_multiply(quat_conjugate(prev_m), m));
+                ultra_motion += quat_angle_deg(quat_multiply(quat_conjugate(prev_u), u));
+            }
+            prev_m = m;
+            prev_u = u;
+        }
+        usim.sway = false;
+        std::printf("  ultra: 0.3 deg sway text motion medium %.4f deg, ultra %.4f deg\n",
+                    medium_motion, ultra_motion);
+        check(ultra_motion < 0.5 * medium_motion, "ultra holds a larger sway that medium follows",
+              static_cast<float>(ultra_motion), static_cast<float>(0.5 * medium_motion));
+        float ultra_prev = yaw_of(ultra.update(usim.est.quat(), kFrameDt));
+        float medium_prev = yaw_of(medium.update(usim.est.quat(), kFrameDt));
+        float ultra_extra = 0.0f;
+        for (int f = 0; f < turn_frames; ++f) {
+            for (int k = 0; k < kFrameEvery; ++k) {
+                const float local = (static_cast<float>(f * kFrameEvery + k)) * kDt;
+                const float rate = local < 0.5f ? 60.0f * std::sin(kPi * local / 0.5f) * 1.5708f : 0.0f;
+                usim.step(Vec3{0.0f, 0.0f, rate});
+            }
+            const float u = yaw_of(ultra.update(usim.est.quat(), kFrameDt));
+            const float m = yaw_of(medium.update(usim.est.quat(), kFrameDt));
+            ultra_extra = std::max(ultra_extra, std::fabs(u - ultra_prev) - std::fabs(m - medium_prev));
+            ultra_prev = u;
+            medium_prev = m;
+        }
+        check(ultra_extra < 0.05f, "ultra has no catch-up snap either", ultra_extra, 0.05f);
+        float ultra_end = 0.0f;
+        const int ultra_settle_frames = static_cast<int>(std::lround(60.0f / kFrameDt));
+        for (int f = 0; f < ultra_settle_frames; ++f) {
+            for (int k = 0; k < kFrameEvery; ++k) {
+                usim.step(Vec3{});
+            }
+            ultra_end = yaw_of(ultra.update(usim.est.quat(), kFrameDt));
+        }
+        const float ultra_offset = std::fabs(ultra_end - yaw_of(usim.est.quat()));
+        std::printf("  ultra: turn catch-up %.4f deg, offset after 60 s still %.4f deg\n",
+                    ultra_extra, ultra_offset);
+        check(ultra_offset < 0.1f, "ultra still converges on the world-locked pose", ultra_offset,
+              0.1f);
     }
     std::printf("\npose_scenarios: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;

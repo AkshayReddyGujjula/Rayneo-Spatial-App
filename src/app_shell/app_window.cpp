@@ -71,6 +71,51 @@ bool open_path(const std::filesystem::path& path, std::wstring& error) {
     return true;
 }
 
+// The setting a view-comfort slider edits, and its lower bound (the upper
+// bound is always 100 %).
+int* comfort_slider_target(ViewComfort& comfort, int id, int& minimum) {
+    minimum = kComfortMinBrightnessPct;
+    if (id >= kUiBrightnessBase && id < kUiBrightnessBase + kComfortMaxScreens) {
+        return &comfort.screen_brightness_pct[static_cast<size_t>(id - kUiBrightnessBase)];
+    }
+    if (id == kUiFocusDim) {
+        return &comfort.focus_dim_pct;
+    }
+    if (id == kUiNightTintStrength) {
+        minimum = 0;
+        return &comfort.night_tint_pct;
+    }
+    return nullptr;
+}
+
+// Applies a comfort slider value live; persist writes app.json (on release
+// or a key press, not on every drag step).
+void set_comfort_value(AppState& state, int id, int value, bool persist) {
+    int minimum = 0;
+    int* target = comfort_slider_target(state.config.comfort, id, minimum);
+    if (target == nullptr) {
+        return;
+    }
+    const int clamped = std::clamp(value, minimum, 100);
+    if (clamped != *target) {
+        *target = clamped;
+        push_comfort_setting(state, id);
+    }
+    if (persist && state.config_valid) {
+        std::wstring error;
+        if (!save_config_to_disk(state, error)) {
+            state.set_banner(error, Severity::Warning);
+        }
+    }
+}
+
+void save_comfort(AppState& state) {
+    std::wstring error;
+    if (state.config_valid && !save_config_to_disk(state, error)) {
+        state.set_banner(error, Severity::Warning);
+    }
+}
+
 }  // namespace
 
 AppWindow::~AppWindow() {
@@ -554,6 +599,21 @@ void AppWindow::ensure_focus_visible() {
 
 void AppWindow::on_mouse_move(int x, int y) {
     state_.now_s = steady_now_s();
+    if (state_.drag_active && state_.drag_comfort >= 0) {
+        const Hotspot* spot = hotspot(state_.drag_comfort, -1);
+        int minimum = 0;
+        if (spot != nullptr && spot->full.right > spot->full.left &&
+            comfort_slider_target(state_.config.comfort, state_.drag_comfort, minimum) != nullptr) {
+            const float fraction = std::clamp(static_cast<float>(x - spot->full.left) /
+                                                  static_cast<float>(spot->full.right - spot->full.left),
+                                              0.0f, 1.0f);
+            const int value = static_cast<int>(
+                std::lround(static_cast<float>(minimum) + fraction * static_cast<float>(100 - minimum)));
+            set_comfort_value(state_, state_.drag_comfort, value, false);
+        }
+        invalidate();
+        return;
+    }
     if (state_.drag_active) {
         if (state_.drag_splitter >= 0 && state_.drag_splitter < kUiSplitCount) {
             SplitterTrack& track = state_.split_track[state_.drag_splitter];
@@ -709,6 +769,15 @@ void AppWindow::on_lbutton_down(int x, int y) {
         invalidate();
         return;
     }
+    if (ui_is_comfort_slider(spot->id)) {
+        pending_click_id_ = kUiNone;
+        set_focus(spot->id);
+        state_.drag_comfort = spot->id;
+        state_.drag_active = true;
+        SetCapture(hwnd_);
+        on_mouse_move(x, y);
+        return;
+    }
     pending_click_id_ = spot->id;
     pending_click_arg_ = spot->arg;
     set_focus(spot->id);
@@ -758,7 +827,9 @@ void AppWindow::on_lbutton_down(int x, int y) {
 void AppWindow::on_lbutton_up(int x, int y) {
     if (state_.drag_active) {
         const bool moved_splitter = state_.drag_splitter >= 0;
+        const bool moved_comfort = state_.drag_comfort >= 0;
         state_.drag_active = false;
+        state_.drag_comfort = -1;
         state_.drag_field = -1;
         state_.drag_screen = -1;
         state_.orbiting = false;
@@ -769,6 +840,9 @@ void AppWindow::on_lbutton_up(int x, int y) {
         if (moved_splitter && state_.config_valid) {
             std::wstring ignored;
             save_config_to_disk(state_, ignored);
+        }
+        if (moved_comfort) {
+            save_comfort(state_);
         }
         invalidate();
         return;
@@ -937,6 +1011,29 @@ void AppWindow::adjust_focused(WPARAM key) {
     if (live == nullptr || !live->enabled) {
         return;
     }
+    if (ui_is_comfort_slider(state_.focus_id)) {
+        int minimum = 0;
+        const int* current = comfort_slider_target(state_.config.comfort, state_.focus_id, minimum);
+        if (current != nullptr) {
+            int value = *current;
+            if (key == VK_LEFT || key == VK_DOWN) {
+                value -= 5;
+            } else if (key == VK_RIGHT || key == VK_UP) {
+                value += 5;
+            } else if (key == VK_PRIOR) {
+                value += 20;
+            } else if (key == VK_NEXT) {
+                value -= 20;
+            } else if (key == VK_HOME) {
+                value = minimum;
+            } else if (key == VK_END) {
+                value = 100;
+            }
+            set_comfort_value(state_, state_.focus_id, value, true);
+            invalidate();
+        }
+        return;
+    }
     if (state_.focus_id >= kUiFieldBase &&
         state_.focus_id < kUiFieldBase + static_cast<int>(LayoutField::Count)) {
         const auto field = static_cast<LayoutField>(state_.focus_id - kUiFieldBase);
@@ -1067,6 +1164,24 @@ void AppWindow::execute(int id, int arg) {
     std::string engine_error;
     std::string layout_error;
     std::string tool_error;
+    if (id >= kUiStabiliseBase && id < kUiStabiliseBase + kComfortStabiliseLevels) {
+        state_.config.comfort.stabilise_level = id - kUiStabiliseBase;
+        save_comfort(state_);
+        push_comfort_setting(state_, id);
+        state_.show_toast(L"Reading stabilisation: " +
+                          wide_from_utf8(stabilise_level_name(state_.config.comfort.stabilise_level)));
+        invalidate();
+        return;
+    }
+    if (id >= kUiDimModeBase && id < kUiDimModeBase + kDimModeCount) {
+        state_.config.comfort.dim_mode = static_cast<DimMode>(id - kUiDimModeBase);
+        save_comfort(state_);
+        push_comfort_setting(state_, id);
+        state_.show_toast(L"Screen dimming: " +
+                          wide_from_utf8(dim_mode_name(state_.config.comfort.dim_mode)));
+        invalidate();
+        return;
+    }
     switch (id) {
         case kUiStartWorkspace:
         case kUiStartPreview: {
@@ -1245,6 +1360,20 @@ void AppWindow::execute(int id, int arg) {
             state_.show_toast(L"Preset '" + wide_from_utf8(doomed) + L"' deleted");
             break;
         }
+        case kUiNightTint:
+            state_.config.comfort.night_tint = !state_.config.comfort.night_tint;
+            save_comfort(state_);
+            push_comfort_setting(state_, kUiNightTint);
+            break;
+        case kUiCursorToCenter:
+            if (!state_.engine.send_command(kEngineMessageCursorToCenter, engine_error)) {
+                state_.set_banner(L"Cursor to centre needs a running workspace: " +
+                                      wide_from_utf8(engine_error),
+                                  Severity::Warning);
+            } else {
+                state_.show_toast(L"Cursor moved to the centre screen (Ctrl+Alt+F also works)");
+            }
+            break;
         case kUiCloseToTray:
             state_.config.close_to_tray = !state_.config.close_to_tray;
             if (!save_config_to_disk(state_, error)) {

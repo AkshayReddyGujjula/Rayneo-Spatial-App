@@ -504,6 +504,130 @@ void paint_status_panel(Canvas& canvas, const PaintContext& context, const Metri
     canvas.pop_clip();
 }
 
+// "View comfort" block of the engine panel: reading stabilisation, screen
+// dimming, night tint and the cursor-to-centre action. Returns the height it
+// occupies. With draw == false it only measures (the scroll content height
+// must be known before the portal paints).
+int paint_comfort_section(Canvas& canvas, const PaintContext& context, const Metrics& metrics,
+                          int left, int width, int top, const RECT& view,
+                          std::vector<Hotspot>& hotspots, bool draw) {
+    const AppState& state = *context.state;
+    const FontSet& fonts = *context.fonts;
+    const UINT dpi = context.dpi;
+    const ViewComfort& comfort = state.config.comfort;
+    const int help_w = help_mark_width(dpi);
+    const int label_h = scale_px(20, dpi);
+    const int chip_h = scale_px(28, dpi);
+    const int row_gap = scale_px(10, dpi);
+    const int content_w = width - help_w - metrics.gap;
+    int y = top;
+    int help_row = 8;  // rows 0..7 of panel 1 are the engine controls above
+
+    auto label = [&](const wchar_t* text) {
+        if (draw) {
+            canvas.text(fonts.small, palette::text_faint, rect_of(left, y, width, label_h), text);
+        }
+        y += label_h;
+    };
+    auto help = [&](int row_top, int row_h, HelpTopic topic) {
+        if (draw) {
+            RECT mark = rect_of(left + content_w + metrics.gap, row_top, help_w, row_h);
+            const int id = ui_help_id(1, help_row);
+            draw_help_mark(canvas, mark, state.focus_id == id, state.hover_id == id, fonts.small);
+            add_clipped_hotspot(hotspots, id, static_cast<int>(topic), mark, view, kScrollEngine);
+        }
+        ++help_row;
+    };
+    auto chips = [&](int base, int count, int selected, auto name_of, HelpTopic topic) {
+        const int chip_w = (content_w - metrics.gap / 2 * (count - 1)) / count;
+        if (draw) {
+            for (int i = 0; i < count; ++i) {
+                RECT chip = rect_of(left + i * (chip_w + metrics.gap / 2), y, chip_w, chip_h);
+                draw_chip(canvas, chip, name_of(i),
+                          i == selected ? palette::accent : palette::text_faint,
+                          state.focus_id == base + i, state.hover_id == base + i || i == selected,
+                          fonts.small);
+                add_clipped_hotspot(hotspots, base + i, i, chip, view, kScrollEngine);
+            }
+        }
+        help(y, chip_h, topic);
+        y += chip_h + row_gap;
+    };
+    auto slider = [&](int id, const std::wstring& text, int value, int minimum, bool enabled,
+                      HelpTopic topic) {
+        if (draw) {
+            RECT rc = rect_of(left, y, content_w, metrics.slider);
+            const float fraction =
+                static_cast<float>(value - minimum) / static_cast<float>(100 - minimum);
+            draw_slider(canvas, rc, text, format_wide(L"%d%%", value), fraction,
+                        state.focus_id == id, state.hover_id == id, enabled, fonts.small,
+                        fonts.body);
+            add_clipped_hotspot(hotspots, id, 0, rc, view, kScrollEngine, enabled);
+        }
+        help(y, metrics.slider, topic);
+        y += metrics.slider + row_gap / 2;
+    };
+
+    if (draw) {
+        canvas.text(fonts.body, palette::text, rect_of(left, y, width, scale_px(24, dpi)),
+                    L"View comfort");
+    }
+    y += scale_px(28, dpi);
+
+    label(L"Reading stabilisation (Ctrl+Alt+S)");
+    chips(kUiStabiliseBase, kComfortStabiliseLevels, comfort.stabilise_level,
+          [](int i) {
+              static const wchar_t* const kNames[] = {L"Off", L"Low", L"Medium", L"High",
+                                                      L"Ultra"};
+              return std::wstring(kNames[i]);
+          },
+          HelpTopic::ComfortStabilise);
+
+    label(L"Screen dimming");
+    chips(kUiDimModeBase, kDimModeCount, static_cast<int>(comfort.dim_mode),
+          [](int i) {
+              static const wchar_t* const kNames[] = {L"Off", L"Manual", L"Focus"};
+              return std::wstring(kNames[i]);
+          },
+          HelpTopic::ComfortDimMode);
+    if (comfort.dim_mode == DimMode::Manual) {
+        const size_t screens =
+            std::min(state.layout.screens.size(), static_cast<size_t>(kComfortMaxScreens));
+        for (size_t i = 0; i < screens; ++i) {
+            slider(kUiBrightnessBase + static_cast<int>(i),
+                   L"Screen '" + wide_from_utf8(state.layout.screens[i].id) + L"' brightness",
+                   comfort.screen_brightness_pct[i], kComfortMinBrightnessPct, true,
+                   HelpTopic::ComfortBrightness);
+        }
+    } else if (comfort.dim_mode == DimMode::Focus) {
+        slider(kUiFocusDim, L"Screens you are not looking at", comfort.focus_dim_pct,
+               kComfortMinBrightnessPct, true, HelpTopic::ComfortFocusDim);
+    }
+
+    if (draw) {
+        RECT toggle = rect_of(left, y, content_w, scale_px(24, dpi));
+        draw_toggle(canvas, toggle, L"Night tint (warm screens)", comfort.night_tint,
+                    state.focus_id == kUiNightTint, state.hover_id == kUiNightTint, fonts.small);
+        add_clipped_hotspot(hotspots, kUiNightTint, 0, toggle, view, kScrollEngine);
+    }
+    help(y, scale_px(24, dpi), HelpTopic::ComfortNightTint);
+    y += scale_px(24, dpi) + row_gap;
+    slider(kUiNightTintStrength, L"Night tint warmth", comfort.night_tint_pct, 0,
+           comfort.night_tint, HelpTopic::ComfortNightStrength);
+
+    if (draw) {
+        RECT button = rect_of(left, y, content_w, metrics.button);
+        const bool running = state.engine.busy();
+        draw_button(canvas, button, L"Cursor to centre screen (Ctrl+Alt+F)", ButtonStyle::Ghost,
+                    state.focus_id == kUiCursorToCenter, state.hover_id == kUiCursorToCenter,
+                    running, fonts.small);
+        add_clipped_hotspot(hotspots, kUiCursorToCenter, 0, button, view, kScrollEngine, running);
+    }
+    help(y, metrics.button, HelpTopic::ComfortCursorCenter);
+    y += metrics.button + row_gap;
+    return y - top;
+}
+
 void paint_engine_panel(Canvas& canvas, const PaintContext& context, const Metrics& metrics,
                         const RECT& rect, std::vector<Hotspot>& hotspots) {
     const AppState& state = *context.state;
@@ -543,8 +667,10 @@ void paint_engine_panel(Canvas& canvas, const PaintContext& context, const Metri
         (metrics.button + row_gap) * 2 + scale_px(32, dpi) + scale_px(34, dpi);
     const int note_h =
         wrapped_text_height(canvas.dc(), fonts.small, width, note_text) + scale_px(6, dpi);
+    const int comfort_h =
+        paint_comfort_section(canvas, context, metrics, left, width, 0, view, hotspots, false);
     const int offset = paint_scrollbar(canvas, context, kScrollEngine, rect, view,
-                                       controls_h + note_h, false, hotspots);
+                                       controls_h + comfort_h + note_h, false, hotspots);
     canvas.push_clip(view);
     int y = view.top - offset;
 
@@ -652,6 +778,7 @@ void paint_engine_panel(Canvas& canvas, const PaintContext& context, const Metri
     add_clipped_hotspot(hotspots, ui_help_id(1, 7), static_cast<int>(HelpTopic::EngineNoImu),
                         help_no_imu, view, kScrollEngine);
     y += scale_px(34, dpi);
+    y += paint_comfort_section(canvas, context, metrics, left, width, y, view, hotspots, true);
 
     RECT note_rect = rect_of(left, y, width, note_h);
     canvas.text(fonts.small, note_color, note_rect, note_text,

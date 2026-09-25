@@ -455,6 +455,11 @@ void EngineClient::abort_for_session_end() {
 }
 
 bool EngineClient::send_command(unsigned message, std::string& error) {
+    return send_command(message, 0, 0, error);
+}
+
+bool EngineClient::send_command(unsigned message, WPARAM wparam, LPARAM lparam,
+                                std::string& error) {
     if (window_ == nullptr) {
         window_ = FindWindowW(kEngineWindowClass, nullptr);
     }
@@ -474,7 +479,7 @@ bool EngineClient::send_command(unsigned message, std::string& error) {
         }
     }
     DWORD_PTR result = 0;
-    const LRESULT sent = SendMessageTimeoutW(window_, static_cast<UINT>(message), 0, 0,
+    const LRESULT sent = SendMessageTimeoutW(window_, static_cast<UINT>(message), wparam, lparam,
                                              SMTO_ABORTIFHUNG, kQueryTimeoutMs, &result);
     if (sent == 0) {
         error = last_error_text("the engine did not answer");

@@ -59,6 +59,7 @@ target_link_libraries(gt_imu_probe PRIVATE rayneo_core)
 add_executable(spatial_desk
   src/app/spatial_desk.cpp
   src/app/engine_protocol.cpp
+  src/app/view_comfort.cpp
   src/imu/imu_source.cpp
   src/render/camera.cpp
   src/render/renderer.cpp
@@ -70,6 +71,7 @@ target_link_libraries(spatial_desk PRIVATE rayneo_core rayneo_layout rayneo_vdd 
 # contract and the telemetry tail reader.
 add_library(rayneo_app_model STATIC
   src/app/engine_protocol.cpp
+  src/app/view_comfort.cpp
   src/app_shell/app_config.cpp
   src/app_shell/app_layout.cpp
   src/app_shell/engine_commands.cpp

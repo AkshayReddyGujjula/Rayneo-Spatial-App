@@ -50,9 +50,9 @@ private:
 };
 
 // Reading-stabilisation presets (the engine's --stabilise and Ctrl+Alt+S):
-// 0 off, 1 low, 2 medium (default), 3 high. Measured values are in AGENTS.md
+// 0 off, 1 low, 2 medium (default), 3 high, 4 ultra. Measured values are in AGENTS.md
 // (imu_replay --smooth-eval on the 2026-09-25 worn session).
-inline constexpr int kReadingHoldLevels = 4;
+inline constexpr int kReadingHoldLevels = 5;
 inline constexpr int kReadingHoldDefault = 2;
 const char* reading_hold_name(int level);
 // Sets only the hold fields of config to the preset for level (clamped).

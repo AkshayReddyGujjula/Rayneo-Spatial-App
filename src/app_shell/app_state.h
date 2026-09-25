@@ -58,7 +58,20 @@ enum UiId : int {
     // 0/1 = left-column gaps, 2/3 = right-column gaps, 4 = column divider.
     kUiSplitBase = 1200,
     kUiSplitCount = 5,
+    // View comfort section of the engine panel.
+    kUiStabiliseBase = 1300,  // + level 0..4
+    kUiDimModeBase = 1310,    // + DimMode 0..2
+    kUiBrightnessBase = 1320,  // + screen index 0..7 (manual dimming sliders)
+    kUiFocusDim = 1330,
+    kUiNightTint = 1331,
+    kUiNightTintStrength = 1332,
+    kUiCursorToCenter = 1333,
 };
+
+inline bool ui_is_comfort_slider(int id) {
+    return (id >= kUiBrightnessBase && id < kUiBrightnessBase + kComfortMaxScreens) ||
+           id == kUiFocusDim || id == kUiNightTintStrength;
+}
 
 inline int ui_user_preset_id(size_t index) {
     return kUiUserPresetBase + static_cast<int>(index);
@@ -207,6 +220,7 @@ struct AppState {
     int hover_id = 0;
     int focus_id = 0;
     int drag_field = -1;    // LayoutField while a slider is dragged
+    int drag_comfort = -1;  // view-comfort slider UiId while dragged
     int drag_screen = -1;   // screen index while the editor canvas is dragged
     POINT drag_origin{};
     float drag_start_value = 0.0f;
@@ -238,6 +252,10 @@ bool save_layout_to_disk(AppState& state, std::wstring& error);
 bool revert_layout_from_disk(AppState& state, std::wstring& error);
 std::string layout_presets_dir(const AppState& state);
 void refresh_layout_presets(AppState& state);
+// Sends the view-comfort setting behind a UiId (stabilise, dim mode, one
+// brightness slider, night tint) to a running engine. No engine: nothing to
+// do, the next launch passes the saved settings on its command line.
+void push_comfort_setting(AppState& state, int ui_id);
 bool save_config_to_disk(AppState& state, std::wstring& error);
 bool reload_app_config(AppState& state, std::wstring& error);
 void stop_engine_for_quit(AppState& state);
