@@ -64,13 +64,17 @@ class MagHeadingLock {
 public:
     struct Config {
         // Proportional time constant: a heading error decays with this tau.
-        float tau_s = 20.0f;
+        // 20 -> 10 s after the 2026-09-25 worn session (imu_replay, 10 s mean
+        // of the lock error): lag rms 1.07 -> 0.59 deg, p95 1.77 -> 0.86 deg
+        // (the "1-2 deg after looking left" the wearer saw), with unchanged
+        // reading jitter (31.0 px/s either way). 6 s halves it again but
+        // follows any in-gate field distortion twice as fast.
+        float tau_s = 10.0f;
         // Integral term (removes the steady lag a residual gyro yaw bias
         // would otherwise leave). Ki = scale * Kp^2 / 4: at 1.0 the loop is
-        // critically damped but both modes are slow (tau 40 s). 0.5 (measured
-        // in mag_heading_selftest): a 0.1 deg/s stale bias peaks at 1.6 deg and
-        // ends at 0.04 deg after 10 min; a 5 deg step settles with ~8%
-        // overshoot. 0.25 overshoots less but leaves 0.3 deg lag at 10 min.
+        // critically damped. 0.5 at tau 10 (mag_heading_selftest): a 0.1
+        // deg/s stale bias peaks at 0.81 deg and ends at 0.001 deg after
+        // 10 min; a 5 deg step overshoots by 0.18 deg.
         float integral_gain_scale = 0.5f;
         float integral_limit_degs = 0.15f;
         // Hard cap on the applied correction rate; far below perception of a

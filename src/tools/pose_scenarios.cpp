@@ -888,6 +888,109 @@ int main() {
         print_bias(sim, "at end");
         check(std::fabs(yf) < 1.0f, "repeated look-arounds keep the centre", yf, 1.0f);
     }
+
+    // --- 19: reading hold (EIS-style soft deadband) ---------------------------
+    std::printf("\n-- scenario 19: reading hold absorbs reading sway, follows turns, converges --\n");
+    {
+        // Precision: the smoother's angle helper must resolve sub-0.04 deg
+        // rotations (2 * acos(w) in float returned 0 or 0.0396 here).
+        const float tiny_half = 0.5f * 0.01f * kDegToRad;
+        const float tiny = quat_angle_deg(Quat{std::cos(tiny_half), 0.0f, 0.0f, std::sin(tiny_half)});
+        std::printf("  0.01 deg rotation measures %.6f deg\n", tiny);
+        check(std::fabs(tiny - 0.01f) < 1e-4f, "small-angle measurement is exact", std::fabs(tiny - 0.01f),
+              1e-4f);
+
+        constexpr int kFrameEvery = 8;
+        constexpr float kFrameDt = kFrameEvery * kDt;
+        HeadSim sim = make_sim(0xC0FFEE19u);
+        sim.bias_walk_degs = 0.0f;
+        PoseSmoother plain;
+        PoseSmoother held;
+        PoseSmoother::Config held_cfg;
+        apply_reading_hold(kReadingHoldDefault, held_cfg);
+        held.configure(held_cfg);
+        PoseSmoother off;
+        PoseSmoother::Config off_cfg;
+        apply_reading_hold(0, off_cfg);
+        off.configure(off_cfg);
+        auto yaw_of = [](const Quat& q) { return quat_to_euler(q).yaw_deg; };
+
+        // Phase A: 6 s of reading sway, 0.08 deg amplitude at 0.4 Hz (inside
+        // the medium inner radius). Frame-to-frame displayed motion is what
+        // makes text swim.
+        sim.sway = true;
+        sim.sway_hz = 0.4f;
+        sim.sway_amp_degs = 0.08f * 2.0f * kPi * 0.4f;
+        double plain_motion = 0.0;
+        double held_motion = 0.0;
+        float off_diff = 0.0f;
+        Quat prev_plain{};
+        Quat prev_held{};
+        const int sway_frames = static_cast<int>(std::lround(6.0f / kFrameDt));
+        for (int f = 0; f < sway_frames; ++f) {
+            for (int k = 0; k < kFrameEvery; ++k) {
+                sim.step(Vec3{});
+            }
+            const Quat raw = sim.est.quat();
+            const Quat p = plain.update(raw, kFrameDt);
+            const Quat h = held.update(raw, kFrameDt);
+            const Quat o = off.update(raw, kFrameDt);
+            off_diff = std::max(off_diff, quat_angle_deg(quat_multiply(quat_conjugate(p), o)));
+            if (f > 0) {
+                plain_motion += quat_angle_deg(quat_multiply(quat_conjugate(prev_plain), p));
+                held_motion += quat_angle_deg(quat_multiply(quat_conjugate(prev_held), h));
+            }
+            prev_plain = p;
+            prev_held = h;
+        }
+        sim.sway = false;
+        std::printf("  reading sway: 1-euro motion %.4f deg, with hold %.4f deg; off vs plain %.2e deg\n",
+                    plain_motion, held_motion, off_diff);
+        check(held_motion < 0.3 * plain_motion, "hold removes most reading-sway text motion",
+              static_cast<float>(held_motion), static_cast<float>(0.3 * plain_motion));
+        check(off_diff < 1e-5f, "stabilisation off is exactly the plain 1-euro", off_diff, 1e-5f);
+
+        // Phase B: a 30 deg turn. The held view must never move faster than
+        // the plain one plus a margin (no catch-up snap at the knee) and must
+        // keep the full travel.
+        const float start_held = yaw_of(held.update(sim.est.quat(), kFrameDt));
+        const float start_raw = yaw_of(sim.est.quat());
+        float worst_extra_step = 0.0f;
+        float prev_h = start_held;
+        float prev_p = yaw_of(plain.update(sim.est.quat(), kFrameDt));
+        const int turn_frames = static_cast<int>(std::lround(1.0f / kFrameDt));
+        for (int f = 0; f < turn_frames; ++f) {
+            for (int k = 0; k < kFrameEvery; ++k) {
+                const float local = (static_cast<float>(f * kFrameEvery + k)) * kDt;
+                const float rate = local < 0.5f ? 60.0f * std::sin(kPi * local / 0.5f) * 1.5708f : 0.0f;
+                sim.step(Vec3{0.0f, 0.0f, rate});
+            }
+            const float h = yaw_of(held.update(sim.est.quat(), kFrameDt));
+            const float p = yaw_of(plain.update(sim.est.quat(), kFrameDt));
+            worst_extra_step = std::max(worst_extra_step, std::fabs(h - prev_h) - std::fabs(p - prev_p));
+            prev_h = h;
+            prev_p = p;
+        }
+        std::printf("  turn: worst held step beyond the 1-euro step %.4f deg\n", worst_extra_step);
+        check(worst_extra_step < 0.05f, "no catch-up snap when a turn leaves the hold", worst_extra_step,
+              0.05f);
+
+        // Phase C: hold still 8 s. The settle decay brings the view back onto
+        // the world-locked pose.
+        float h_end = 0.0f;
+        const int settle_frames = static_cast<int>(std::lround(8.0f / kFrameDt));
+        for (int f = 0; f < settle_frames; ++f) {
+            for (int k = 0; k < kFrameEvery; ++k) {
+                sim.step(Vec3{});
+            }
+            h_end = yaw_of(held.update(sim.est.quat(), kFrameDt));
+        }
+        const float raw_end = yaw_of(sim.est.quat());
+        std::printf("  settle: raw travel %.3f deg, held travel %.3f deg, residual offset %.4f deg\n",
+                    raw_end - start_raw, h_end - start_held, std::fabs(h_end - raw_end));
+        check(std::fabs(h_end - raw_end) < 0.05f, "held view converges on the world-locked pose",
+              std::fabs(h_end - raw_end), 0.05f);
+    }
     std::printf("\npose_scenarios: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
