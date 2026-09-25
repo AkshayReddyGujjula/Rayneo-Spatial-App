@@ -45,9 +45,13 @@ add_library(rayneo_core STATIC
   src/imu/orientation_calibration.cpp
   src/imu/pose_estimator.cpp
   src/imu/pose_smoother.cpp
+  src/imu/mag_heading.cpp
 )
 target_include_directories(rayneo_core PUBLIC src)
 target_link_libraries(rayneo_core PUBLIC hidapi::hidapi)
+
+add_executable(imu_replay src/tools/imu_replay.cpp)
+target_link_libraries(imu_replay PRIVATE rayneo_core)
 
 add_executable(gt_imu_probe src/tools/gt_imu_probe.cpp)
 target_link_libraries(gt_imu_probe PRIVATE rayneo_core)
@@ -129,6 +133,10 @@ add_test(NAME camera_selftest COMMAND camera_selftest)
 add_executable(pose_selftest src/tools/pose_selftest.cpp)
 target_link_libraries(pose_selftest PRIVATE rayneo_core)
 add_test(NAME pose_selftest COMMAND pose_selftest)
+
+add_executable(mag_heading_selftest src/tools/mag_heading_selftest.cpp)
+target_link_libraries(mag_heading_selftest PRIVATE rayneo_core)
+add_test(NAME mag_heading_selftest COMMAND mag_heading_selftest)
 
 add_executable(pose_scenarios src/tools/pose_scenarios.cpp)
 target_link_libraries(pose_scenarios PRIVATE rayneo_core)

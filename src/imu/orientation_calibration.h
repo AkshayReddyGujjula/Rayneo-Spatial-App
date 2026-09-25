@@ -1,6 +1,7 @@
 #pragma once
 
 #include "imu/gt_protocol.h"
+#include "imu/mag_heading.h"
 
 #include <array>
 #include <string>
@@ -73,5 +74,10 @@ bool save_orientation_calibration(const std::string& path, const OrientationCali
                                   std::string& error);
 bool load_orientation_calibration(const std::string& path, std::array<float, 9>& matrix,
                                   std::string& error);
+// Optional magnetometer calibration stored in the same file. A missing key is
+// not an error (returns true with mag.valid == false).
+bool load_mag_calibration(const std::string& path, MagCalibration& mag, std::string& error);
+// Rewrites the file keeping its sensor_to_head and adding/replacing the mag keys.
+bool save_mag_calibration(const std::string& path, const MagCalibration& mag, std::string& error);
 
 }  // namespace gt

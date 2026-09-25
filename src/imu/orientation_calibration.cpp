@@ -554,12 +554,8 @@ OrientationCalibrationResult calibrate_orientation(const CalibrationPhaseData& s
     return result;
 }
 
-bool save_orientation_calibration(const std::string& path, const OrientationCalibrationResult& result,
-                                  std::string& error) {
-    if (!result.ok) {
-        error = "cannot save a failed calibration";
-        return false;
-    }
+static bool write_calibration_file(const std::string& path, const std::array<float, 9>& sensor_to_head,
+                                   const MagCalibration& mag, std::string& error) {
     const std::filesystem::path destination = path_from_utf8(path);
     std::filesystem::path temporary = destination;
     temporary += ".tmp";
@@ -570,13 +566,19 @@ bool save_orientation_calibration(const std::string& path, const OrientationCali
     }
     output << std::fixed << std::setprecision(8)
            << "{\n  \"version\": 1,\n  \"sensor_to_head\": [\n    ";
-    for (size_t i = 0; i < result.sensor_to_head.size(); ++i) {
+    for (size_t i = 0; i < sensor_to_head.size(); ++i) {
         if (i != 0) {
             output << (i % 3 == 0 ? ",\n    " : ", ");
         }
-        output << result.sensor_to_head[i];
+        output << sensor_to_head[i];
     }
-    output << "\n  ]\n}\n";
+    output << "\n  ]";
+    if (mag.valid) {
+        output << std::setprecision(3) << ",\n  \"mag_hard_iron_ut\": [" << mag.hard_iron_ut.x << ", "
+               << mag.hard_iron_ut.y << ", " << mag.hard_iron_ut.z << "],\n  \"mag_field_ut\": "
+               << mag.field_ut;
+    }
+    output << "\n}\n";
     if (!output) {
         error = "failed while writing calibration file";
         return false;
@@ -606,6 +608,84 @@ bool save_orientation_calibration(const std::string& path, const OrientationCali
         return false;
     }
 #endif
+    return true;
+}
+
+bool save_orientation_calibration(const std::string& path, const OrientationCalibrationResult& result,
+                                  std::string& error) {
+    if (!result.ok) {
+        error = "cannot save a failed calibration";
+        return false;
+    }
+    // Re-running the orientation calibration must not discard a stored
+    // magnetometer calibration: the two are measured by separate steps.
+    MagCalibration existing_mag;
+    std::string ignored;
+    if (!load_mag_calibration(path, existing_mag, ignored)) {
+        existing_mag = MagCalibration{};
+    }
+    return write_calibration_file(path, result.sensor_to_head, existing_mag, error);
+}
+
+bool save_mag_calibration(const std::string& path, const MagCalibration& mag, std::string& error) {
+    std::array<float, 9> matrix{};
+    if (!load_orientation_calibration(path, matrix, error)) {
+        return false;
+    }
+    return write_calibration_file(path, matrix, mag, error);
+}
+
+bool load_mag_calibration(const std::string& path, MagCalibration& mag, std::string& error) {
+    mag = MagCalibration{};
+    std::ifstream input(path_from_utf8(path), std::ios::in);
+    if (!input) {
+        error = "could not open calibration file";
+        return false;
+    }
+    const std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    const size_t key = text.find("\"mag_hard_iron_ut\"");
+    if (key == std::string::npos) {
+        return true;  // optional: no magnetometer calibration stored
+    }
+    const size_t begin = text.find('[', key);
+    const size_t end = begin == std::string::npos ? std::string::npos : text.find(']', begin);
+    if (end == std::string::npos) {
+        error = "mag_hard_iron_ut is malformed";
+        return false;
+    }
+    Vec3 v{};
+    const std::string inner = text.substr(begin + 1, end - begin - 1);
+    const char* cursor = inner.c_str();
+    int parsed_count = 0;
+    for (float* slot : {&v.x, &v.y, &v.z}) {
+        while (*cursor == ' ' || *cursor == ',' || *cursor == '\t' || *cursor == '\r' || *cursor == '\n') {
+            ++cursor;
+        }
+        char* number_end = nullptr;
+        *slot = std::strtof(cursor, &number_end);
+        if (number_end == cursor) {
+            break;
+        }
+        cursor = number_end;
+        ++parsed_count;
+    }
+    if (parsed_count != 3 || !std::isfinite(v.x) ||
+        !std::isfinite(v.y) || !std::isfinite(v.z) || std::fabs(v.x) > 500.0f ||
+        std::fabs(v.y) > 500.0f || std::fabs(v.z) > 500.0f) {
+        error = "mag_hard_iron_ut must contain 3 finite numbers";
+        return false;
+    }
+    float field = 0.0f;
+    const size_t field_key = text.find("\"mag_field_ut\"");
+    if (field_key != std::string::npos) {
+        const size_t colon = text.find(':', field_key);
+        if (colon != std::string::npos) {
+            field = std::strtof(text.c_str() + colon + 1, nullptr);
+        }
+    }
+    mag.valid = true;
+    mag.hard_iron_ut = v;
+    mag.field_ut = std::isfinite(field) ? field : 0.0f;
     return true;
 }
 
