@@ -83,6 +83,7 @@ struct Options {
     bool fov_explicit = false;
     bool no_imu = false;
     bool smoothing = true;
+    bool mag = true;
     double seconds = 0.0;
     std::string log_path;
     std::string calibration_path;
@@ -340,6 +341,7 @@ void print_usage() {
         "  --seconds N   exit after N seconds (0 = run until quit)\n"
         "  --no-imu      run without head tracking (fixed camera)\n"
         "  --no-smoothing  disable 1-euro view smoothing (raw pose to renderer)\n"
+        "  --no-mag        disable the magnetometer heading lock even if calibrated\n"
         "  --freeze-still / --no-freeze-still  obsolete, accepted and ignored (the pose path\n"
         "                is always live; the gyro bias owns steady error)\n"
         "  --log FILE     append a diagnostic CSV (elapsed, gyro, bias, view pose, rest,\n"
@@ -367,6 +369,8 @@ bool parse_args(int argc, char** argv, Options& opt, bool& show_help) {
             opt.no_imu = true;
         } else if (std::strcmp(a, "--no-smoothing") == 0) {
             opt.smoothing = false;
+        } else if (std::strcmp(a, "--no-mag") == 0) {
+            opt.mag = false;
         } else if (std::strcmp(a, "--freeze-still") == 0 ||
                    std::strcmp(a, "--no-freeze-still") == 0) {
             std::printf("note: %s is obsolete and ignored; the pose path is always live\n", a);
@@ -678,6 +682,7 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     std::array<float, 9> sensor_to_head;
+    gt::MagCalibration mag_calibration;
     if (!opt.no_imu) {
         std::string calibration_error;
         if (!gt::load_orientation_calibration(opt.calibration_path, sensor_to_head, calibration_error)) {
@@ -689,6 +694,12 @@ int wmain(int argc, wchar_t** argv) {
                 gt::engine_status_sanitize("orientation calibration required: " + calibration_error);
             publish_status(g_status);
             return 1;
+        }
+        std::string mag_error;
+        if (!gt::load_mag_calibration(opt.calibration_path, mag_calibration, mag_error)) {
+            // A malformed optional key must not stop the app: run gyro-only.
+            std::printf("magnetometer calibration ignored: %s\n", mag_error.c_str());
+            mag_calibration = gt::MagCalibration{};
         }
     }
     gt::Layout layout;
@@ -1069,6 +1080,21 @@ int wmain(int argc, wchar_t** argv) {
     if (!opt.no_imu) {
         imu.set_sensor_to_head(sensor_to_head);
         std::printf("loaded orientation calibration: %s\n", opt.calibration_path.c_str());
+        if (opt.mag && mag_calibration.valid) {
+            imu.set_mag_calibration(mag_calibration);
+            std::printf("magnetometer heading lock: on (hard iron %.2f, %.2f, %.2f uT)\n",
+                        mag_calibration.hard_iron_ut.x, mag_calibration.hard_iron_ut.y,
+                        mag_calibration.hard_iron_ut.z);
+        } else {
+            std::printf("magnetometer heading lock: off (%s) - yaw is gyro-only and can drift\n",
+                        opt.mag ? "no magnetometer calibration; run orientation_calibrate --mag" : "--no-mag");
+        }
+        if (!opt.log_path.empty()) {
+            const std::string raw_path =
+                gt::utf8_from_path(gt::path_from_utf8(opt.log_path).parent_path() / "imu_raw.csv");
+            imu.set_raw_log_path(raw_path);
+            std::printf("raw IMU log: %s\n", raw_path.c_str());
+        }
         imu.start();
     }
 
@@ -1430,6 +1456,16 @@ int wmain(int argc, wchar_t** argv) {
                     imu.corrected_rate_degs(), imu.stillness_degs(), imu.accel_dev_mps2(),
                     static_cast<unsigned>(imu.escape_rollbacks()),
                     e.yaw_deg, e.pitch_deg, e.roll_deg);
+                if (imu.mag_lock_active()) {
+                    static const char* const kMagStates[] = {"off", "acquiring", "locked", "disturbed"};
+                    const int ms = imu.mag_state();
+                    std::printf("  mag_heading: state=%s err=%+.2fdeg int=%+.3fdeg/s |B|=%.1f/%.1fuT "
+                                "dip=%.1f/%.1fdeg corr_total=%+.2fdeg reacq=%u temp=%.1fC\n",
+                                (ms >= 0 && ms <= 3) ? kMagStates[ms] : "?", imu.mag_error_deg(),
+                                imu.mag_integral_degs(), imu.mag_field_ut(), imu.mag_reference_field_ut(),
+                                imu.mag_dip_deg(), imu.mag_reference_dip_deg(), imu.mag_total_correction_deg(),
+                                static_cast<unsigned>(imu.mag_reacquisitions()), imu.temperature_c());
+                }
             }
             frames_at_stat = frames;
             g_status.fps = fps;

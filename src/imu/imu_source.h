@@ -51,6 +51,24 @@ public:
 
     void recenter() { recenter_request_.store(true, std::memory_order_relaxed); }
     void set_sensor_to_head(const std::array<float, 9>& matrix) { sensor_to_head_ = matrix; }
+    // Call before start(). An invalid calibration leaves the heading lock off.
+    void set_mag_calibration(const MagCalibration& calibration) { mag_calibration_ = calibration; }
+    // Optional full-rate raw sample log in the gt_imu_probe CSV format, so a
+    // real session can be replayed offline with imu_replay. Truncated at start.
+    void set_raw_log_path(const std::string& path) { raw_log_path_ = path; }
+
+    // Magnetometer heading lock diagnostics (see MagHeadingLock).
+    bool mag_lock_active() const { return mag_active_.load(std::memory_order_relaxed); }
+    int mag_state() const { return mag_state_.load(std::memory_order_relaxed); }
+    float mag_error_deg() const { return mag_error_deg_.load(std::memory_order_relaxed); }
+    float mag_field_ut() const { return mag_field_ut_.load(std::memory_order_relaxed); }
+    float mag_dip_deg() const { return mag_dip_deg_.load(std::memory_order_relaxed); }
+    float mag_reference_field_ut() const { return mag_ref_field_ut_.load(std::memory_order_relaxed); }
+    float mag_reference_dip_deg() const { return mag_ref_dip_deg_.load(std::memory_order_relaxed); }
+    float mag_integral_degs() const { return mag_integral_degs_.load(std::memory_order_relaxed); }
+    float mag_total_correction_deg() const { return mag_total_deg_.load(std::memory_order_relaxed); }
+    uint32_t mag_reacquisitions() const { return mag_reacq_.load(std::memory_order_relaxed); }
+    float temperature_c() const { return temp_c_.load(std::memory_order_relaxed); }
 
 private:
     void run();
@@ -82,6 +100,19 @@ private:
     std::atomic<uint32_t> escape_rollbacks_{0};
     std::atomic<bool> calibrated_{false};
     std::atomic<float> drift_degs_{0.0f};
+    std::atomic<bool> mag_active_{false};
+    std::atomic<int> mag_state_{0};
+    std::atomic<float> mag_error_deg_{0.0f};
+    std::atomic<float> mag_field_ut_{0.0f};
+    std::atomic<float> mag_dip_deg_{0.0f};
+    std::atomic<float> mag_ref_field_ut_{0.0f};
+    std::atomic<float> mag_ref_dip_deg_{0.0f};
+    std::atomic<float> mag_integral_degs_{0.0f};
+    std::atomic<float> mag_total_deg_{0.0f};
+    std::atomic<uint32_t> mag_reacq_{0};
+    std::atomic<float> temp_c_{0.0f};
+    MagCalibration mag_calibration_;
+    std::string raw_log_path_;
     mutable std::mutex status_mutex_;
     std::string status_;
     std::array<float, 9> sensor_to_head_{
