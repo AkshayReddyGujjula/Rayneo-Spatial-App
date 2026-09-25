@@ -100,6 +100,8 @@ calibration), `gt_imu_probe.exe` (protocol probe), plus the test binaries below.
 | 20 | "Nodding only tilts the screens" (no visible pitch) | Two stacked causes, both telemetry-verified: the calibration file carries the wearer's ~4 deg habitual nod lean (M[1][0]=0.07, same magnitude across two calibrations but varying in direction, so no static file cancels it), coupling ~7% of every nod into roll; and the default centre screen exactly fills the view (46.0x26.8 deg vs 46x26.9 FOV), hiding the correct dominant pitch slide while the small roll glares | Default screens shrunk to 1.6x0.9 m (visible edges, per-user approval); fresh calibration aligns the file with current habit; tool prints pairwise axis quality (`[cal] quality:`); nod against a vertical edge. View/estimator math proven exact (10-agent review + log forensics). Flat-surface calibration explicitly rejected: with no head there are no head axes (Standing lesson 12) |
 | 21 | "Engine failure" on every quit; engine.log ends mid-restore | Controller stop grace (8 s) shorter than the display restore it must wait out (13-35 s measured): quit always TerminateProcess'd the engine mid-restore (stranded virtual desktops + bogus Failed state). Bug 19 had only papered over the taskbar aftermath | Stop grace 8 -> 45 s, quit wait 12 -> 60 s (message-pumped; the kill stays as a last resort) |
 | 22 | Centre screen off-centre after looking around (reported as ~5 min recenter need) | Adaptation starvation: the symmetric 0.5 s deviation EMA took ~2.5 s to drain after a pan, so 1-2 s look-around holds never reached eligibility; the bias sat frozen for 80 s while true bias wandered, walking the centre off ~1.5 deg per 20 look-arounds (scenario 18 failed 1.44 deg pre-fix) | Asymmetric dev EMA (rise 0.5 s, fall 0.08 s): eligibility recovers ~1 s after a pan, noise-flicker behaviour unchanged (scenario 18: 0.62 deg; scenario 16 nominal: 0.28 -> 0.04 deg; full suite green) |
+| 23 | "Looking up tilts the screens right, looking down tilts them left" - only after a recenter, never at startup | `q * conj(q_ref)` with a reference carrying earth heading psi rotates every head axis by psi, so a nod became sin(psi) roll. Startup references come from the accelerometer (psi = 0), hence fine until the first recenter. Field telemetry 2026-09-25: nod-to-roll coupling 2 deg before recenter, 14.5 / 17.9 / 27.4 deg after successive recenters | Reference split `q_ref = H*T` (heading twist about earth Z, tilt remainder); publish `conj(H)*q*conj(T)`. Earth yaw stays pure yaw (bug 2 guard kept). `pose_selftest` nod after +40 deg headed recenter: axis error 39.98 -> 0.002 deg |
+| 24 | Workspace drifts after turning the chair / slow pans (54 deg/min after one turn, replayed) | Rest was judged from gyro *fluctuation* only; a smooth steady turn at ~15 deg/s has low deviation, qualified as rest, and the escape walked the yaw bias 0.43 -> 1.5 (clamp) -> -0.49 deg/s | Raw-rate ceiling on rest (3 deg/s, motion above 4; the in-band bias norm bound 2.6 + margin, a RAW gate so it cannot lock out; exempt during startup calibration). `pose_selftest` two 360 deg turns out and back: 5.23 -> 0.52 deg; replay of the recording keeps bias at 0.43 |
 
 **Standing lesson:** the IMU path is where the subtle bugs live. Every gating change must be
 accompanied by a synthetic scenario that fails before and passes after, and every claim in a commit
@@ -109,9 +111,19 @@ message must be reproducible from the test output.
 
 ## 4. Known limitations (state them, do not hide them)
 
-- **No magnetometer.** It is off because the field in the test environment is heavily distorted
-  (71 uT dominated by one axis) and feeding it caused a constant ~4.8 deg/s yaw spin; the official
-  RayNeo runtime does not use it either. Consequence: with no absolute heading reference a *steady*
+- **Magnetometer (corrected 2026-09-25).** The old conclusion "heavily distorted field" was wrong.
+  The mag axes are rotated 90 deg from the package (`package = (my, -mx, mz)`, `kMagToPackage`)
+  and carry a ~25 uT hard-iron offset from the glasses themselves; the raw 71 uT was offset plus
+  the ~51 uT earth field, and feeding unrotated raw axes caused the 4.8 deg/s spin. Calibrated
+  (`orientation_calibrate --mag`, gyro-constrained linear fit) the field is 51.5 uT at 66.7 deg
+  dip and its heading tracks the gyro within ~3 deg over 360 deg turns. `MagHeadingLock` (yaw-only,
+  rate-limited 0.5 deg/s, disturbance-gated PI, tau 20 s) pins yaw to the local field when a mag
+  calibration exists. Remaining limits: a fixed local distortion is harmless (only direction
+  stability matters), but a field that changes while you work (a magnet, a moving laptop lid
+  near the head) is gated out rather than corrected; a moving vehicle rotates the earth frame
+  for gyro and mag alike. Without a mag calibration the lock is off and the paragraph below
+  applies unchanged.
+- **Gyro-only yaw (no mag calibration).** Consequence: with no absolute heading reference a *steady*
   slow yaw rotation is physically indistinguishable from a yaw bias. Every yaw gate is therefore a
   trade-off; the current choice favours the wearer's pan: the escape is slow enough that a 20 s /
   1.0 deg/s turn keeps >=80% of its travel, and its snapshot rollback removes the small absorbed
@@ -254,6 +266,7 @@ Run inside the MSVC environment: `call "C:\Program Files (x86)\Microsoft Visual 
 | `vdd_selftest` | Parsec VDD protocol, cleanup order, index parsing |
 | `view_selftest` | Offline "virtual glasses": real layout + real camera maths projected to NDC, numeric assertions, and 640x360 PPM frames in `scratch/` |
 | `app_selftest` | Controller app model: engine command contract, status protocol + freshness gate, preference validation/persistence, presets, field normalisation, 3D face selection and view-plane drag, depth slider scale, log rotation, telemetry tail |
+| `mag_heading_selftest` | Magnetometer heading lock closed loop (stale bias bounded, integral removes lag, rate limit, disturbance rejected with zero view motion, new environment re-acquired without a jump) and the gyro-constrained hard-iron fit (recovery + rejection) |
 
 Every fix MUST come with a regression test that fails without it. Synthetic IMU scenarios live in
 `pose_scenarios.cpp` (`HeadSim` helpers) and `pose_selftest.cpp` (local helpers).
@@ -287,6 +300,12 @@ Every fix MUST come with a regression test that fails without it. Synthetic IMU 
   backslash-n in the output (this defect shipped twice). Verify by reading the compiled string back
   out of the test output.
 - **The IMU suites are MSVC-only**: scenario 10 passes on MSVC (29.2 deg) but runs away under g++ (90.6 deg) - its escape/rollback thresholds are FP-chaotic across compilers, so g++ numbers are diagnostic only and the contract suite stays `RelWithDebInfo` on MSVC.
+- **Replay real sessions**: with `--log` the engine writes `logs/imu_raw.csv` (every sample);
+  `imu_replay FILE --orientation config/orientation.json [--observe] [--no-mag]` runs it through the
+  real estimator. Measure estimator changes on recorded hardware data, not only on synthetic scenarios.
+- **Shell heredocs eat backslashes here**: a C++ `\n` written through a bash heredoc into a Python
+  patch script lands as a real newline and splits the string literal. Use the editor tool for any
+  edit containing escapes.
 - **Never trust a redirected build**: `cmake --build ... > nul` hides `FAILED:` lines and you end up
   testing stale binaries whose assertions no longer match the source. Always let the build print.
 
@@ -363,7 +382,7 @@ hardware thermal drift or declaring another estimator fix.
 ## 8. Definition of done for any change
 
 1. Builds clean under `/W4 /permissive-` (no new warnings).
-2. All nine test suites pass, and the change's own regression test fails without the change.
+2. All ten test suites pass, and the change's own regression test fails without the change.
 3. Numeric claims in the commit message are reproducible from printed test output.
 4. Docs updated if behaviour or a trade-off changed (`docs/PROTOCOL-NOTES.md`, this file).
 5. No new global state, no unbounded memory/GPU growth, no resource leaks (see `capture_smoketest`
