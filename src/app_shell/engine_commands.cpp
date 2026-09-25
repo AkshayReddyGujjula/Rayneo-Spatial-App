@@ -110,7 +110,8 @@ bool build_engine_launch_command(const std::string& engine_executable,
                                  const std::string& engine_log_path,
                                  const std::string& telemetry_path, LaunchMode mode,
                                  bool head_tracking, int monitor_index, float fov_deg,
-                                 EngineLaunchCommand& command, std::string& error) {
+                                 EngineLaunchCommand& command, std::string& error,
+                                 const ViewComfort& comfort) {
     if (engine_executable.empty()) {
         error = "engine executable path is empty";
         return false;
@@ -133,6 +134,9 @@ bool build_engine_launch_command(const std::string& engine_executable,
     }
     if (fov_deg != 0.0f && (!std::isfinite(fov_deg) || fov_deg < 20.0f || fov_deg > 150.0f)) {
         error = "field of view override must be 0 (layout default) or 20..150 degrees";
+        return false;
+    }
+    if (!validate_view_comfort(comfort, error)) {
         return false;
     }
 
@@ -164,6 +168,7 @@ bool build_engine_launch_command(const std::string& engine_executable,
         built.arguments.push_back(kEngineArgFov);
         built.arguments.push_back(number_text(static_cast<double>(fov_deg)));
     }
+    append_view_comfort_args(comfort, built.arguments);
     if (!telemetry_path.empty()) {
         built.arguments.push_back(kEngineArgLog);
         built.arguments.push_back(telemetry_path);

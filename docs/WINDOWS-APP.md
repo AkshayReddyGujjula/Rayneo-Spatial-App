@@ -86,8 +86,21 @@ While the engine runs: **Recenter**, **Yaw tracking** and **Pitch tracking** (st
 from the engine, not guessed), **Reload layout**, and **Stop** (a graceful quit message; a forced
 terminate only happens if the engine ignores it for 8 s and is reported in the status panel).
 The existing global hotkeys keep working: `Ctrl+Shift+R` recenter, `Ctrl+Alt+Y` yaw,
-`Ctrl+Alt+P` pitch, `Ctrl+Alt+S` reading stabilisation (cycles off / low / medium / high; the
-engine starts at medium and logs each change), `Ctrl+Alt+Q` quit.
+`Ctrl+Alt+P` pitch, `Ctrl+Alt+S` reading stabilisation (cycles off / low / medium / high / ultra;
+the dashboard adopts and remembers the level), `Ctrl+Alt+F` cursor to the middle of the centre
+screen, `Ctrl+Alt+Q` quit.
+
+### View comfort
+
+The engine panel's **View comfort** section is saved in `config/app.json` (`view_comfort`), passed
+to the engine at start and applied live while it runs:
+
+| Setting | Choices | Effect |
+|---|---|---|
+| Reading stabilisation | Off, Low, Medium (default), High, Ultra | Holds the screens steady while your head is nearly still (a soft deadband after the 1-euro filter). Higher holds harder and trails more on a turn; Ultra is the maximum (1.0 deg hold). |
+| Screen dimming | Off (default), Manual, Focus | Manual: one brightness slider per screen (10..100 %). Focus: the screen you look at stays bright, the others fade to the *Screens you are not looking at* level (0.25 s fade). |
+| Night tint | off (default) / on, warmth 0..100 % | Warms every screen by cutting blue and some green; 100 % is roughly a warm-white lamp. |
+| Cursor to centre screen | button, or `Ctrl+Alt+F` | Moves the pointer to the middle of the layout screen nearest straight ahead. |
 
 ### Keyboard
 
@@ -149,7 +162,10 @@ ignored within version 1, while an unsupported version is rejected explicitly.
   "engine_log":   { "max_bytes": 1048576, "max_files": 3 },
   "telemetry_log": { "max_bytes": 4194304, "max_files": 3 },
   "last_engine_error": "",
-  "window": { "x": 120, "y": 90, "width": 1180, "height": 860, "maximized": false }
+  "window": { "x": 120, "y": 90, "width": 1180, "height": 860, "maximized": false },
+  "view_comfort": { "stabilise": "medium", "dim_mode": "off",
+                    "screen_brightness_pct": [100, 100, 100, 100, 100, 100, 100, 100],
+                    "focus_dim_pct": 40, "night_tint": false, "night_tint_pct": 50 }
 }
 ```
 
@@ -162,6 +178,11 @@ ignored within version 1, while an unsupported version is rejected explicitly.
 | `engine_log.max_bytes` / `telemetry_log.max_bytes` | 64 KiB .. 64 MiB | rotation threshold |
 | `engine_log.max_files` / `telemetry_log.max_files` | 1..9 | rotated generations kept (`engine.log.1` …) |
 | `window` | width ≥ 320, height ≥ 240 | restored on start and clamped to the work area |
+| `view_comfort.stabilise` | `off`, `low`, `medium`, `high`, `ultra` | reading stabilisation (`--stabilise`) |
+| `view_comfort.dim_mode` | `off`, `manual`, `focus` | screen dimming (`--dim-mode`) |
+| `view_comfort.screen_brightness_pct` | up to 8 values, 10..100 | manual brightness per layout screen (`--screen-brightness`) |
+| `view_comfort.focus_dim_pct` | 10..100 | brightness of the screens you are not looking at (`--focus-dim`) |
+| `view_comfort.night_tint` / `night_tint_pct` | bool / 0..100 | warm tint (`--night-tint`, 0 = off) |
 
 The controller writes this file at runtime (window placement, last mode, last engine error), so a
 dirty working tree after running the app is expected.

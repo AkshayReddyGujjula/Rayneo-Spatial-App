@@ -70,6 +70,8 @@ public:
     void poll(double now_s);
     void request_stop();
     bool send_command(unsigned message, std::string& error);
+    // Integer payload variant (view-comfort messages).
+    bool send_command(unsigned message, WPARAM wparam, LPARAM lparam, std::string& error);
     bool launch_tool(const std::filesystem::path& tool, const std::vector<std::string>& arguments,
                      std::string& error);
 

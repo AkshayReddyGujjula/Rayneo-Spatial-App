@@ -1,4 +1,5 @@
 #include "app/engine_protocol.h"
+#include "app/view_comfort.h"
 #include "capture/desktop_duplication.h"
 #include "imu/imu_source.h"
 #include "imu/pose_smoother.h"
@@ -12,6 +13,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -83,7 +85,7 @@ struct Options {
     bool fov_explicit = false;
     bool no_imu = false;
     bool smoothing = true;
-    int stabilise = gt::kReadingHoldDefault;
+    gt::ViewComfort comfort;
     bool mag = true;
     double seconds = 0.0;
     std::string log_path;
@@ -100,6 +102,7 @@ enum HotkeyId : int {
     kHotkeyQuit = 4,
     kHotkeyExitWorkspace = 5,
     kHotkeyCycleStabilise = 6,
+    kHotkeyCursorToCenter = 7,
 };
 
 struct AppState {
@@ -110,7 +113,12 @@ struct AppState {
     gt::ImuSource* imu = nullptr;
     gt::PoseSmoother view_smoother;
     gt::PoseSmoother::Config view_smoother_config;
-    int stabilise_level = gt::kReadingHoldDefault;
+    // View comfort (stabilisation level, dimming, night tint): set from the
+    // command line, then live from the controller and the hotkeys.
+    gt::ViewComfort comfort;
+    std::array<float, gt::kComfortMaxScreens> shown_brightness{1.0f, 1.0f, 1.0f, 1.0f,
+                                                                1.0f, 1.0f, 1.0f, 1.0f};
+    bool cursor_to_center = false;
     bool yaw_tracking = true;
     bool pitch_tracking = true;
     bool capture_yaw_hold = false;
@@ -120,6 +128,18 @@ struct AppState {
 };
 
 AppState* g_app = nullptr;
+
+static_assert(gt::kComfortStabiliseLevels == gt::kReadingHoldLevels,
+              "controller and smoother must agree on the stabilisation levels");
+
+// One place for every stabilisation change (command line, Ctrl+Alt+S, the
+// controller), so the smoother config and the reported level never diverge.
+void set_stabilise_level(AppState& app, int level, const char* source) {
+    app.comfort.stabilise_level = level;
+    gt::apply_reading_hold(level, app.view_smoother_config);
+    app.view_smoother.configure(app.view_smoother_config);
+    std::printf("  reading stabilisation %s (%s)\n", gt::reading_hold_name(level), source);
+}
 
 void publish_status(const StatusReport& report) {
     if (report.path.empty()) {
@@ -253,12 +273,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                                     g_app->pitch_tracking ? "on" : "off (view holds pitch)");
                         break;
                     case kHotkeyCycleStabilise:
-                        g_app->stabilise_level =
-                            (g_app->stabilise_level + 1) % gt::kReadingHoldLevels;
-                        gt::apply_reading_hold(g_app->stabilise_level, g_app->view_smoother_config);
-                        g_app->view_smoother.configure(g_app->view_smoother_config);
-                        std::printf("  reading stabilisation %s\n",
-                                    gt::reading_hold_name(g_app->stabilise_level));
+                        set_stabilise_level(
+                            *g_app, (g_app->comfort.stabilise_level + 1) % gt::kReadingHoldLevels,
+                            "hotkey");
+                        break;
+                    case kHotkeyCursorToCenter:
+                        g_app->cursor_to_center = true;
                         break;
                     case kHotkeyQuit:
                         g_app->quit = true;
@@ -303,6 +323,40 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                 std::printf("  layout reload requested (controller)\n");
             }
             return 0;
+        case gt::kEngineMessageSetStabilise:
+            if (g_app != nullptr && wparam < static_cast<WPARAM>(gt::kComfortStabiliseLevels)) {
+                set_stabilise_level(*g_app, static_cast<int>(wparam), "controller");
+            }
+            return 0;
+        case gt::kEngineMessageSetDimMode:
+            if (g_app != nullptr && wparam < static_cast<WPARAM>(gt::kDimModeCount) &&
+                lparam >= gt::kComfortMinBrightnessPct && lparam <= 100) {
+                g_app->comfort.dim_mode = static_cast<gt::DimMode>(wparam);
+                g_app->comfort.focus_dim_pct = static_cast<int>(lparam);
+                std::printf("  screen dimming %s (focus dim %d%%)\n",
+                            gt::dim_mode_name(g_app->comfort.dim_mode),
+                            g_app->comfort.focus_dim_pct);
+            }
+            return 0;
+        case gt::kEngineMessageSetScreenBrightness:
+            if (g_app != nullptr && wparam < static_cast<WPARAM>(gt::kComfortMaxScreens) &&
+                lparam >= gt::kComfortMinBrightnessPct && lparam <= 100) {
+                g_app->comfort.screen_brightness_pct[wparam] = static_cast<int>(lparam);
+            }
+            return 0;
+        case gt::kEngineMessageSetNightTint:
+            if (g_app != nullptr && wparam <= 100) {
+                g_app->comfort.night_tint = wparam > 0;
+                if (wparam > 0) {
+                    g_app->comfort.night_tint_pct = static_cast<int>(wparam);
+                }
+            }
+            return 0;
+        case gt::kEngineMessageCursorToCenter:
+            if (g_app != nullptr) {
+                g_app->cursor_to_center = true;
+            }
+            return 0;
         case gt::kEngineMessageQuit:
             if (g_app != nullptr) {
                 g_app->quit = true;
@@ -331,6 +385,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             }
             flags |= (static_cast<unsigned>(g_app->screen_count) << gt::kEngineScreenCountShift) &
                      gt::kEngineScreenCountMask;
+            flags |= (static_cast<unsigned>(g_app->comfort.stabilise_level + 1)
+                      << gt::kEngineStabiliseShift) &
+                     gt::kEngineStabiliseMask;
             return static_cast<LRESULT>(flags);
         }
         case WM_SETCURSOR:
@@ -353,8 +410,12 @@ void print_usage() {
         "  --seconds N   exit after N seconds (0 = run until quit)\n"
         "  --no-imu      run without head tracking (fixed camera)\n"
         "  --no-smoothing  disable 1-euro view smoothing (raw pose to renderer)\n"
-        "  --stabilise L   reading stabilisation off|low|medium|high (default medium);\n"
+        "  --stabilise L   reading stabilisation off|low|medium|high|ultra (default medium);\n"
         "                Ctrl+Alt+S cycles it live\n"
+        "  --dim-mode M    screen dimming off|manual|focus (default off)\n"
+        "  --screen-brightness a,b,..  manual brightness %% per screen (10..100)\n"
+        "  --focus-dim P   focus mode: brightness %% of screens you are not looking at\n"
+        "  --night-tint P  warm night tint strength %% (0 = off)\n"
         "  --no-mag        disable the magnetometer heading lock even if calibrated\n"
         "  --freeze-still / --no-freeze-still  obsolete, accepted and ignored (the pose path\n"
         "                is always live; the gyro bias owns steady error)\n"
@@ -367,13 +428,23 @@ void print_usage() {
         "  workspace mode detaches the laptop panel until exit (its windows move to\n"
         "                the center desktop); Ctrl+Shift+\\ exits the engine\n"
         "  global hotkeys: Ctrl+Shift+R recenter, Ctrl+Alt+Y yaw tracking, "
-        "Ctrl+Alt+P pitch tracking, Ctrl+Alt+S reading stabilisation, Ctrl+Alt+Q quit, "
+        "Ctrl+Alt+P pitch tracking, Ctrl+Alt+S reading stabilisation, Ctrl+Alt+F cursor to centre, "
+        "Ctrl+Alt+Q quit, "
         "Ctrl+Shift:\\ exit workspace\n");
 }
 
 bool parse_args(int argc, char** argv, Options& opt, bool& show_help) {
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
+        bool comfort_arg = false;
+        std::string comfort_error;
+        if (!gt::parse_view_comfort_arg(argc, argv, i, opt.comfort, comfort_arg, comfort_error)) {
+            std::printf("%s\n", comfort_error.c_str());
+            return false;
+        }
+        if (comfort_arg) {
+            continue;
+        }
         if (std::strcmp(a, "--monitor") == 0 && i + 1 < argc) {
             opt.monitor = std::atoi(argv[++i]);
             opt.monitor_explicit = true;
@@ -384,19 +455,6 @@ bool parse_args(int argc, char** argv, Options& opt, bool& show_help) {
             opt.no_imu = true;
         } else if (std::strcmp(a, "--no-smoothing") == 0) {
             opt.smoothing = false;
-        } else if (std::strcmp(a, "--stabilise") == 0 && i + 1 < argc) {
-            const std::string level = argv[++i];
-            bool matched = false;
-            for (int n = 0; n < gt::kReadingHoldLevels; ++n) {
-                if (level == gt::reading_hold_name(n) || level == std::to_string(n)) {
-                    opt.stabilise = n;
-                    matched = true;
-                }
-            }
-            if (!matched) {
-                std::printf("--stabilise expects off, low, medium or high\n");
-                return false;
-            }
         } else if (std::strcmp(a, "--no-mag") == 0) {
             opt.mag = false;
         } else if (std::strcmp(a, "--freeze-still") == 0 ||
@@ -439,6 +497,7 @@ void register_global_hotkeys(HWND hwnd) {
         {kHotkeyToggleYaw, MOD_CONTROL | MOD_ALT, 'Y', L"Ctrl+Alt+Y (yaw tracking)"},
         {kHotkeyTogglePitch, MOD_CONTROL | MOD_ALT, 'P', L"Ctrl+Alt+P (pitch tracking)"},
         {kHotkeyCycleStabilise, MOD_CONTROL | MOD_ALT, 'S', L"Ctrl+Alt+S (reading stabilisation)"},
+        {kHotkeyCursorToCenter, MOD_CONTROL | MOD_ALT, 'F', L"Ctrl+Alt+F (cursor to centre)"},
         {kHotkeyQuit, MOD_CONTROL | MOD_ALT, 'Q', L"Ctrl+Alt+Q (quit)"},
         {kHotkeyExitWorkspace, MOD_CONTROL | MOD_SHIFT, VK_OEM_5,
          L"Ctrl+Shift+\\ (exit workspace)"},
@@ -625,6 +684,57 @@ bool bind_desktop_captures(
     }
     captures = std::move(candidate);
     return true;
+}
+
+// Ctrl+Alt+F / the controller's "Cursor to centre": the middle screen is the
+// layout screen nearest straight ahead. Its monitor is re-resolved by device
+// name at use time, because display churn can move desktops after binding.
+void move_cursor_to_center_screen(const gt::Layout& layout,
+                                  const std::vector<std::unique_ptr<gt::DesktopDuplicator>>& captures) {
+    if (captures.empty() || captures.size() != layout.screens.size()) {
+        std::printf("  cursor to centre: no captured desktops in this mode\n");
+        return;
+    }
+    size_t best = 0;
+    float best_offset = 1e9f;
+    for (size_t i = 0; i < layout.screens.size(); ++i) {
+        const float offset = std::fabs(layout.screens[i].yaw_deg) + std::fabs(layout.screens[i].pitch_deg);
+        if (offset < best_offset) {
+            best_offset = offset;
+            best = i;
+        }
+    }
+    if (!captures[best]) {
+        std::printf("  cursor to centre: centre screen has no capture\n");
+        return;
+    }
+    struct Search {
+        const std::wstring* name;
+        RECT rect;
+        bool found;
+    } search{&captures[best]->output_name(), RECT{}, false};
+    EnumDisplayMonitors(
+        nullptr, nullptr,
+        [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
+            auto* found = reinterpret_cast<Search*>(data);
+            MONITORINFOEXW info{};
+            info.cbSize = sizeof(info);
+            if (GetMonitorInfoW(monitor, &info) && *found->name == info.szDevice) {
+                found->rect = info.rcMonitor;
+                found->found = true;
+                return FALSE;
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&search));
+    if (!search.found) {
+        std::printf("  cursor to centre: display %ls is not active\n", search.name->c_str());
+        return;
+    }
+    const int x = (search.rect.left + search.rect.right) / 2;
+    const int y = (search.rect.top + search.rect.bottom) / 2;
+    SetCursorPos(x, y);
+    std::printf("  cursor to centre: screen '%s' at (%d, %d)\n", layout.screens[best].id.c_str(), x, y);
 }
 
 }  // namespace
@@ -1051,7 +1161,8 @@ int wmain(int argc, wchar_t** argv) {
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
     std::printf("global hotkeys: Ctrl+Shift+R recenter, Ctrl+Alt+Y yaw tracking, "
-                "Ctrl+Alt+P pitch tracking, Ctrl+Alt+S reading stabilisation, Ctrl+Alt+Q quit, "
+                "Ctrl+Alt+P pitch tracking, Ctrl+Alt+S reading stabilisation, Ctrl+Alt+F cursor to centre, "
+                "Ctrl+Alt+Q quit, "
                 "Ctrl+Shift:\\ exit workspace\n");
     register_global_hotkeys(hwnd);
 
@@ -1107,13 +1218,17 @@ int wmain(int argc, wchar_t** argv) {
     g_app = &state;
     state.screen_count = static_cast<int>(layout.screens.size());
     state.virtual_displays = opt.virtual_displays;
-    state.stabilise_level = opt.stabilise;
-    gt::apply_reading_hold(state.stabilise_level, state.view_smoother_config);
+    state.comfort = opt.comfort;
+    gt::apply_reading_hold(state.comfort.stabilise_level, state.view_smoother_config);
     state.view_smoother.configure(state.view_smoother_config);
     if (opt.smoothing) {
-        std::printf("reading stabilisation: %s (Ctrl+Alt+S cycles off/low/medium/high)\n",
-                    gt::reading_hold_name(state.stabilise_level));
+        std::printf("reading stabilisation: %s (Ctrl+Alt+S cycles off/low/medium/high/ultra)\n",
+                    gt::reading_hold_name(state.comfort.stabilise_level));
     }
+    std::printf("view comfort: dimming %s (focus dim %d%%), night tint %s (%d%%); "
+                "Ctrl+Alt+F moves the cursor to the centre screen\n",
+                gt::dim_mode_name(state.comfort.dim_mode), state.comfort.focus_dim_pct,
+                state.comfort.night_tint ? "on" : "off", state.comfort.night_tint_pct);
     if (!opt.no_imu) {
         imu.set_sensor_to_head(sensor_to_head);
         std::printf("loaded orientation calibration: %s\n", opt.calibration_path.c_str());
@@ -1169,6 +1284,9 @@ int wmain(int argc, wchar_t** argv) {
     double prev_elapsed = -1.0;
     // Late-pose telemetry (1 Hz line): how old the frame-start pose would
     // have been at render time, and how far the view moved in that interval.
+    // Reused every frame for the focus-dimming screen search (no per-frame
+    // allocation once it has grown to the layout size).
+    std::vector<std::pair<float, float>> screen_centres;
     double late_gap_ms_sum = 0.0;
     double late_diff_deg_sum = 0.0;
     int late_samples = 0;
@@ -1470,6 +1588,32 @@ int wmain(int argc, wchar_t** argv) {
                 (prev_elapsed < 0.0) ? (1.0f / 60.0f) : static_cast<float>(elapsed - prev_elapsed);
             head = state.view_smoother.update(head, frame_dt);
         }
+        // View comfort: per-screen brightness (manual, or focus with a short
+        // fade) times the night tint, recomputed every frame so controller
+        // changes apply immediately.
+        {
+            const float comfort_dt =
+                (prev_elapsed < 0.0) ? (1.0f / 60.0f) : static_cast<float>(elapsed - prev_elapsed);
+            const gt::Euler view = gt::camera_applied_euler(head, signs);
+            screen_centres.clear();
+            for (const gt::ScreenLayout& screen : layout.screens) {
+                screen_centres.emplace_back(screen.yaw_deg, screen.pitch_deg);
+            }
+            const int focused =
+                gt::comfort_focused_screen(screen_centres, view.yaw_deg, view.pitch_deg);
+            const gt::Rgb tint = gt::comfort_tint(state.comfort);
+            const size_t count = std::min(renderer.screen_count(), state.shown_brightness.size());
+            for (size_t i = 0; i < count; ++i) {
+                const float goal = gt::comfort_target_brightness(state.comfort, i, focused);
+                state.shown_brightness[i] = gt::comfort_fade(state.shown_brightness[i], goal, comfort_dt);
+                const float b = state.shown_brightness[i];
+                renderer.set_screen_color(i, b * tint.r, b * tint.g, b * tint.b);
+            }
+        }
+        if (state.cursor_to_center) {
+            state.cursor_to_center = false;
+            move_cursor_to_center_screen(layout, captures);
+        }
         prev_elapsed = elapsed;
         renderer.render(head, opt.fov, static_cast<float>(elapsed));
         if (!renderer.present()) {
@@ -1529,7 +1673,7 @@ int wmain(int argc, wchar_t** argv) {
                 }
                 if (late_samples > 0) {
                     std::printf("  view: stabilise=%s late-pose gain %.1f ms, %.3f deg/frame\n",
-                                opt.smoothing ? gt::reading_hold_name(state.stabilise_level) : "raw",
+                                opt.smoothing ? gt::reading_hold_name(state.comfort.stabilise_level) : "raw",
                                 late_gap_ms_sum / late_samples, late_diff_deg_sum / late_samples);
                     late_gap_ms_sum = 0.0;
                     late_diff_deg_sum = 0.0;
@@ -1588,6 +1732,7 @@ int wmain(int argc, wchar_t** argv) {
     UnregisterHotKey(hwnd, kHotkeyToggleYaw);
     UnregisterHotKey(hwnd, kHotkeyTogglePitch);
     UnregisterHotKey(hwnd, kHotkeyCycleStabilise);
+    UnregisterHotKey(hwnd, kHotkeyCursorToCenter);
     UnregisterHotKey(hwnd, kHotkeyQuit);
     UnregisterHotKey(hwnd, kHotkeyExitWorkspace);
     if (diagnostics.is_open()) {

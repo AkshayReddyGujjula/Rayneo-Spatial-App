@@ -34,7 +34,8 @@ float quat_angle_deg(const Quat& q) {
 }
 
 const char* reading_hold_name(int level) {
-    static const char* const kNames[kReadingHoldLevels] = {"off", "low", "medium", "high"};
+    static const char* const kNames[kReadingHoldLevels] = {"off", "low", "medium", "high",
+                                                           "ultra"};
     return kNames[std::clamp(level, 0, kReadingHoldLevels - 1)];
 }
 
@@ -45,6 +46,11 @@ void apply_reading_hold(int level, PoseSmoother::Config& config) {
         {0.1f, 0.25f, 1.5f},
         {0.2f, 0.45f, 3.0f},
         {0.3f, 0.6f, 4.0f},
+        // Ultra: the knee of the stability/lag curve on the worn sessions.
+        // Past a 1.0 deg inner radius text motion barely improves (1.5/2.5/30:
+        // 2.3 -> 1.7 px/s) while turn lag and resting offset keep growing, and
+        // a long settle leak matters because the leak is itself visible motion.
+        {1.0f, 1.6f, 20.0f},
     };
     const float* p = kPresets[std::clamp(level, 0, kReadingHoldLevels - 1)];
     config.hold_inner_deg = p[0];

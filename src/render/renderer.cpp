@@ -36,6 +36,11 @@ cbuffer CursorInfo : register(b1) {
     float3 g_cursor_padding;
 };
 
+// Per-screen colour multiplier: brightness (dimming) times the night tint.
+cbuffer ScreenColor : register(b2) {
+    float4 g_screen_color;
+};
+
 struct VSInput {
     float3 pos : POSITION;
     float4 color : COLOR;
@@ -61,10 +66,11 @@ PSInput vs_main(VSInput input) {
 }
 
 float4 ps_main(PSInput input) : SV_TARGET {
-    return g_texture.Sample(g_sampler, input.uv) * input.color;
+    float4 texel = g_texture.Sample(g_sampler, input.uv) * input.color;
+    return float4(texel.rgb * g_screen_color.rgb, texel.a);
 }
 
-float4 ps_cursor(PSInput input) : SV_TARGET {
+float4 ps_cursor_raw(PSInput input) {
     float4 cursor = g_texture.Sample(g_sampler, input.uv);
     float2 desktop_uv = g_cursor_rect.xy + input.uv * g_cursor_rect.zw;
     float4 desktop = g_desktop.Sample(g_sampler, desktop_uv);
@@ -84,6 +90,11 @@ float4 ps_cursor(PSInput input) : SV_TARGET {
     float3 composed = desktop.rgb * and_mask;
     composed = xor_mask > 0.5f ? 1.0f - composed : composed;
     return float4(composed, 1.0f);
+}
+
+float4 ps_cursor(PSInput input) : SV_TARGET {
+    float4 c = ps_cursor_raw(input);
+    return float4(c.rgb * g_screen_color.rgb, c.a);
 }
 )";
 
@@ -429,6 +440,11 @@ bool Renderer::init(HWND hwnd, uint32_t width, uint32_t height, std::string& err
         error = "cursor constant buffer creation failed";
         return false;
     }
+    cb_desc.ByteWidth = 16;
+    if (FAILED(device_->CreateBuffer(&cb_desc, nullptr, &screen_color_buffer_))) {
+        error = "screen colour constant buffer creation failed";
+        return false;
+    }
 
     D3D11_RASTERIZER_DESC rast{};
     rast.FillMode = D3D11_FILL_SOLID;
@@ -574,6 +590,7 @@ void Renderer::shutdown() {
     cursor_vertex_buffer_.Reset();
     constant_buffer_.Reset();
     cursor_constant_buffer_.Reset();
+    screen_color_buffer_.Reset();
     rasterizer_.Reset();
     depth_state_.Reset();
     cursor_depth_state_.Reset();
@@ -627,10 +644,13 @@ void Renderer::render(const Quat& head, float fov_horizontal_deg, float time_s) 
     context_->UpdateSubresource(constant_buffer_.Get(), 0, nullptr, &matrix, 0, 0);
 
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11Buffer* color_buffers[] = {screen_color_buffer_.Get()};
+    context_->PSSetConstantBuffers(2, 1, color_buffers);
     for (const ScreenDraw& screen : screen_draws_) {
         ID3D11ShaderResourceView* texture[] = {
             screen.live_texture ? screen.live_texture.Get() : screen.label_texture.Get()};
         context_->PSSetShaderResources(0, 1, texture);
+        context_->UpdateSubresource(screen_color_buffer_.Get(), 0, nullptr, screen.color, 0, 0);
         context_->Draw(6, screen.vertex_start);
     }
 
@@ -705,6 +725,8 @@ void Renderer::render(const Quat& head, float fov_horizontal_deg, float time_s) 
                 constants.mode = static_cast<uint32_t>(screen.cursor_mode);
                 context_->UpdateSubresource(cursor_constant_buffer_.Get(), 0, nullptr, &constants,
                                             0, 0);
+                context_->UpdateSubresource(screen_color_buffer_.Get(), 0, nullptr, screen.color, 0,
+                                            0);
                 ID3D11ShaderResourceView* textures[] = {screen.cursor_view.Get(),
                                                         screen.live_texture.Get()};
                 context_->PSSetShaderResources(0, 2, textures);

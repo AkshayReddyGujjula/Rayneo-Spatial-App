@@ -7,6 +7,7 @@
 // display or HID device is touched.
 
 #include "app/engine_protocol.h"
+#include "app/view_comfort.h"
 #include "app_shell/app_config.h"
 #include "app_shell/app_layout.h"
 #include "app_shell/engine_commands.h"
@@ -15,6 +16,7 @@
 #include "app_shell/ui_help.h"
 #include "app_shell/ui_orbit.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cwchar>
@@ -78,6 +80,9 @@ void test_engine_protocol() {
         gt::kEngineMessageQuery,      gt::kEngineMessageQuit,
         gt::kEngineMessageRecenter,   gt::kEngineMessageToggleYaw,
         gt::kEngineMessageTogglePitch, gt::kEngineMessageReloadLayout,
+        gt::kEngineMessageSetStabilise, gt::kEngineMessageSetDimMode,
+        gt::kEngineMessageSetScreenBrightness, gt::kEngineMessageSetNightTint,
+        gt::kEngineMessageCursorToCenter,
     };
     std::set<unsigned> seen;
     bool all_private = true;
@@ -97,6 +102,11 @@ void test_engine_protocol() {
                gt::kEngineFlagVirtualDisplays | gt::kEngineFlagHeadTracking |
                gt::kEngineFlagTopologyTakeover) == 0x1Fu,
           "query reply bit layout is stable");
+    check((gt::kEngineStabiliseMask & gt::kEngineScreenCountMask) == 0 &&
+              (gt::kEngineStabiliseMask & 0x1Fu) == 0 &&
+              (gt::kEngineStabiliseMask >> gt::kEngineStabiliseShift) >=
+                  static_cast<unsigned>(gt::kComfortStabiliseLevels),
+          "stabilise level field fits beside the flags and screen count");
 
     const std::wstring aumid(gt::app_user_model_id());
     check(!aumid.empty() && aumid.size() <= 128 && aumid.find(L' ') == std::wstring::npos,
@@ -758,6 +768,147 @@ void test_orbit() {
 
 }  // namespace
 
+void test_view_comfort(const std::filesystem::path& directory) {
+    std::printf("app_selftest: view comfort (stabilisation, dimming, night tint)\n");
+    std::string error;
+    const gt::ViewComfort defaults;
+    check(gt::validate_view_comfort(defaults, error), "default view comfort validates");
+    check(defaults.stabilise_level == 2 && defaults.dim_mode == gt::DimMode::Off &&
+              !defaults.night_tint,
+          "defaults: medium stabilisation, dimming and night tint off");
+    std::vector<std::string> args;
+    gt::append_view_comfort_args(defaults, args);
+    check(args.empty(), "default comfort adds no engine switches (historical command line)");
+    check(std::string(gt::stabilise_level_name(4)) == "ultra" &&
+              std::string(gt::stabilise_level_name(0)) == "off",
+          "stabilisation names cover off..ultra");
+
+    gt::ViewComfort bad = defaults;
+    bad.stabilise_level = 5;
+    check(!gt::validate_view_comfort(bad, error), "stabilisation beyond ultra is rejected");
+    bad = defaults;
+    bad.screen_brightness_pct[3] = 5;
+    check(!gt::validate_view_comfort(bad, error), "brightness below the 10 % floor is rejected");
+    bad = defaults;
+    bad.night_tint_pct = 101;
+    check(!gt::validate_view_comfort(bad, error), "night tint above 100 % is rejected");
+
+    // Every non-default setting survives the engine command line.
+    auto round_trip = [&](const gt::ViewComfort& in, gt::ViewComfort& out) {
+        std::vector<std::string> list;
+        gt::append_view_comfort_args(in, list);
+        std::vector<char*> argv;
+        argv.push_back(const_cast<char*>("spatial_desk"));
+        for (std::string& item : list) {
+            argv.push_back(item.data());
+        }
+        out = gt::ViewComfort{};
+        for (int i = 1; i < static_cast<int>(argv.size()); ++i) {
+            bool handled = false;
+            if (!gt::parse_view_comfort_arg(static_cast<int>(argv.size()), argv.data(), i, out,
+                                            handled, error) ||
+                !handled) {
+                return false;
+            }
+        }
+        return true;
+    };
+    gt::ViewComfort manual;
+    manual.stabilise_level = 4;
+    manual.dim_mode = gt::DimMode::Manual;
+    manual.screen_brightness_pct = {60, 100, 35, 100, 100, 100, 100, 10};
+    manual.night_tint = true;
+    manual.night_tint_pct = 70;
+    gt::ViewComfort parsed;
+    check(round_trip(manual, parsed) && parsed == manual,
+          "ultra + manual dimming + night tint round-trip through the engine switches");
+    gt::ViewComfort focus;
+    focus.stabilise_level = 3;
+    focus.dim_mode = gt::DimMode::Focus;
+    focus.focus_dim_pct = 25;
+    check(round_trip(focus, parsed) && parsed.dim_mode == gt::DimMode::Focus &&
+              parsed.focus_dim_pct == 25 && parsed.stabilise_level == 3 && !parsed.night_tint,
+          "focus dimming round-trips");
+    {
+        char name[] = "--screen-brightness";
+        char value[] = "50,abc";
+        char* argv[] = {name, value};
+        int index = 0;
+        bool handled = false;
+        gt::ViewComfort target;
+        check(!gt::parse_view_comfort_arg(2, argv, index, target, handled, error) && handled,
+              "malformed brightness list is rejected");
+    }
+
+    // Maths the renderer uses.
+    const gt::Rgb neutral = gt::night_tint_rgb(0);
+    const gt::Rgb warm = gt::night_tint_rgb(100);
+    check(neutral.r == 1.0f && neutral.g == 1.0f && neutral.b == 1.0f, "0 % tint is neutral");
+    check(warm.r == 1.0f && warm.g < 1.0f && warm.b < warm.g && warm.b > 0.2f,
+          "full tint keeps red, cuts green a little and blue most");
+    check(gt::comfort_tint(defaults).b == 1.0f, "tint off is neutral whatever its strength");
+    const std::vector<std::pair<float, float>> triple = {{-45.0f, 0.0f}, {0.0f, 0.0f}, {45.0f, 0.0f}};
+    check(gt::comfort_focused_screen(triple, 40.0f, 5.0f) == 2 &&
+              gt::comfort_focused_screen(triple, -3.0f, -10.0f) == 1 &&
+              gt::comfort_focused_screen(triple, -30.0f, 0.0f) == 0 &&
+              gt::comfort_focused_screen({}, 0.0f, 0.0f) == -1,
+          "focused screen is the nearest centre");
+    check(gt::comfort_target_brightness(focus, 0, 1) == 0.25f &&
+              gt::comfort_target_brightness(focus, 1, 1) == 1.0f &&
+              gt::comfort_target_brightness(focus, 0, -1) == 1.0f,
+          "focus dimming keeps the looked-at screen bright");
+    check(gt::comfort_target_brightness(manual, 2, 1) == 0.35f &&
+              gt::comfort_target_brightness(defaults, 2, 1) == 1.0f,
+          "manual brightness per screen; off is full brightness");
+    auto fade_for = [](int hz) {
+        float value = 1.0f;
+        for (int i = 0; i < hz / 2; ++i) {
+            value = gt::comfort_fade(value, 0.2f, 1.0f / static_cast<float>(hz));
+        }
+        return value;
+    };
+    // Two time constants (0.5 s at tau 0.25 s): 0.2 + 0.8 * e^-2, at any frame rate.
+    const float expected_fade = 0.2f + 0.8f * std::exp(-2.0f);
+    check(std::fabs(fade_for(30) - expected_fade) < 1e-3f &&
+              std::fabs(fade_for(120) - expected_fade) < 1e-3f,
+          "focus fade follows its time constant at any frame rate");
+
+    // Persistence: survives app.json, and a file without the block loads defaults.
+    gt::AppConfig config;
+    config.comfort = manual;
+    const std::filesystem::path path = directory / "comfort-app.json";
+    gt::AppConfig loaded;
+    check(gt::save_app_config(path, config, error) && gt::load_app_config(path, loaded, error) &&
+              loaded.comfort == manual,
+          "view comfort persists in app.json");
+    {
+        std::ofstream legacy(directory / "comfort-legacy.json");
+        legacy << "{\"version\": 1}\n";
+    }
+    check(gt::load_app_config(directory / "comfort-legacy.json", loaded, error) &&
+              loaded.comfort == gt::ViewComfort{},
+          "an app.json written before view comfort loads the defaults");
+    {
+        std::ofstream broken(directory / "comfort-broken.json");
+        broken << "{\"version\": 1, \"view_comfort\": {\"stabilise\": \"max\"}}\n";
+    }
+    check(!gt::load_app_config(directory / "comfort-broken.json", loaded, error),
+          "an unknown stabilisation name is rejected");
+
+    // The launch command carries non-default comfort, validated first.
+    gt::EngineLaunchCommand command;
+    check(gt::build_engine_launch_command("C:\\s\\spatial_desk.exe", "C:\\s", "l.json", "o.json",
+                                          "", "", "", gt::LaunchMode::Workspace, true, -1, 0.0f,
+                                          command, error, focus) &&
+              std::find(command.arguments.begin(), command.arguments.end(), "--dim-mode") !=
+                  command.arguments.end(),
+          "launch command carries the comfort switches");
+    check(!gt::build_engine_launch_command("C:\\s\\spatial_desk.exe", "C:\\s", "l.json", "o.json",
+                                           "", "", "", gt::LaunchMode::Workspace, true, -1, 0.0f,
+                                           command, error, bad),
+          "launch refuses invalid comfort settings");
+}
+
 int main() {
     std::printf("app_selftest: controller app model\n");
     std::filesystem::path directory;
@@ -786,6 +937,7 @@ int main() {
     test_field_normalisation();
     test_log_rotation(directory);
     test_telemetry();
+    test_view_comfort(directory);
 
     std::filesystem::remove_all(directory, directory_error);
     std::printf("app_selftest: %s (%d failures)\n", failures == 0 ? "PASS" : "FAIL", failures);

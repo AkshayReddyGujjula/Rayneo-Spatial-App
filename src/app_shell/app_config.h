@@ -8,6 +8,8 @@
 // written, and writes go through a temporary file plus MoveFileEx so a crash or
 // a full disk can never leave a half-written preference file behind.
 
+#include "app/view_comfort.h"
+
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -58,6 +60,7 @@ struct AppConfig {
     std::string last_engine_error;
     WindowPlacement window;
     SplitFractions splits;
+    ViewComfort comfort;  // reading stabilisation, dimming, night tint
 };
 
 inline constexpr int kMinHealthPollMs = 500;

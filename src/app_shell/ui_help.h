@@ -54,6 +54,13 @@ enum class HelpTopic {
     HeaderRefresh,
     EditorFullscreen,
     EditorDimToggle,
+    ComfortStabilise,
+    ComfortDimMode,
+    ComfortBrightness,
+    ComfortFocusDim,
+    ComfortNightTint,
+    ComfortNightStrength,
+    ComfortCursorCenter,
     Count,
 };
 
@@ -209,6 +216,29 @@ inline const wchar_t* help_text(HelpTopic topic) {
         case HelpTopic::HeaderRefresh:
             return L"Re-runs all health checks and re-reads config files from disk. Press "
                    L"it after editing JSON by hand or reconnecting hardware.";
+        case HelpTopic::ComfortStabilise:
+            return L"Holds the screens steady while your head is nearly still, so small text "
+                   L"stops swimming. Higher levels hold harder but trail a little more when you "
+                   L"turn; Ultra is the maximum. Ctrl+Alt+S cycles it live.";
+        case HelpTopic::ComfortDimMode:
+            return L"Off: every screen at full brightness. Manual: each screen at its own "
+                   L"slider. Focus: the screen you look at stays bright and the others dim, "
+                   L"fading as you turn.";
+        case HelpTopic::ComfortBrightness:
+            return L"Brightness of this screen in Manual dimming. Lower dims it; 10% is the "
+                   L"floor so a screen never disappears.";
+        case HelpTopic::ComfortFocusDim:
+            return L"In Focus dimming, how bright the screens you are not looking at stay. "
+                   L"Lower makes the looked-at screen stand out more.";
+        case HelpTopic::ComfortNightTint:
+            return L"Warms all screens by cutting blue (and some green) light, for evening "
+                   L"use. Applies live.";
+        case HelpTopic::ComfortNightStrength:
+            return L"How warm the night tint is. Higher removes more blue; 100% is roughly a "
+                   L"warm-white lamp.";
+        case HelpTopic::ComfortCursorCenter:
+            return L"Moves the mouse pointer to the middle of the centre screen. The global "
+                   L"hotkey Ctrl+Alt+F does the same while the workspace runs.";
         case HelpTopic::Count:
             break;
     }

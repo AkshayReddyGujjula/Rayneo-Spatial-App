@@ -33,6 +33,17 @@ inline constexpr unsigned kEngineMessageRecenter = kEngineMessageBase + 0x103u;
 inline constexpr unsigned kEngineMessageToggleYaw = kEngineMessageBase + 0x104u;
 inline constexpr unsigned kEngineMessageTogglePitch = kEngineMessageBase + 0x105u;
 inline constexpr unsigned kEngineMessageReloadLayout = kEngineMessageBase + 0x106u;
+// View comfort (app/view_comfort.h), applied live. Integer payloads only.
+//   SetStabilise        wParam = level 0..4
+//   SetDimMode          wParam = DimMode, lParam = focus-dim brightness %
+//   SetScreenBrightness wParam = screen index, lParam = brightness %
+//   SetNightTint        wParam = strength %, 0 = off
+//   CursorToCenter      no payload: cursor to the middle of the centre screen
+inline constexpr unsigned kEngineMessageSetStabilise = kEngineMessageBase + 0x107u;
+inline constexpr unsigned kEngineMessageSetDimMode = kEngineMessageBase + 0x108u;
+inline constexpr unsigned kEngineMessageSetScreenBrightness = kEngineMessageBase + 0x109u;
+inline constexpr unsigned kEngineMessageSetNightTint = kEngineMessageBase + 0x10Au;
+inline constexpr unsigned kEngineMessageCursorToCenter = kEngineMessageBase + 0x10Bu;
 
 // Reply bits returned by kEngineMessageQuery. The low bits are engine state
 // flags, the next byte is the layout screen count.
@@ -43,6 +54,11 @@ inline constexpr unsigned kEngineFlagHeadTracking = 1u << 3;
 inline constexpr unsigned kEngineFlagTopologyTakeover = 1u << 4;
 inline constexpr unsigned kEngineScreenCountShift = 8;
 inline constexpr unsigned kEngineScreenCountMask = 0xFFu << kEngineScreenCountShift;
+// Live reading-stabilisation level (so a Ctrl+Alt+S press in the engine is
+// reflected, and remembered, by the controller). Stored as level + 1 so an
+// older engine that leaves these bits at zero reads as "unknown".
+inline constexpr unsigned kEngineStabiliseShift = 16;
+inline constexpr unsigned kEngineStabiliseMask = 0xFu << kEngineStabiliseShift;
 
 inline constexpr wchar_t kEngineWindowClass[] = L"RayNeoSpatialDesk";
 inline constexpr wchar_t kEngineWindowTitle[] = L"RayNeo Spatial Desk";

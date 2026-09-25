@@ -201,6 +201,67 @@ bool clamp_loaded(AppConfig& config, std::string& error) {
     return true;
 }
 
+Json comfort_to_json(const ViewComfort& comfort) {
+    return Json{
+        {"stabilise", stabilise_level_name(comfort.stabilise_level)},
+        {"dim_mode", dim_mode_name(comfort.dim_mode)},
+        {"screen_brightness_pct", comfort.screen_brightness_pct},
+        {"focus_dim_pct", comfort.focus_dim_pct},
+        {"night_tint", comfort.night_tint},
+        {"night_tint_pct", comfort.night_tint_pct},
+    };
+}
+
+// Optional object; a file written before it existed loads the defaults.
+bool read_comfort(const Json& document, ViewComfort& comfort, std::string& error) {
+    if (!document.contains("view_comfort")) {
+        return true;
+    }
+    const Json& node = document.at("view_comfort");
+    if (!node.is_object()) {
+        error = "field 'view_comfort' must be an object";
+        return false;
+    }
+    if (node.contains("stabilise")) {
+        const Json& value = node.at("stabilise");
+        bool matched = false;
+        for (int level = 0; value.is_string() && level < kComfortStabiliseLevels; ++level) {
+            if (value.get<std::string>() == stabilise_level_name(level)) {
+                comfort.stabilise_level = level;
+                matched = true;
+            }
+        }
+        if (!matched) {
+            error = "view_comfort.stabilise must be off, low, medium, high or ultra";
+            return false;
+        }
+    }
+    if (node.contains("dim_mode")) {
+        const Json& value = node.at("dim_mode");
+        if (!value.is_string() || !parse_dim_mode(value.get<std::string>(), comfort.dim_mode)) {
+            error = "view_comfort.dim_mode must be off, manual or focus";
+            return false;
+        }
+    }
+    if (node.contains("screen_brightness_pct")) {
+        const Json& list = node.at("screen_brightness_pct");
+        if (!list.is_array() || list.size() > comfort.screen_brightness_pct.size()) {
+            error = "view_comfort.screen_brightness_pct must be an array of up to 8 values";
+            return false;
+        }
+        for (size_t i = 0; i < list.size(); ++i) {
+            if (!list[i].is_number_integer()) {
+                error = "view_comfort.screen_brightness_pct values must be integers";
+                return false;
+            }
+            comfort.screen_brightness_pct[i] = list[i].get<int>();
+        }
+    }
+    return read_int(node, "focus_dim_pct", comfort.focus_dim_pct, error) &&
+           read_bool(node, "night_tint", comfort.night_tint, error) &&
+           read_int(node, "night_tint_pct", comfort.night_tint_pct, error);
+}
+
 }  // namespace
 
 const char* launch_mode_text(LaunchMode mode) {
@@ -283,6 +344,9 @@ bool validate_app_config(const AppConfig& config, std::string& error) {
         error = "last_engine_error must be at most 2048 characters";
         return false;
     }
+    if (!validate_view_comfort(config.comfort, error)) {
+        return false;
+    }
     if (config.window.width < 320 || config.window.width > 32768 ||
         config.window.height < 240 || config.window.height > 32768) {
         error = "window dimensions are out of range";
@@ -308,6 +372,7 @@ std::string app_config_to_json_text(const AppConfig& config) {
         {"last_engine_error", config.last_engine_error},
         {"window", window_to_json(config.window)},
         {"splits", splits_to_json(config.splits)},
+        {"view_comfort", comfort_to_json(config.comfort)},
     };
     return document.dump(2) + "\n";
 }
@@ -380,6 +445,9 @@ bool load_app_config(const std::filesystem::path& path, AppConfig& config, std::
         }
     }
     if (!read_splits(document, parsed.splits, error)) {
+        return false;
+    }
+    if (!read_comfort(document, parsed.comfort, error)) {
         return false;
     }
     if (!clamp_loaded(parsed, error) || !validate_app_config(parsed, error)) {

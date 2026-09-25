@@ -172,7 +172,7 @@ bool start_engine(AppState& state, LaunchMode mode, std::wstring& error) {
             narrow_utf8(state.paths.layout_path), narrow_utf8(state.paths.calibration_path),
             narrow_utf8(state.paths.engine_status), narrow_utf8(state.paths.engine_log),
             narrow_utf8(state.paths.telemetry_log), mode, head_tracking, state.config.monitor_index,
-            0.0f, command, build_error)) {
+            0.0f, command, build_error, state.config.comfort)) {
         error = wide_from_utf8(build_error);
         return false;
     }
@@ -386,9 +386,68 @@ bool reload_app_config(AppState& state, std::wstring& error) {
     return true;
 }
 
+void push_comfort_setting(AppState& state, int ui_id) {
+    if (!state.engine.busy()) {
+        return;
+    }
+    const ViewComfort& comfort = state.config.comfort;
+    std::string error;
+    bool sent = true;
+    if (ui_id >= kUiStabiliseBase && ui_id < kUiStabiliseBase + kComfortStabiliseLevels) {
+        sent = state.engine.send_command(kEngineMessageSetStabilise,
+                                         static_cast<WPARAM>(comfort.stabilise_level), 0, error);
+    } else if ((ui_id >= kUiDimModeBase && ui_id < kUiDimModeBase + kDimModeCount) ||
+               ui_id == kUiFocusDim) {
+        sent = state.engine.send_command(kEngineMessageSetDimMode,
+                                         static_cast<WPARAM>(comfort.dim_mode),
+                                         static_cast<LPARAM>(comfort.focus_dim_pct), error);
+        // Manual mode needs every slider value, not only the ones moved since launch.
+        for (size_t i = 0; sent && i < comfort.screen_brightness_pct.size(); ++i) {
+            sent = state.engine.send_command(kEngineMessageSetScreenBrightness,
+                                             static_cast<WPARAM>(i),
+                                             static_cast<LPARAM>(comfort.screen_brightness_pct[i]),
+                                             error);
+        }
+    } else if (ui_id >= kUiBrightnessBase && ui_id < kUiBrightnessBase + kComfortMaxScreens) {
+        const size_t index = static_cast<size_t>(ui_id - kUiBrightnessBase);
+        sent = state.engine.send_command(kEngineMessageSetScreenBrightness,
+                                         static_cast<WPARAM>(index),
+                                         static_cast<LPARAM>(comfort.screen_brightness_pct[index]),
+                                         error);
+    } else if (ui_id == kUiNightTint || ui_id == kUiNightTintStrength) {
+        sent = state.engine.send_command(
+            kEngineMessageSetNightTint,
+            static_cast<WPARAM>(comfort.night_tint ? comfort.night_tint_pct : 0), 0, error);
+    }
+    if (!sent) {
+        state.add_event(L"view comfort not applied live (" + wide_from_utf8(error) +
+                        L"); it applies on the next start");
+    }
+}
+
 void poll_engine(AppState& state) {
     const EngineProcessState previous = state.engine.snapshot().state;
     state.engine.poll(state.now_s);
+
+    // Adopt a stabilisation level changed inside the engine (Ctrl+Alt+S), so
+    // the dashboard shows it and the next start keeps it.
+    {
+        const EngineSnapshot& snapshot = state.engine.snapshot();
+        const unsigned reported =
+            (snapshot.query_flags & kEngineStabiliseMask) >> kEngineStabiliseShift;
+        if (snapshot.state == EngineProcessState::Running && snapshot.query_answered &&
+            reported >= 1 && reported <= static_cast<unsigned>(kComfortStabiliseLevels) &&
+            static_cast<int>(reported) - 1 != state.config.comfort.stabilise_level) {
+            state.config.comfort.stabilise_level = static_cast<int>(reported) - 1;
+            std::wstring ignored;
+            if (state.config_valid) {
+                save_config_to_disk(state, ignored);
+            }
+            state.add_event(L"reading stabilisation set to " +
+                            wide_from_utf8(stabilise_level_name(state.config.comfort.stabilise_level)) +
+                            L" in the engine");
+        }
+    }
 
     // While the engine runs steady, track the live taskbar state so a
     // mid-session user change becomes the value handed back (never during

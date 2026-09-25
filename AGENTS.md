@@ -206,6 +206,7 @@ change.
 | 5-min computer use, net-zero yaw (scenario 16) | 0.038 deg drift (0.285 pre-fix); bias err 0.023 deg/s; adapt duty 77% | drift < 3.0 deg |
 | 20 look-arounds and back (scenario 18) | 0.62 deg final (1.44 pre-fix) | abs(final) < 1.0 deg |
 | Reading hold, medium preset (scenario 19) | 0.08 deg / 0.4 Hz sway: 0.654 -> 0.090 deg text motion; turn catch-up 0.017 deg; settle 0.029 deg | < 30% of 1-euro; < 0.05 deg; < 0.05 deg |
+| Ultra reading hold (scenario 19 + worn session 2, 266 s of reading) | sway 0.3 deg: medium 0.536 -> ultra 0.058 deg; catch-up 0.028 deg; 60 s settle 0.065 deg. Replay: high 5.4 -> ultra 2.3 px/s, p95 step 0.009 -> 0.003 deg, turn lag 1.70 -> 2.59 deg rms. Past a 1.0 deg inner radius gains flatten (1.5/2.5: 1.7 px/s, 3.4 deg lag) | < 50% of medium; < 0.05; < 0.1 deg |
 | Reading hold on the worn 2026-09-25 session (`imu_replay --smooth-eval --stabilise N`, 235 s of reading) | off/low/medium/high: 31.0 / 11.1 / 6.7 / 5.2 px/s text motion; p95 frame step 0.025 / 0.015 / 0.010 / 0.008 deg; turn lag rms 1.18 / 1.40 / 1.57 / 1.71 deg | measured, not asserted |
 | Mag lock lag on the same session (10 s mean of the lock error) | tau 20: rms 1.07, p95 1.77 deg; tau 10: rms 0.59, p95 0.86 deg; tau 6: 0.44 / 0.55 deg; reading jitter 31.0 px/s at all three | measured, not asserted |
 | Noiseless pan-return closure (scenario 17) | +/-0.025 deg final | abs(final) < 0.05 deg |
@@ -269,7 +270,7 @@ Run inside the MSVC environment: `call "C:\Program Files (x86)\Microsoft Visual 
 | `layout_selftest` | Layout parsing/validation, geometry, capture-policy constraints |
 | `vdd_selftest` | Parsec VDD protocol, cleanup order, index parsing |
 | `view_selftest` | Offline "virtual glasses": real layout + real camera maths projected to NDC, numeric assertions, and 640x360 PPM frames in `scratch/` |
-| `app_selftest` | Controller app model: engine command contract, status protocol + freshness gate, preference validation/persistence, presets, field normalisation, 3D face selection and view-plane drag, depth slider scale, log rotation, telemetry tail |
+| `app_selftest` | Controller app model: engine command contract, status protocol + freshness gate, preference validation/persistence, presets, field normalisation, 3D face selection and view-plane drag, depth slider scale, log rotation, telemetry tail, view comfort (ranges, engine switch round-trip, tint/focus/fade maths, app.json persistence) |
 | `mag_heading_selftest` | Magnetometer heading lock closed loop (stale bias bounded, integral removes lag, rate limit, disturbance rejected with zero view motion, new environment re-acquired without a jump) and the gyro-constrained hard-iron fit (recovery + rejection) |
 
 Every fix MUST come with a regression test that fails without it. Synthetic IMU scenarios live in
