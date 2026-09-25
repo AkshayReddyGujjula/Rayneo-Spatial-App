@@ -2,6 +2,7 @@
 
 #include "imu/fusion.h"
 #include "imu/gt_protocol.h"
+#include "imu/mag_heading.h"
 
 #include <array>
 #include <cstdint>
@@ -64,6 +65,19 @@ public:
         float rest_accel_dev_mps2 = 0.5f;
         float motion_accel_dev_mps2 = 1.0f;
         float still_hold_s = 0.5f;
+        // Raw-rate ceiling for rest. The deviation gates measure fluctuation,
+        // not rotation, so a smooth steady turn (a chair turn, a slow pan to a
+        // side screen) passed them: measured 2026-09-25, a 360 deg chair turn
+        // at ~15 deg/s qualified as rest and the escape walked the yaw bias
+        // from 0.43 to the 1.5 clamp and then to -0.49 deg/s (a 0.9 deg/s
+        // error, ~54 deg/min drift, after one turn). The true bias is bounded
+        // by bias_limit_degs per axis (norm <= 2.6 deg/s), so a raw rate above
+        // this cannot be rest. This is a RAW gate, deliberately permissive, so
+        // a stale estimate can never lock adaptation out (bug 3/7). It applies
+        // after startup calibration only: the startup window has its own tight
+        // gates, and an out-of-band bias must still finish calibrating.
+        float rest_raw_rate_limit_degs = 3.0f;
+        float motion_raw_rate_degs = 4.0f;
         float fast_ema_tau_s = 0.2f;
         float dev_ema_tau_s = 0.5f;
         // Falling-edge time constant for the deviation smoothing. The rising
@@ -124,6 +138,13 @@ public:
         // Legacy flag, ignored: the pose path is always live (the published
         // pose integrates the corrected gyro every sample) and never freezes.
         bool freeze_when_still = false;
+        // Magnetometer heading lock (the absolute yaw reference). Active only
+        // with a valid per-device calibration: without the hard-iron offset
+        // the raw field is meaningless (bias of ~25 uT on a ~51 uT field).
+        MagCalibration mag_calibration;
+        bool mag_heading_lock = true;
+        MagHeadingLock::Config mag_lock;
+
         bool map_package_axes = true;
         std::array<float, 9> sensor_to_head{
             1.0f, 0.0f, 0.0f,
@@ -155,6 +176,8 @@ public:
     float accel_dev_mps2() const { return accel_dev_mps2_; }
     float corrected_rate_degs() const { return corrected_rate_degs_; }
     uint32_t escape_rollbacks() const { return escape_rollbacks_; }
+    bool mag_lock_active() const { return mag_lock_active_; }
+    const MagHeadingLock& mag_lock() const { return mag_lock_; }
     float drift_correction_degs() const;
     Euler euler() const;
     Quat quat() const;
@@ -169,8 +192,14 @@ private:
     void finish_calibration();
     void set_reference(const Quat& q);
 
+    void apply_mag_heading(const ImuSample& sample, float dt);
+
     Config cfg_;
     MadgwickFilter filter_;
+    MagHeadingLock mag_lock_;
+    bool mag_lock_active_ = false;
+    Vec3 last_mag_raw_;
+    bool have_last_mag_ = false;
 
     // Startup calibration.
     int warmup_samples_ = 0;

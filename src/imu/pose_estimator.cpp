@@ -46,6 +46,9 @@ void PoseEstimator::configure(const Config& cfg) {
     cfg_ = cfg;
     filter_.reset();
     filter_.set_beta(cfg.beta);
+    mag_lock_active_ = cfg.mag_heading_lock && cfg.mag_calibration.valid;
+    mag_lock_.configure(cfg.mag_lock);
+    have_last_mag_ = false;
 
     warmup_samples_ = 0;
     calibration_phase_s_ = 0.0f;
@@ -170,10 +173,13 @@ void PoseEstimator::update_rest_detector(const Vec3& raw, const Vec3& accel, flo
     // motion look quieter merely because it was split across sensor axes.
     stillness_degs_ = vec_norm(gyro_dev_ema_);
     accel_dev_mps2_ = vec_norm(accel_dev_ema_);
+    const float raw_rate = bias_done_ ? vec_norm(gyro_lpf_) : 0.0f;
     const bool quiet = stillness_degs_ < cfg_.rest_gyro_dev_degs &&
-                       accel_dev_mps2_ < cfg_.rest_accel_dev_mps2;
+                       accel_dev_mps2_ < cfg_.rest_accel_dev_mps2 &&
+                       raw_rate < cfg_.rest_raw_rate_limit_degs;
     const bool motion = stillness_degs_ > cfg_.motion_dev_threshold_degs ||
-                        accel_dev_mps2_ > cfg_.motion_accel_dev_mps2;
+                        accel_dev_mps2_ > cfg_.motion_accel_dev_mps2 ||
+                        raw_rate > cfg_.motion_raw_rate_degs;
     rest_now_ = quiet;
     if (motion) {
         still_time_ = 0.0f;
@@ -219,6 +225,7 @@ void PoseEstimator::finish_calibration() {
 
     // Restart the fusion from a clean, gravity-aligned state.
     filter_.reset();
+    mag_lock_.reset();
     have_tick_ = false;
     have_ref_ = false;
     initialized_ = false;
@@ -420,6 +427,9 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
     gyro.z *= kRadPerDeg;
 
     filter_.update(gyro, map_accel(sample.accel_mps2), map_mag(sample.mag_ut), cfg_.mag_weight, dt);
+    if (mag_lock_active_) {
+        apply_mag_heading(sample, dt);
+    }
 
     // Drift absorption is opt-in: while the head is still, each *slow*
     // incremental rotation is absorbed fully into a correction subtracted from
@@ -457,6 +467,32 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
     }
     ++fused_;
     return true;
+}
+
+static Vec3 quat_rotate_vec(const Quat& q, const Vec3& v) {
+    const Quat p{0.0f, v.x, v.y, v.z};
+    const Quat r = quat_multiply(quat_multiply(q, p), quat_conjugate(q));
+    return Vec3{r.x, r.y, r.z};
+}
+
+// The heading lock sees the calibrated field in the earth frame of the current
+// estimate and returns a small rotation about earth Z. It is premultiplied onto
+// the filter state, so it changes yaw only and the published pose stays
+// continuous (the correction is rate-limited, never a snap).
+void PoseEstimator::apply_mag_heading(const ImuSample& sample, float dt) {
+    const bool fresh = !have_last_mag_ || sample.mag_ut.x != last_mag_raw_.x ||
+                       sample.mag_ut.y != last_mag_raw_.y || sample.mag_ut.z != last_mag_raw_.z;
+    last_mag_raw_ = sample.mag_ut;
+    have_last_mag_ = true;
+    const Vec3 head_field = map_mag(mag_to_package(sample.mag_ut, cfg_.mag_calibration));
+    const Quat q = filter_.orientation();
+    const Vec3 earth_field = quat_rotate_vec(q, head_field);
+    const float yaw_rad = mag_lock_.update(earth_field, fresh, corrected_rate_degs_, dt);
+    if (yaw_rad != 0.0f) {
+        const float h = 0.5f * yaw_rad;
+        const Quat rz{std::cos(h), 0.0f, 0.0f, std::sin(h)};
+        filter_.set_orientation(quat_multiply(rz, q));
+    }
 }
 
 void PoseEstimator::recenter() {

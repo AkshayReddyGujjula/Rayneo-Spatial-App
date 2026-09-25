@@ -266,6 +266,64 @@ int main() {
         check(turn_leak_deg < 2.0f, "turn stays about vertical", turn_leak_deg, 2.0f);
     }
 
+    std::printf("pose_selftest: a smooth steady turn is not rest and cannot move the bias (bug 24)\n");
+    {
+        PoseEstimator estimator;
+        estimator.configure(PoseEstimator::Config{});
+        const Vec3 true_bias{0.05f, 0.4f, 0.1f};  // package frame, like the GT
+        Mat3 attitude = rotation_about(1.0f, 0.0f, 0.0f, -5.0f * kPi / 180.0f);
+        uint32_t tick = 700000;
+        const float dt = 21.0f * 1e-4f;
+        uint32_t noise = 12345u;
+        auto gyro_noise = [&]() {
+            noise = noise * 1664525u + 1013904223u;
+            return (static_cast<float>((noise >> 8) & 0xffff) / 65535.0f - 0.5f) * 0.6f;
+        };
+        auto feed = [&](float yaw_rate_degs, int samples) {
+            for (int i = 0; i < samples; ++i) {
+                const Vec3 omega_earth{0.0f, 0.0f, yaw_rate_degs};
+                const Vec3 body = earth_to_body(attitude, omega_earth);
+                Vec3 pkg = package_from_body(body);
+                pkg.x += true_bias.x + gyro_noise();
+                pkg.y += true_bias.y + gyro_noise();
+                pkg.z += true_bias.z + gyro_noise();
+                ImuSample s;
+                s.accel_mps2 = package_from_body(earth_to_body(attitude, Vec3{0.0f, 0.0f, 9.81f}));
+                s.gyro_degs = pkg;
+                s.tick_100us = tick += 21;
+                estimator.add_sample(s);
+                attitude = multiply(rotation_about(0.0f, 0.0f, 1.0f, yaw_rate_degs * kPi / 180.0f * dt),
+                                    attitude);
+            }
+        };
+        feed(0.0f, 476 * 12);  // warmup + calibration + settle
+        const Vec3 before = estimator.gyro_bias_degs();
+        const float yaw_before = estimator.euler().yaw_deg;
+        // Chair turn: ramp to 15 deg/s, 360 deg smooth, ramp down; then back.
+        for (int dir = 0; dir < 2; ++dir) {
+            const float sign = dir == 0 ? 1.0f : -1.0f;
+            for (int k = 1; k <= 10; ++k) {
+                feed(sign * 1.5f * static_cast<float>(k), 48);
+            }
+            feed(sign * 15.0f, static_cast<int>(476.0f * (360.0f - 2.0f * 7.9f) / 15.0f));
+            for (int k = 10; k >= 1; --k) {
+                feed(sign * 1.5f * static_cast<float>(k), 48);
+            }
+            feed(0.0f, 476 * 3);
+        }
+        const Vec3 after = estimator.gyro_bias_degs();
+        const float shift = std::sqrt((after.x - before.x) * (after.x - before.x) +
+                                      (after.y - before.y) * (after.y - before.y) +
+                                      (after.z - before.z) * (after.z - before.z));
+        float yaw_delta = estimator.euler().yaw_deg - yaw_before;
+        while (yaw_delta > 180.0f) yaw_delta -= 360.0f;
+        while (yaw_delta < -180.0f) yaw_delta += 360.0f;
+        std::printf("  two 360 deg turns at 15 deg/s: bias shift %.3f deg/s, net yaw %.2f deg\n", shift,
+                    yaw_delta);
+        check(shift < 0.1f, "bias does not learn a smooth turn", shift, 0.1f);
+        check(std::fabs(yaw_delta) < 2.0f, "turn out and back returns to start", std::fabs(yaw_delta), 2.0f);
+    }
+
     std::printf("pose_selftest: startup calibration ignores moving samples and captures the bias\n");
     {
         PoseEstimator estimator;
