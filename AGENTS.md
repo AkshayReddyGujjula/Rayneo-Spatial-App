@@ -270,7 +270,7 @@ Run inside the MSVC environment: `call "C:\Program Files (x86)\Microsoft Visual 
 | `layout_selftest` | Layout parsing/validation, geometry, capture-policy constraints |
 | `vdd_selftest` | Parsec VDD protocol, cleanup order, index parsing |
 | `view_selftest` | Offline "virtual glasses": real layout + real camera maths projected to NDC, numeric assertions, and 640x360 PPM frames in `scratch/` |
-| `app_selftest` | Controller app model: engine command contract, status protocol + freshness gate, preference validation/persistence, presets, field normalisation, 3D face selection and view-plane drag, depth slider scale, log rotation, telemetry tail, view comfort (ranges, engine switch round-trip, tint/focus/fade maths, app.json persistence) |
+| `app_selftest` | Controller app model: engine command contract, status protocol + freshness gate, preference validation/persistence, presets, field normalisation, 3D face selection and view-plane drag, depth slider scale, per-session log archive (10-min gate, rolling three, real tar round trip), telemetry tail, view comfort (ranges, engine switch round-trip, tint/focus/fade maths, app.json persistence) |
 | `mag_heading_selftest` | Magnetometer heading lock closed loop (stale bias bounded, integral removes lag, rate limit, disturbance rejected with zero view motion, new environment re-acquired without a jump) and the gyro-constrained hard-iron fit (recovery + rejection) |
 
 Every fix MUST come with a regression test that fails without it. Synthetic IMU scenarios live in
@@ -313,6 +313,11 @@ Every fix MUST come with a regression test that fails without it. Synthetic IMU 
   lock removed.
 - **Measure small rotations with `quat_angle_deg`, never `2 * acos(w)`**: in float the latter reads 0 or
   0.0396 deg for anything below ~0.04 deg (bug 25).
+- **Two tar.exe on this machine**: Git Bash's GNU tar is first on PATH and `tar -a -c -f x.zip`
+  silently writes a *tar* stream under a .zip name. Windows' bsdtar (`%SystemRoot%\System32\tar.exe`)
+  writes a real deflate zip (`--format zip`). The session archiver calls it by absolute path.
+- **Session logs**: the controller clears `logs/` at each launch and archives sessions over 10 min
+  into `logs/sessions/` (newest three). Replay an archived `imu_raw.csv` after extracting it.
 - **Regexes over replay output**: `t=` also matches inside `adapt=0`; anchor on ` t=`. A lag metric that
   reads exactly 0.000 is a parser bug, not a perfect loop.
 - **Shell heredocs eat backslashes here**: a C++ `\n` written through a bash heredoc into a Python

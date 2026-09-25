@@ -8,14 +8,6 @@
   "preview_without_head_tracking": false,
   "close_to_tray": true,
   "health_poll_ms": 1000,
-  "engine_log": {
-    "max_bytes": 1048576,
-    "max_files": 3
-  },
-  "telemetry_log": {
-    "max_bytes": 4194304,
-    "max_files": 3
-  },
   "last_engine_error": "",
   "window": {
     "x": 120,

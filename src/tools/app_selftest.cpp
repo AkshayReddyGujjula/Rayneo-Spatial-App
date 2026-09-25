@@ -11,6 +11,7 @@
 #include "app_shell/app_config.h"
 #include "app_shell/app_layout.h"
 #include "app_shell/engine_commands.h"
+#include "app_shell/session_logs.h"
 #include "util/utf8_path.h"
 #include "app_shell/telemetry.h"
 #include "app_shell/ui_help.h"
@@ -279,12 +280,6 @@ void test_app_config(const std::filesystem::path& directory) {
     bad.version = 2;
     check(!gt::validate_app_config(bad, error), "unknown preference versions are rejected");
     bad = defaults;
-    bad.engine_log_rotation.max_files = 0;
-    check(!gt::validate_app_config(bad, error), "log rotation without generations is rejected");
-    bad = defaults;
-    bad.telemetry_rotation.max_bytes = 1024;
-    check(!gt::validate_app_config(bad, error), "an undersized log cap is rejected");
-    bad = defaults;
     bad.layout_path.clear();
     check(!gt::validate_app_config(bad, error), "an empty layout path is rejected");
     bad = defaults;
@@ -306,12 +301,16 @@ void test_app_config(const std::filesystem::path& directory) {
             std::ofstream out(legacy, std::ios::binary | std::ios::trunc);
             out << "{\"version\": 1, \"layout_path\": \"a\", \"calibration_path\": \"b\", "
                    "\"log_dir\": \"c\", \"monitor_index\": -1, \"health_poll_ms\": 1000, "
-                   "\"preview_without_head_tracking\": false, \"close_to_tray\": false}";
+                   "\"preview_without_head_tracking\": false, \"close_to_tray\": false, "
+                   "\"engine_log\": {\"max_bytes\": 1048576, \"max_files\": 3}, "
+                   "\"telemetry_log\": {\"max_bytes\": 4194304, \"max_files\": 3}}";
         }
         gt::AppConfig loaded;
         check(gt::load_app_config(legacy, loaded, error) && loaded.splits.column < 0.0f &&
                   loaded.splits.left[0] < 0.0f,
-              "a legacy file without splits loads as automatic");
+              "a legacy file without splits (and with the retired log-rotation keys) loads");
+        check(gt::app_config_to_json_text(loaded).find("engine_log") == std::string::npos,
+              "the retired log-rotation keys are dropped on the next save");
         std::error_code remove_error;
         std::filesystem::remove(legacy, remove_error);
     }
@@ -342,8 +341,6 @@ void test_app_config(const std::filesystem::path& directory) {
     config.preview_without_head_tracking = true;
     config.close_to_tray = false;
     config.health_poll_ms = 750;
-    config.engine_log_rotation = {128u << 10, 2};
-    config.telemetry_rotation = {256u << 10, 4};
     config.last_engine_error = "engine exited with code 1";
     config.window = {120, 80, 1440, 900, true};
     config.splits.column = 0.33f;
@@ -365,9 +362,6 @@ void test_app_config(const std::filesystem::path& directory) {
               loaded.last_mode == gt::LaunchMode::Preview &&
               loaded.preview_without_head_tracking && !loaded.close_to_tray &&
               loaded.health_poll_ms == 750 &&
-              loaded.engine_log_rotation.max_bytes == config.engine_log_rotation.max_bytes &&
-              loaded.engine_log_rotation.max_files == 2 &&
-              loaded.telemetry_rotation.max_files == 4 &&
               loaded.last_engine_error == config.last_engine_error &&
               loaded.window.x == 120 && loaded.window.width == 1440 && loaded.window.maximized &&
               std::fabs(loaded.splits.column - 0.33f) < 1e-6f &&
@@ -518,41 +512,123 @@ void test_field_normalisation() {
           "the layout summary names the screen count");
 }
 
-void test_log_rotation(const std::filesystem::path& directory) {
-    std::printf("app_selftest: bounded log rotation\n");
-    const gt::LogRotationPolicy policy{64, 2};
-    check(!gt::decide_rotation(0, policy).rotate, "an empty log is not rotated");
-    check(!gt::decide_rotation(63, policy).rotate, "a log under the cap is not rotated");
-    check(gt::decide_rotation(64, policy).rotate, "a log at the cap is rotated");
-    const gt::RotationDecision decision = gt::decide_rotation(1024, policy);
-    check(decision.rotate && decision.generations == 2 && !decision.reason.empty(),
-          "the rotation decision carries the generation count and a reason");
-    check(gt::decide_rotation(1024, gt::LogRotationPolicy{64, 0}).generations == 1,
-          "a policy without generations is clamped to one");
+bool file_contains(const std::filesystem::path& path, const std::string& needle) {
+    return read_text(path).find(needle) != std::string::npos;
+}
 
-    const std::filesystem::path path = directory / "rotate.log";
+void write_session_files(const std::filesystem::path& log_dir, const std::string& tag) {
+    for (const std::string& name : gt::session_log_names()) {
+        check(write_text(log_dir / name, tag + " " + name + "\n" + std::string(4096, 'x')),
+              "session file written");
+    }
+}
+
+std::vector<std::string> archive_listing(const std::filesystem::path& archive_dir) {
+    std::vector<std::string> names;
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(archive_dir, error)) {
+        names.push_back(gt::utf8_from_path(entry.path().filename()));
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+void test_session_logs(const std::filesystem::path& directory) {
+    std::printf("app_selftest: per-session log archive\n");
+    check(!gt::session_qualifies_for_archive(0.0) && !gt::session_qualifies_for_archive(599.0) &&
+              !gt::session_qualifies_for_archive(600.0),
+          "sessions of 10 minutes or less are not archived");
+    check(gt::session_qualifies_for_archive(600.5) && gt::session_qualifies_for_archive(7200.0),
+          "sessions over 10 minutes are archived");
+
+    std::tm start{};
+    start.tm_year = 2026 - 1900;
+    start.tm_mon = 8;
+    start.tm_mday = 25;
+    start.tm_hour = 14;
+    start.tm_min = 3;
+    start.tm_sec = 7;
+    const std::string stem = gt::session_archive_stem(start);
+    check(stem == "session-2026-09-25_14-03-07", "the archive stem is the local start time");
+    check(gt::is_session_archive_name(stem + ".zip"), "a published archive name is recognised");
+    check(!gt::is_session_archive_name(stem + ".zip.partial") &&
+              !gt::is_session_archive_name("." + stem + ".partial") &&
+              !gt::is_session_archive_name(".pending-" + stem) &&
+              !gt::is_session_archive_name("reference-2026-09-25.zip") &&
+              !gt::is_session_archive_name("session-2026-9-25_14-03-07.zip") &&
+              !gt::is_session_archive_name("session-2026-09-25_14-03-0x.zip"),
+          "temporary, pending, reference and malformed names are never treated as archives");
+
+    const std::vector<std::string> five = {
+        "session-2026-09-27_10-00-00.zip", "notes.txt", "session-2026-09-25_10-00-00.zip",
+        "session-2026-09-29_10-00-00.zip", "reference-2026-09-25.zip",
+        "session-2026-09-26_10-00-00.zip", "session-2026-09-28_10-00-00.zip"};
+    const std::vector<std::string> pruned = gt::session_archives_to_prune(five, 3);
+    check(pruned.size() == 2 && pruned[0] == "session-2026-09-25_10-00-00.zip" &&
+              pruned[1] == "session-2026-09-26_10-00-00.zip",
+          "pruning removes only the oldest archives beyond the newest three");
+    check(gt::session_archives_to_prune({"session-2026-09-25_10-00-00.zip"}, 3).empty(),
+          "nothing is pruned while at most three archives exist");
+
+    const std::filesystem::path log_dir = directory / "session-logs";
+    std::error_code fs_error;
+    std::filesystem::remove_all(log_dir, fs_error);
+    std::filesystem::create_directories(log_dir, fs_error);
+    const std::filesystem::path archive_dir = gt::session_archive_dir(log_dir);
+
+    // A new session starts on empty files, including legacy rotated ones.
+    write_session_files(log_dir, "old");
+    check(write_text(log_dir / "engine.log.1", "legacy") &&
+              write_text(log_dir / "telemetry.csv.3", "legacy"),
+          "legacy rotated files written");
+    gt::clear_session_logs(log_dir);
+    bool any_left = false;
+    for (const auto& entry : std::filesystem::directory_iterator(log_dir, fs_error)) {
+        (void)entry;
+        any_left = true;
+    }
+    check(!any_left, "clearing removes the live files and legacy rotations");
+
     std::string error;
-    check(gt::rotate_log_file(path, policy, error), "rotating a missing file is a no-op");
-    check(!std::filesystem::exists(path), "no file is created by a no-op rotation");
+    check(!gt::stage_session_logs(log_dir, stem, error) && error.empty() &&
+              !gt::has_pending_session_logs(archive_dir),
+          "a session without files stages nothing");
 
-    check(write_text(path, std::string(100, 'a')), "first log written");
-    check(gt::rotate_log_file(path, policy, error), "the first rotation succeeds");
-    check(!std::filesystem::exists(path) && std::filesystem::exists(gt::rotated_log_path(path, 1)),
-          "the active log moves to generation 1");
-    check(read_text(gt::rotated_log_path(path, 1)) == std::string(100, 'a'),
-          "generation 1 keeps the original bytes");
+    // The user's reference archive sits beside the rolling ones and survives.
+    std::filesystem::create_directories(archive_dir, fs_error);
+    check(write_text(archive_dir / "reference-2026-09-25.zip", "reference"),
+          "reference archive written");
 
-    check(write_text(path, std::string(100, 'b')), "second log written");
-    check(gt::rotate_log_file(path, policy, error), "the second rotation succeeds");
-    check(read_text(gt::rotated_log_path(path, 1)) == std::string(100, 'b') &&
-              read_text(gt::rotated_log_path(path, 2)) == std::string(100, 'a'),
-          "generations shift oldest-first");
+    // Five sessions through the real helper body (tar.exe included).
+    for (int day = 1; day <= 5; ++day) {
+        start.tm_mday = day;
+        const std::string session = gt::session_archive_stem(start);
+        write_session_files(log_dir, "day" + std::to_string(day));
+        check(gt::stage_session_logs(log_dir, session, error) && error.empty(),
+              "the session's files move to the pending folder");
+        check(!std::filesystem::exists(log_dir / "imu_raw.csv") &&
+                  gt::has_pending_session_logs(archive_dir),
+              "the log directory is free for the next session at once");
+        check(gt::run_session_archiver(archive_dir) == 0, "the archiver drains the queue");
+        check(!gt::has_pending_session_logs(archive_dir), "no pending folder is left");
+    }
+    const std::vector<std::string> listing = archive_listing(archive_dir);
+    check(listing.size() == 4 && listing[0] == "reference-2026-09-25.zip" &&
+              listing[1] == "session-2026-09-03_14-03-07.zip" &&
+              listing[2] == "session-2026-09-04_14-03-07.zip" &&
+              listing[3] == "session-2026-09-05_14-03-07.zip",
+          "a rolling three: sessions 1 and 2 are pruned, the reference and no temporaries remain");
+    const std::filesystem::path newest = archive_dir / "session-2026-09-05_14-03-07.zip";
+    const std::string bytes = read_text(newest);
+    check(bytes.size() > 4 && bytes.compare(0, 4, std::string("PK\x03\x04", 4)) == 0,
+          "the archive is a real zip");
+    check(file_contains(newest, "imu_raw.csv") && file_contains(newest, "engine.log") &&
+              file_contains(newest, "telemetry.csv") && file_contains(newest, "engine-status.txt"),
+          "the archive holds every session file");
+    check(bytes.size() < 4u * 4096u, "the archive is compressed");
 
-    check(write_text(path, std::string(100, 'c')), "third log written");
-    check(gt::rotate_log_file(path, policy, error), "the third rotation succeeds");
-    check(read_text(gt::rotated_log_path(path, 1)) == std::string(100, 'c') &&
-              read_text(gt::rotated_log_path(path, 2)) == std::string(100, 'b'),
-          "rotation stays bounded to the configured generations");
+    check(gt::run_session_archiver(archive_dir) == 0, "an idle archiver exits cleanly");
+    std::filesystem::remove_all(log_dir, fs_error);
 
     check(gt::format_bytes(0) == "0 B" && gt::format_bytes(2048) == "2.0 KiB" &&
               gt::format_bytes(3u << 20) == "3.0 MiB",
@@ -935,7 +1011,7 @@ int main() {
     test_help_topics();
     test_orbit();
     test_field_normalisation();
-    test_log_rotation(directory);
+    test_session_logs(directory);
     test_telemetry();
     test_view_comfort(directory);
 

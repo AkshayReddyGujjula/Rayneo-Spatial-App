@@ -66,15 +66,16 @@ add_executable(spatial_desk
 )
 target_link_libraries(spatial_desk PRIVATE rayneo_core rayneo_layout rayneo_vdd rayneo_capture d3d11 dxgi d3dcompiler user32 gdi32)
 
-# Controller application model: pure logic, no windows, covered by app_selftest.
+# Controller application model: no windows, covered by app_selftest.
 # It owns the preference file, the layout editing rules, the engine command
-# contract and the telemetry tail reader.
+# contract, the telemetry tail reader and the per-session log archive.
 add_library(rayneo_app_model STATIC
   src/app/engine_protocol.cpp
   src/app/view_comfort.cpp
   src/app_shell/app_config.cpp
   src/app_shell/app_layout.cpp
   src/app_shell/engine_commands.cpp
+  src/app_shell/session_logs.cpp
   src/app_shell/telemetry.cpp
 )
 target_include_directories(rayneo_app_model PUBLIC src)

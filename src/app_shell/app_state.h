@@ -15,6 +15,7 @@
 
 #include <windows.h>
 
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -207,6 +208,11 @@ struct AppState {
     // Poll deadline for the sticky re-check: Explorer flips the tray
     // seconds after churn, so each poll re-asserts until this passes.
     double taskbar_restore_until_s = 0.0;
+    // The engine session this controller launched, for the per-session log
+    // archive: open from launch until the process is gone.
+    bool session_open = false;
+    double session_started_s = 0.0;
+    std::time_t session_started_at = 0;
     // Deferred display recovery: set when the engine fails while still
     // alive (foreign timeout); the recovery runs once the process is gone.
     bool display_recovery_pending = false;
