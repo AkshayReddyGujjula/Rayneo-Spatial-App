@@ -183,6 +183,89 @@ int main() {
         check(std::fabs(e.roll_deg) < 3.0f, "roll leakage small", e.roll_deg, 3.0f);
     }
 
+    std::printf("pose_selftest: recenter after a turn keeps a nod a pure pitch (bug 23)\n");
+    {
+        PoseEstimator estimator;
+        PoseEstimator::Config cfg;
+        cfg.warmup_s = 0.0f;
+        cfg.settle_samples = 0;
+        cfg.still_hold_s = 0.0f;
+        cfg.calibration_window_s = 0.0f;
+        cfg.bias_samples = 1;
+        estimator.configure(cfg);
+
+        // Start slightly nodded down, as a worn head usually is.
+        Mat3 attitude = rotation_about(1.0f, 0.0f, 0.0f, -8.0f * kPi / 180.0f);
+        uint32_t tick = 300000;
+        const float dt = 21.0f * 1e-4f;
+        // Rotate about a HEAD axis (body frame): R <- R * Rb(w dt).
+        auto feed_body = [&](const Vec3& omega_body_degs, int samples) {
+            for (int i = 0; i < samples; ++i) {
+                ImuSample s;
+                s.accel_mps2 = package_from_body(earth_to_body(attitude, Vec3{0.0f, 0.0f, 9.81f}));
+                s.gyro_degs = package_from_body(omega_body_degs);
+                s.tick_100us = tick += 21;
+                estimator.add_sample(s);
+                const float rate = std::sqrt(omega_body_degs.x * omega_body_degs.x +
+                                             omega_body_degs.y * omega_body_degs.y +
+                                             omega_body_degs.z * omega_body_degs.z);
+                if (rate > 0.0f) {
+                    attitude = multiply(attitude,
+                                        rotation_about(omega_body_degs.x, omega_body_degs.y,
+                                                       omega_body_degs.z, rate * kPi / 180.0f * dt));
+                }
+            }
+        };
+        auto feed_earth_yaw = [&](float rate_degs, int samples) {
+            for (int i = 0; i < samples; ++i) {
+                const Vec3 omega_earth{0.0f, 0.0f, rate_degs};
+                ImuSample s;
+                s.accel_mps2 = package_from_body(earth_to_body(attitude, Vec3{0.0f, 0.0f, 9.81f}));
+                s.gyro_degs = package_from_body(earth_to_body(attitude, omega_earth));
+                s.tick_100us = tick += 21;
+                estimator.add_sample(s);
+                attitude = multiply(rotation_about(0.0f, 0.0f, 1.0f, rate_degs * kPi / 180.0f * dt),
+                                    attitude);
+            }
+        };
+
+        feed_body(Vec3{0.0f, 0.0f, 0.0f}, 2000);
+        // Turn 40 deg (the body/chair turned, or the IMU yaw drifted), then recenter.
+        feed_earth_yaw(40.0f, 476);
+        feed_body(Vec3{0.0f, 0.0f, 0.0f}, 200);
+        estimator.recenter();
+        feed_body(Vec3{0.0f, 0.0f, 0.0f}, 50);
+        const Quat at_recenter = estimator.quat();
+        check(quat_angle_degs(at_recenter) < 0.5f, "identity right after recenter",
+              quat_angle_degs(at_recenter), 0.5f);
+
+        // Nod up 20 deg about the head's right axis.
+        feed_body(Vec3{20.0f, 0.0f, 0.0f}, 476);
+        feed_body(Vec3{0.0f, 0.0f, 0.0f}, 50);
+        const Quat nod = estimator.quat();
+        const float nod_axis_x = std::fabs(nod.x);
+        const float nod_leak = std::sqrt(nod.y * nod.y + nod.z * nod.z);
+        const float leak_deg = std::atan2(nod_leak, nod_axis_x) * 180.0f / kPi;
+        std::printf("  nod after recenter at +40 deg heading: angle=%.2f deg, axis off head-X by %.2f deg\n",
+                    quat_angle_degs(nod), leak_deg);
+        check(std::fabs(quat_angle_degs(nod) - 20.0f) < 1.0f, "nod magnitude ~20 deg",
+              quat_angle_degs(nod), 20.0f);
+        check(leak_deg < 2.0f, "nod stays about head X (no roll/yaw leak)", leak_deg, 2.0f);
+
+        // And an earth yaw after this headed + tilted recenter stays a pure yaw.
+        feed_body(Vec3{-20.0f, 0.0f, 0.0f}, 476);
+        feed_earth_yaw(-30.0f, 476);
+        feed_body(Vec3{0.0f, 0.0f, 0.0f}, 50);
+        const Quat turn = estimator.quat();
+        const float turn_leak_deg =
+            std::atan2(std::sqrt(turn.x * turn.x + turn.y * turn.y), std::fabs(turn.z)) * 180.0f / kPi;
+        std::printf("  earth yaw after headed recenter: angle=%.2f deg, axis off vertical by %.2f deg\n",
+                    quat_angle_degs(turn), turn_leak_deg);
+        check(std::fabs(quat_angle_degs(turn) - 30.0f) < 1.5f, "turn magnitude ~30 deg",
+              quat_angle_degs(turn), 30.0f);
+        check(turn_leak_deg < 2.0f, "turn stays about vertical", turn_leak_deg, 2.0f);
+    }
+
     std::printf("pose_selftest: startup calibration ignores moving samples and captures the bias\n");
     {
         PoseEstimator estimator;

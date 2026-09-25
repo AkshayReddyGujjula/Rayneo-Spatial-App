@@ -167,6 +167,7 @@ private:
     void update_rest_detector(const Vec3& raw, const Vec3& accel, float dt);
     void step_bias(const Vec3& target, float k, float max_step);
     void finish_calibration();
+    void set_reference(const Quat& q);
 
     Config cfg_;
     MadgwickFilter filter_;
@@ -208,7 +209,9 @@ private:
     uint32_t escape_rollbacks_ = 0;
     float corrected_rate_degs_ = 0.0f;
 
-    Quat q_ref_;
+    // Recenter reference split as q_ref = ref_heading_ * ref_tilt_.
+    Quat ref_heading_;
+    Quat ref_tilt_;
     Quat drift_correction_;
     Quat q_prev_live_;
     bool have_prev_live_ = false;
