@@ -81,7 +81,8 @@ void PoseEstimator::configure(const Config& cfg) {
     escape_rollbacks_ = 0;
     corrected_rate_degs_ = 0.0f;
 
-    q_ref_ = Quat{};
+    ref_heading_ = Quat{};
+    ref_tilt_ = Quat{};
     drift_correction_ = Quat{};
     q_prev_live_ = Quat{};
     have_prev_live_ = false;
@@ -407,8 +408,7 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
     if (!initialized_) {
         filter_.set_orientation(accel_align_quat(map_accel(sample.accel_mps2)));
         initialized_ = true;
-        q_ref_ = filter_.orientation();
-        have_ref_ = true;
+        set_reference(filter_.orientation());
         have_prev_live_ = false;
     }
 
@@ -453,8 +453,7 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
     }
 
     if (!have_ref_) {
-        q_ref_ = filter_.orientation();
-        have_ref_ = true;
+        set_reference(filter_.orientation());
     }
     ++fused_;
     return true;
@@ -464,8 +463,7 @@ void PoseEstimator::recenter() {
     // Reference the LIVE orientation and clear the correction together: taking the
     // reference from the corrected pose and then clearing the correction would
     // leave a jump equal to the old correction.
-    q_ref_ = filter_.orientation();
-    have_ref_ = true;
+    set_reference(filter_.orientation());
     drift_correction_ = Quat{};
     have_prev_live_ = false;
 }
@@ -478,16 +476,31 @@ Quat PoseEstimator::published_orientation() const {
     return quat_multiply(quat_conjugate(drift_correction_), filter_.orientation());
 }
 
+// The reference is split into its heading (a rotation about earth Z) and its
+// tilt (the remainder, whose axis is horizontal): q_ref = H * T. The published
+// relative rotation is conj(H) * q * conj(T):
+//  - an earth-frame yaw after recenter stays a pure yaw (H commutes with it and
+//    T cancels), so a tilted recenter cannot mix yaw into pitch/roll (bug 2);
+//  - a head nod after recenter stays a pitch whatever direction the wearer
+//    faced when recentering. The previous q * conj(q_ref) rotated every head
+//    axis by the reference heading, so after recentering at heading psi a nod
+//    became sin(psi) roll (bug 23: 14-27 deg of nod-to-roll coupling in the
+//    field after successive recenters, ~2 deg before the first one).
+// At startup the reference comes from the accelerometer alone (zero heading),
+// so this is identical to the old formula until the first recenter.
+void PoseEstimator::set_reference(const Quat& q) {
+    ref_heading_ = quat_twist_about(q, 0.0f, 0.0f, 1.0f);
+    ref_tilt_ = quat_multiply(quat_conjugate(ref_heading_), q);
+    have_ref_ = true;
+}
+
 Euler PoseEstimator::euler() const {
-    // Relative rotation expressed in the EARTH frame: q * q_ref^-1. Using the
-    // body-frame order (q_ref^-1 * q) would mix yaw into pitch/roll whenever
-    // the head was tilted when it was recentered.
-    const Quat rel = quat_multiply(published_orientation(), quat_conjugate(q_ref_));
-    return quat_to_euler(rel);
+    return quat_to_euler(quat());
 }
 
 Quat PoseEstimator::quat() const {
-    return quat_multiply(published_orientation(), quat_conjugate(q_ref_));
+    return quat_multiply(quat_conjugate(ref_heading_),
+                         quat_multiply(published_orientation(), quat_conjugate(ref_tilt_)));
 }
 
 }  // namespace gt
