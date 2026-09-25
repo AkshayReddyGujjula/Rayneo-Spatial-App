@@ -1,48 +1,111 @@
+<div align="center">
+
 # RayNeo Spatial
 
-### A head-tracked Windows desktop for RayNeo GT glasses
+**Turn a pair of RayNeo GT glasses into a multi-monitor Windows workspace that floats around you.**
 
-RayNeo Spatial turns multiple Windows desktops into a spatial workspace on the RayNeo GT. The glasses' IMU tracks your head in 3DoF; a Direct3D 11 renderer places the screens around you, while a native Windows dashboard controls the layout and engine.
+Real Windows desktops, world-locked in space, head-tracked from the glasses' own IMU,
+with a magnetometer lock that keeps them from drifting over hours of use.
 
-> **Platform:** Windows 10 (1809+) or Windows 11, x64. This is a source-built project; the repository does not include a driver or a prebuilt release.
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?style=flat-square&logo=windows&logoColor=white)](#requirements)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?style=flat-square&logo=cplusplus&logoColor=white)](CMakeLists.txt)
+[![Direct3D 11](https://img.shields.io/badge/renderer-Direct3D%2011-5C2D91?style=flat-square)](src/render/)
+[![Tests](https://img.shields.io/badge/tests-10%20suites-2EA44F?style=flat-square)](#tests)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square)](LICENSE)
 
-## What it does
+<img src="docs/assets/hero.svg" alt="Three Windows desktops arranged in an arc at -45, 0 and +45 degrees around the wearer" width="100%">
+
+</div>
+
+---
+
+## Highlights
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🖥️ Real desktops, not mirrors
+Creates genuine Windows monitors through the Parsec Virtual Display Driver. Drag apps onto
+them as you would onto a physical screen. The default layout is three screens at −45°, 0° and
++45°, and you can arrange anything from 1 to 8.
+
+</td>
+<td width="50%" valign="top">
+
+### 🧭 Stays where you put it
+A 3DoF pose estimator runs on the glasses' ~476 Hz IMU. A one-time magnetometer calibration
+locks heading to the local magnetic field. In a measured 22-minute session the lock removed
+about 20° of thermal gyro drift.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 📖 Steady enough to read small text
+A soft reading hold settles the view while your head is still, like electronic image
+stabilisation, and never makes deliberate turns feel sticky. Choose Off, Low, Medium, High or
+Ultra, live, from the dashboard or with a hotkey.
+
+</td>
+<td valign="top">
+
+### 🌙 Comfortable for long sessions
+Optional per-screen dimming: set each screen yourself, or let the screens you aren't looking
+at fade. Add a warm night tint, and pull the cursor home to the centre screen with
+<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>F</kbd>.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🎛️ A native control centre
+A Win32 dashboard with a 3D layout editor, presets, live engine controls, a tray icon and
+health checks for the glasses, the calibration, the driver and the engine.
+
+</td>
+<td valign="top">
+
+### 🧾 Logs that are there when you need them
+Every session longer than 10 minutes is compressed into `logs/sessions/` automatically, and
+the last three are kept. Each archive can be replayed through the real estimator offline.
+
+</td>
+</tr>
+</table>
+
+## How it works
+
+```mermaid
+flowchart LR
+    IMU["RayNeo GT IMU<br/>gyro · accel · mag<br/>~476 Hz over HID"] --> EST["Pose estimator<br/>Madgwick fusion<br/>gyro-bias ownership<br/>heading lock"]
+    EST --> SMOOTH["Display smoothing<br/>1-euro filter +<br/>reading hold"]
+    SMOOTH --> R["Direct3D 11 renderer<br/>world-locked screens"]
+    VDD["Parsec VDD<br/>virtual monitors"] --> CAP["DXGI Desktop<br/>Duplication"]
+    CAP --> R
+    R --> GLASSES(["GT display"])
+    UI["RayNeo Spatial.exe<br/>dashboard · editor · tray"] -. commands .-> R
+```
+
+`RayNeo Spatial.exe` is the controller. It launches and steers `spatial_desk.exe`, the rendering
+engine. The engine takes over the display topology, creates the virtual monitors, captures each
+one, and draws them on the glasses from the head pose. When you stop, it restores your original
+display arrangement. `orientation_calibrate.exe` measures how the sensor sits on your head.
+
+## Requirements
 
 | | |
 |---|---|
-| **Spatial screens** | Arrange 1–8 screens with configurable yaw, pitch, roll, distance, size, and field of view. The default layout is a three-screen arc at −45°, 0°, and +45°. |
-| **Real Windows desktops** | Use the separately installed Parsec Virtual Display Driver (VDD) to create monitors that Windows apps can use. |
-| **Head tracking** | Decode the GT's IMU stream, calibrate the sensor-to-head orientation, estimate pose, and recenter from the dashboard or hotkey. |
-| **Drift-free heading** | An optional one-time magnetometer calibration lets the engine lock yaw to the local magnetic field, so the workspace stays put over hours of use. |
-| **Reading stabilisation** | A soft hold keeps small text steady while your head is still (Off, Low, Medium, High, Ultra) without making deliberate turns feel sticky. |
-| **View comfort** | Optional per-screen dimming (manual, or dim the screens you are not looking at), a warm night tint, and a hotkey that moves the cursor to the centre screen. |
-| **Desktop capture** | Capture each virtual monitor with DXGI Desktop Duplication, with a GDI fallback. |
-| **Native controller** | Edit layouts, start and stop the workspace, use the tray controls, and inspect device and engine diagnostics. |
-| **Preview mode** | Check the renderer without creating virtual monitors. Preview screens are labelled test screens, not Windows desktops. |
+| **Glasses** | RayNeo GT, set to **Extend** (<kbd>Win</kbd>+<kbd>P</kbd>) so they appear as a separate display. 1920×1080 at 120 Hz gives the best feel. |
+| **OS** | Windows 10 (1809 or later) or Windows 11, x64 |
+| **Virtual monitors** | The signed [Parsec VDD](https://github.com/nomi-san/parsec-vdd), installed by you (it is never bundled or installed by this project). Without it, **Start preview** still renders labelled test screens. |
+| **Build tools** | Visual Studio 2022 Build Tools (C++), CMake 3.25+, Ninja and [vcpkg](https://github.com/microsoft/vcpkg). The manifest pulls in `hidapi` and `nlohmann-json`. |
 
-### How the pieces fit
+## Quick start
 
-```text
-RayNeo GT IMU ── HID protocol ── calibration + pose estimation ──┐
-                                                                │
-Windows apps ── Parsec VDD monitors ── DXGI / GDI capture ──────┼── D3D11 renderer ── GT display
-                                                                │
-Native dashboard ── layout, commands, status, diagnostics ──────┘
-```
-
-`RayNeo Spatial.exe` is the controller. It launches and steers `spatial_desk.exe`, the rendering engine. `orientation_calibrate.exe` creates the per-device calibration file; `gt_imu_probe.exe` is a protocol diagnostic tool.
-
-## Get started
-
-### 1. Prepare the machine
-
-- Connect RayNeo GT glasses and set Windows projection to **Extend** (`Win+P`). The glasses need to be an active, separate display.
-- Install Visual Studio 2022 Build Tools with the C++ toolchain, CMake 3.25+, Ninja, and [vcpkg](https://github.com/microsoft/vcpkg). The vcpkg manifest installs `hidapi` and `nlohmann-json` during configuration.
-- To use **Start workspace**, install the signed Parsec VDD separately. The driver is not bundled or installed by this project. You can use **Start preview** without it.
-
-### 2. Build and test
-
-From a **Developer Command Prompt for VS 2022**, set `VCPKG_ROOT` to your vcpkg checkout, then run:
+**1. Build and test.** From a *Developer Command Prompt for VS 2022*:
 
 ```cmd
 set "VCPKG_ROOT=C:\path\to\vcpkg"
@@ -51,55 +114,140 @@ cmake --build build\rayneo
 ctest --test-dir build\rayneo --output-on-failure
 ```
 
-Use a dedicated Ninja build directory if another developer or agent is building this repository. The checked-in CMake preset also reads `VCPKG_ROOT` if you prefer `cmake --preset default` for a solo build.
-
-### 3. Run the app
-
-Stage the controller, engine, config, and required DLL in one portable folder:
+**2. Stage a portable folder.** It holds the controller, engine, calibration tool, config and docs:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\stage-portable.ps1 -BuildDir build\rayneo
 ```
 
-Run `dist\RayNeoSpatial\RayNeo Spatial.exe`. Follow the dashboard's **Run calibration** action while wearing the glasses, then choose **Start workspace** for real virtual desktops or **Start preview** for a renderer check. For drift-free heading, run `orientation_calibrate.exe --mag` once from the same folder (turn fully around and nod while wearing the glasses). Calibration is saved as `config/orientation.json` in the running folder and is intentionally excluded from Git.
+**3. Calibrate once, wearing the glasses.** Start `dist\RayNeoSpatial\RayNeo Spatial.exe` and
+choose **Run calibration**. Then run the magnetometer step from the same folder for drift-free
+heading (turn fully around and nod when prompted):
 
-| Hotkey | Action |
+```cmd
+dist\RayNeoSpatial\orientation_calibrate.exe --mag
+```
+
+**4. Start workspace.** Your virtual desktops appear around you. Look straight ahead and press
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> any time to recenter.
+
+> [!NOTE]
+> Calibration is per device and per wearer. It is saved as `config/orientation.json` in the
+> running folder and deliberately kept out of Git.
+
+## Hotkeys
+
+| Keys | Action |
 |---|---|
-| `Ctrl+Shift+R` | Recenter the workspace in front of you |
-| `Ctrl+Alt+S` | Cycle reading stabilisation (Off / Low / Medium / High / Ultra) |
-| `Ctrl+Alt+F` | Move the cursor to the middle of the centre screen |
-| `Ctrl+Alt+Y` / `Ctrl+Alt+P` | Toggle yaw / pitch tracking (off holds the view on that axis) |
-| `Ctrl+Shift+\` | Exit workspace mode |
-| `Ctrl+Alt+Q` | Quit the engine |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> | Recenter the workspace in front of you |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd> | Cycle reading stabilisation: Off → Low → Medium → High → Ultra |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>F</kbd> | Move the cursor to the middle of the centre screen |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Y</kbd> / <kbd>P</kbd> | Toggle yaw / pitch tracking (off holds the view on that axis) |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>\\</kbd> | Exit workspace mode |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Q</kbd> | Quit the engine |
 
-See [Windows app guide](docs/WINDOWS-APP.md) for controls, layout editing, diagnostics, recovery, and manual hardware checks.
+## Reading stabilisation, measured
 
-## Design notes
+Replaying a recorded worn session (235 s of reading) through the real smoother:
 
-The sensor quaternion is right-handed with Z up; the Direct3D scene is left-handed with Y up. The camera converts between those frames and uses an earth-frame relative rotation so recentering while tilted does not mix yaw into pitch and roll. The sensor mounting comes from a measured calibration file rather than a hard-coded axis guess.
+| Level | Text motion while reading | Turn lag (rms) |
+|---|---:|---:|
+| Off | 31.0 px/s | 1.18° |
+| Low | 11.1 px/s | 1.40° |
+| Medium | 6.7 px/s | 1.57° |
+| High | 5.2 px/s | 1.71° |
 
-The pose path remains live even during tiny head movements. Rest detection controls gyro-bias adaptation, not whether the pose is published. With a magnetometer calibration, a rate-limited heading lock removes the gyro's slow thermal yaw drift; without one, a very slow steady yaw and gyro bias cannot always be distinguished, so the estimator favors preserving deliberate pans and exposes recentering when needed. Display-side smoothing and the reading hold run after the estimator and never feed back into it. The measured scenarios, the bug history and the tuning trade-offs are documented in [AGENTS.md](AGENTS.md).
+**Ultra** goes further. On a second recorded session (266 s of reading) it cut High's 5.4 px/s to
+**2.3 px/s**, at the cost of more lag on turns (1.70° → 2.59° rms).
+
+The hold works only on the displayed view. It never feeds back into the estimator, so tracking
+accuracy is the same at every level.
+
+## Logs and diagnostics
+
+The dashboard shows live status for the glasses display, the HID device, the calibration, the
+driver, the layout and the engine. Each session writes to `logs/`:
+
+| File | Contents |
+|---|---|
+| `engine.log` | The engine's console output |
+| `telemetry.csv` | Pose, bias, rest and adaptation state (the dashboard reads the newest row) |
+| `imu_raw.csv` | Every IMU sample, for offline replay |
+| `sessions/session-YYYY-MM-DD_HH-MM-SS.zip` | Sessions longer than 10 minutes, compressed; the newest three are kept |
+
+Sessions start on fresh files. Shorter sessions are not archived. The compression runs in the
+background after you quit, and anything interrupted is finished the next time the app starts.
+To investigate a session, extract its `imu_raw.csv` and replay it through the real estimator
+with `imu_replay` from your build folder:
+
+```cmd
+build\rayneo\imu_replay.exe imu_raw.csv --orientation config\orientation.json --observe --stats
+```
+
+## Tests
+
+Ten CTest suites run offline in about a second:
+
+| Suite | What it proves |
+|---|---|
+| `camera_selftest` | Frame conversion between the Z-up sensor and the Y-up renderer |
+| `pose_selftest` | Recenter coupling, startup calibration, bias bounds, drift behaviour |
+| `pose_scenarios` | 19 synthetic worn-head scenarios through the real estimator, from micro-adjustments to 5-minute sessions |
+| `mag_heading_selftest` | The heading-lock control loop and the hard-iron fit |
+| `orientation_calibration_selftest` | Guided-calibration maths and rejection gates |
+| `protocol_selftest` | The GT's HID framing and nine-axis report decoding |
+| `layout_selftest` | Layout parsing, validation and geometry |
+| `vdd_selftest` | Parsec VDD protocol and display-topology logic |
+| `view_selftest` | "Virtual glasses": the real layout and camera projected to the screen |
+| `app_selftest` | The controller: config, presets, engine protocol, view comfort, the session log archive |
 
 ## Repository guide
 
 | Path | Purpose |
 |---|---|
-| `src/app_shell/` | Native Win32 dashboard, tray, lifecycle, diagnostics |
-| `src/app/` | Renderer engine and controller command protocol |
-| `src/imu/` | GT HID protocol, calibration, fusion, pose estimator |
-| `src/render/` | Camera transform, screen geometry, D3D11 renderer |
-| `src/capture/` | DXGI capture and GDI fallback |
-| `src/vdd/` | Parsec VDD client and display topology |
-| `src/layout/` | Layout schema, validation, persistence |
-| `src/tools/` | Calibration, probe, and regression executables |
-| `docs/` | [Windows app guide](docs/WINDOWS-APP.md), [protocol notes](docs/PROTOCOL-NOTES.md), [calibration](docs/orientation-calibration.md), [third-party notices](docs/THIRD_PARTY_NOTICES.md) |
+| [`src/imu/`](src/imu/) | HID protocol, calibration, fusion, pose estimator, heading lock, smoother |
+| [`src/render/`](src/render/) | Camera transform, screen geometry, D3D11 renderer |
+| [`src/capture/`](src/capture/) | DXGI Desktop Duplication with a GDI fallback |
+| [`src/vdd/`](src/vdd/) | Parsec VDD client and display-topology takeover and restore |
+| [`src/layout/`](src/layout/) | Layout schema, validation, persistence |
+| [`src/app/`](src/app/) | The engine, its command protocol and the view-comfort model |
+| [`src/app_shell/`](src/app_shell/) | The Win32 dashboard, tray, engine lifecycle and diagnostics |
+| [`src/tools/`](src/tools/) | Calibration, probe, replay and test executables |
+| [`docs/`](docs/) | [Windows app guide](docs/WINDOWS-APP.md) · [protocol notes](docs/PROTOCOL-NOTES.md) · [orientation calibration](docs/orientation-calibration.md) |
+| [`AGENTS.md`](AGENTS.md) | Engineering notebook: invariants, the full bug history and every tuning trade-off with its measurement |
 
-Ten CTest suites cover camera frames, pose behavior, synthetic head-motion scenarios, calibration, protocol decoding, layout, VDD logic, projection, the controller model, and the magnetometer heading lock. They are repeatable offline checks; actual display, driver, and worn-glasses behavior requires the hardware setup above.
+## Design notes
 
-## Dependencies and attribution
+- **Frames are explicit.** The fused quaternion is right-handed with Z up; the Direct3D scene is
+  left-handed with Y up. One exact basis change connects them, and the relative rotation is taken
+  in the earth frame with its heading split out, so recentering with a tilted head never turns a
+  nod into a roll.
+- **One owner for steady error.** Gyro-bias adaptation is the only thing allowed to remove drift,
+  and the published pose is always live: rest detection gates *adaptation*, never the pose, so
+  sub-degree head movements are never swallowed.
+- **Measured, not guessed.** Every gate and constant was chosen against a recorded failure, and
+  each fix comes with a scenario that fails before it and passes after.
+  [AGENTS.md](AGENTS.md) tells the whole story.
 
-The app uses [hidapi](https://github.com/libusb/hidapi), [nlohmann/json](https://github.com/nlohmann/json), Windows APIs, and the protocol of the separately installed [Parsec VDD](https://github.com/nomi-san/parsec-vdd). See [third-party notices](docs/THIRD_PARTY_NOTICES.md). RayNeo Spatial is an independent project and is not an official RayNeo product.
+## Limitations
+
+- Without the magnetometer calibration there is no absolute heading reference, so a very slow,
+  steady turn is indistinguishable from gyro drift. The estimator favours your deliberate pans,
+  and recenter is one keypress away.
+- A magnetic field that changes while you work (a magnet, a speaker, a laptop lid moving near your
+  head) is detected and ignored rather than corrected.
+- The glasses must be in Extend mode; duplicate or single-display modes hide them from the engine.
+
+## Contributing
+
+Issues and pull requests are welcome. Please read [AGENTS.md](AGENTS.md) first: it lists the
+invariants that must not break, and the IMU path expects a regression scenario with every change.
 
 ## License
 
 Copyright 2026 Akshay Reddy Gujjula. Licensed under the [Apache License 2.0](LICENSE).
+
+RayNeo Spatial is an independent project, not an official RayNeo product. It builds on
+[hidapi](https://github.com/libusb/hidapi) and [nlohmann/json](https://github.com/nlohmann/json),
+and speaks the protocol of the separately installed [Parsec VDD](https://github.com/nomi-san/parsec-vdd).
+See the [third-party notices](docs/THIRD_PARTY_NOTICES.md).

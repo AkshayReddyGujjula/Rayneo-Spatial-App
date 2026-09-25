@@ -46,7 +46,7 @@ Targets added by the controller:
 | `rayneo_app_model` | static library | preference file, layout editing rules, engine command contract, telemetry tail reader (no windows) |
 | `rayneo_app_ui` | static library | Win32 window, tray, engine process owner, read-only health checks |
 | `rayneo_spatial_app` | `RayNeo Spatial.exe` | the GUI controller (WIN32 subsystem) |
-| `app_selftest` | test binary | pure app-model regression (config, presets, add/remove, rotation, commands, telemetry) |
+| `app_selftest` | test binary | app-model regression (config, presets, add/remove, session log archive, commands, telemetry) |
 
 `spatial_desk.exe`, `orientation_calibrate.exe` and the existing test binaries keep their names and
 behaviour. `spatial_desk.exe` gained exactly two things: the private controller messages and the
@@ -159,8 +159,6 @@ ignored within version 1, while an unsupported version is rejected explicitly.
   "preview_without_head_tracking": false,
   "close_to_tray": true,
   "health_poll_ms": 1000,
-  "engine_log":   { "max_bytes": 1048576, "max_files": 3 },
-  "telemetry_log": { "max_bytes": 4194304, "max_files": 3 },
   "last_engine_error": "",
   "window": { "x": 120, "y": 90, "width": 1180, "height": 860, "maximized": false },
   "view_comfort": { "stabilise": "medium", "dim_mode": "off",
@@ -175,8 +173,6 @@ ignored within version 1, while an unsupported version is rejected explicitly.
 | `monitor_index` | `-1` (auto: the RayNeo display) or `0..15` | forwarded to the engine as `--monitor` |
 | `last_mode` | `none`, `workspace`, `preview` | remembered for the header chip and diagnostics |
 | `health_poll_ms` | `500..10000` | dashboard polling; 500 ms is the hard 2 Hz floor |
-| `engine_log.max_bytes` / `telemetry_log.max_bytes` | 64 KiB .. 64 MiB | rotation threshold |
-| `engine_log.max_files` / `telemetry_log.max_files` | 1..9 | rotated generations kept (`engine.log.1` …) |
 | `window` | width ≥ 320, height ≥ 240 | restored on start and clamped to the work area |
 | `view_comfort.stabilise` | `off`, `low`, `medium`, `high`, `ultra` | reading stabilisation (`--stabilise`) |
 | `view_comfort.dim_mode` | `off`, `manual`, `focus` | screen dimming (`--dim-mode`) |
@@ -199,10 +195,20 @@ dirty working tree after running the app is expected.
 | Layout file | `gt::load_layout` | validity, screen count, arc, FOV, capture policy, file age |
 | Telemetry CSV | newest row of `logs/telemetry.csv` | yaw/pitch/roll, bias, rest/still, adaptation state, deviation |
 | Engine log | `logs/engine.log` | console output captured from the engine process |
+| Session archives | `logs/sessions/*.zip` | the last three sessions over 10 minutes; replay `imu_raw.csv` with `imu_replay` |
 
-* **Log rotation** is bounded and happens *before* a launch, while the engine does not hold the
-  files: the previous run is shifted to `.1`, `.2`, … and the oldest generation is deleted. The
-  telemetry CSV is read back at no more than 2 Hz and only its tail is parsed.
+* **Session logs.** Every engine session starts on empty files: `engine.log`, `telemetry.csv`,
+  `imu_raw.csv` (every IMU sample) and `engine-status.txt`. When a session that ran for **more
+  than 10 minutes** ends (stopped, quit, exited or crashed), its files are moved into
+  `logs/sessions/.pending-session-<start time>/` and compressed into
+  `logs/sessions/session-YYYY-MM-DD_HH-MM-SS.zip` by a background copy of the controller
+  (`RayNeo Spatial.exe --archive-sessions <dir>`, Windows' own `tar.exe`). Only the **newest three**
+  archives are kept: the fourth session's archive removes the first. Quitting never waits for the
+  compression, a zip only appears under its final name once it is complete, and anything a crash
+  or power cut left pending is archived the next time the controller starts. Shorter sessions are
+  not archived; their files stay in `logs/` until the next session starts. Other files in
+  `logs/sessions/` (for example a reference archive you keep) are never touched. The telemetry CSV
+  is read back at no more than 2 Hz and only its tail is parsed.
 * **Polling**: the health timer is the only recurring timer, it can never be faster than 500 ms
   (twice per second), and HID/VDD/calibration checks run at most every 2 s. A second timer exists
   only while a transition is on screen (engine starting, toast fading) and is killed immediately

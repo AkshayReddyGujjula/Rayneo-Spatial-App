@@ -79,13 +79,6 @@ bool read_splits(const Json& document, SplitFractions& out, std::string& error) 
     return true;
 }
 
-Json policy_to_json(const LogRotationPolicy& policy) {
-    return Json{
-        {"max_bytes", policy.max_bytes},
-        {"max_files", policy.max_files},
-    };
-}
-
 bool valid_text(const std::string& value, size_t max_length) {
     if (value.empty() || value.size() > max_length) {
         return false;
@@ -156,36 +149,6 @@ bool read_bool(const Json& object, const char* key, bool& out, std::string& erro
     }
     out = object.at(key).get<bool>();
     return true;
-}
-
-bool read_policy(const Json& object, const char* key, LogRotationPolicy& out, std::string& error) {
-    if (!object.contains(key)) {
-        return true;
-    }
-    const Json& value = object.at(key);
-    if (!value.is_object()) {
-        error = std::string("field '") + key + "' must be an object";
-        return false;
-    }
-    if (value.contains("max_bytes")) {
-        if (!value.at("max_bytes").is_number_integer()) {
-            error = std::string("field '") + key + ".max_bytes' must be an integer";
-            return false;
-        }
-        int64_t bytes = 0;
-        try {
-            bytes = value.at("max_bytes").get<int64_t>();
-        } catch (const std::exception&) {
-            error = std::string("field '") + key + ".max_bytes' is out of range";
-            return false;
-        }
-        if (bytes < 0) {
-            error = std::string("field '") + key + ".max_bytes' must not be negative";
-            return false;
-        }
-        out.max_bytes = static_cast<uint64_t>(bytes);
-    }
-    return read_int(value, "max_files", out.max_files, error);
 }
 
 bool clamp_loaded(AppConfig& config, std::string& error) {
@@ -329,17 +292,6 @@ bool validate_app_config(const AppConfig& config, std::string& error) {
         error = "health_poll_ms must be 500..10000 (polling is capped at 2 Hz)";
         return false;
     }
-    const LogRotationPolicy policies[2] = {config.engine_log_rotation, config.telemetry_rotation};
-    for (const LogRotationPolicy& policy : policies) {
-        if (policy.max_bytes < kMinLogBytes || policy.max_bytes > kMaxLogBytes) {
-            error = "log max_bytes must be 65536..67108864";
-            return false;
-        }
-        if (policy.max_files < 1 || policy.max_files > kMaxLogFiles) {
-            error = "log max_files must be 1..9";
-            return false;
-        }
-    }
     if (config.last_engine_error.size() > 2048) {
         error = "last_engine_error must be at most 2048 characters";
         return false;
@@ -367,8 +319,6 @@ std::string app_config_to_json_text(const AppConfig& config) {
         {"preview_without_head_tracking", config.preview_without_head_tracking},
         {"close_to_tray", config.close_to_tray},
         {"health_poll_ms", config.health_poll_ms},
-        {"engine_log", policy_to_json(config.engine_log_rotation)},
-        {"telemetry_log", policy_to_json(config.telemetry_rotation)},
         {"last_engine_error", config.last_engine_error},
         {"window", window_to_json(config.window)},
         {"splits", splits_to_json(config.splits)},
@@ -408,8 +358,6 @@ bool load_app_config(const std::filesystem::path& path, AppConfig& config, std::
                    parsed.preview_without_head_tracking, error) ||
         !read_bool(document, "close_to_tray", parsed.close_to_tray, error) ||
         !read_int(document, "health_poll_ms", parsed.health_poll_ms, error) ||
-        !read_policy(document, "engine_log", parsed.engine_log_rotation, error) ||
-        !read_policy(document, "telemetry_log", parsed.telemetry_rotation, error) ||
         !read_string(document, "last_engine_error", parsed.last_engine_error, error)) {
         return false;
     }
@@ -502,66 +450,6 @@ bool save_app_config(const std::filesystem::path& path, const AppConfig& config,
         return false;
     }
 #endif
-    return true;
-}
-
-RotationDecision decide_rotation(uint64_t current_bytes, const LogRotationPolicy& policy) {
-    RotationDecision decision;
-    int max_files = policy.max_files;
-    if (max_files < 1) {
-        max_files = 1;
-    }
-    if (max_files > kMaxLogFiles) {
-        max_files = kMaxLogFiles;
-    }
-    decision.generations = max_files;
-    if (current_bytes == 0) {
-        decision.reason = "log file is empty";
-        return decision;
-    }
-    if (current_bytes < policy.max_bytes) {
-        decision.reason = "under the rotation threshold";
-        return decision;
-    }
-    decision.rotate = true;
-    decision.reason = "reached the rotation threshold";
-    return decision;
-}
-
-std::filesystem::path rotated_log_path(const std::filesystem::path& path, int generation) {
-    std::filesystem::path rotated = path;
-    rotated += "." + std::to_string(generation);
-    return rotated;
-}
-
-bool rotate_log_file(const std::filesystem::path& path, const LogRotationPolicy& policy,
-                     std::string& error) {
-    std::error_code exists_error;
-    if (!std::filesystem::exists(path, exists_error) || exists_error) {
-        return true;
-    }
-    const uint64_t size = std::filesystem::file_size(path, exists_error);
-    if (exists_error) {
-        return true;
-    }
-    const RotationDecision decision = decide_rotation(size, policy);
-    if (!decision.rotate) {
-        return true;
-    }
-    std::error_code ignored;
-    std::filesystem::remove(rotated_log_path(path, decision.generations), ignored);
-    for (int generation = decision.generations - 1; generation >= 1; --generation) {
-        const std::filesystem::path from = rotated_log_path(path, generation);
-        if (std::filesystem::exists(from, ignored)) {
-            std::filesystem::rename(from, rotated_log_path(path, generation + 1), ignored);
-        }
-    }
-    std::error_code rename_error;
-    std::filesystem::rename(path, rotated_log_path(path, 1), rename_error);
-    if (rename_error) {
-        error = "could not rotate log file: " + rename_error.message();
-        return false;
-    }
     return true;
 }
 

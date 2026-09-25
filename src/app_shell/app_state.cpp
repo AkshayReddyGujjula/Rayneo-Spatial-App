@@ -2,6 +2,7 @@
 
 #include "app_shell/clock.h"
 #include "app_shell/diagnostics.h"
+#include "app_shell/session_logs.h"
 #include "layout/layout.h"
 #include "vdd/display_config.h"
 
@@ -152,15 +153,9 @@ bool start_engine(AppState& state, LaunchMode mode, std::wstring& error) {
         state.add_event(L"created " + state.paths.layout_path.wstring() + L" from the editor layout");
     }
 
-    // Rotate before the engine opens the files: it appends, so a long-lived CSV
-    // would otherwise grow without bound across sessions.
-    std::string rotate_error;
-    if (!rotate_log_file(state.paths.engine_log, state.config.engine_log_rotation, rotate_error)) {
-        state.add_event(L"engine log rotation skipped: " + wide_from_utf8(rotate_error));
-    }
-    if (!rotate_log_file(state.paths.telemetry_log, state.config.telemetry_rotation, rotate_error)) {
-        state.add_event(L"telemetry rotation skipped: " + wide_from_utf8(rotate_error));
-    }
+    // Each session starts on empty files (the engine appends): the previous
+    // session was either archived when it ended or was too short to keep.
+    clear_session_logs(state.paths.log_dir);
 
     const bool head_tracking =
         mode == LaunchMode::Workspace ||
@@ -189,6 +184,9 @@ bool start_engine(AppState& state, LaunchMode mode, std::wstring& error) {
     // the taskbar preference so every exit path can hand it back.
     state.taskbar_state_at_engine_start = gt::query_taskbar_state();
     state.taskbar_restore_until_s = 0.0;
+    state.session_open = true;
+    state.session_started_s = state.now_s;
+    state.session_started_at = std::time(nullptr);
     state.config.last_mode = mode;
     state.config.last_engine_error.clear();
     state.starting = true;
@@ -425,9 +423,48 @@ void push_comfort_setting(AppState& state, int ui_id) {
     }
 }
 
+namespace {
+
+// The launched engine is gone (stopped, quit, exited or crashed): archive its
+// logs when the session was long enough to be worth keeping.
+void finish_session_logs(AppState& state) {
+    state.session_open = false;
+    const double duration_s = state.now_s - state.session_started_s;
+    const int minutes = static_cast<int>(duration_s / 60.0);
+    if (!session_qualifies_for_archive(duration_s)) {
+        state.add_event(L"session lasted " + std::to_wstring(minutes) +
+                        L" min: logs not archived (only sessions over 10 min are kept)");
+        return;
+    }
+    std::tm local_start{};
+    localtime_s(&local_start, &state.session_started_at);
+    const std::string stem = session_archive_stem(local_start);
+    std::string error;
+    if (!stage_session_logs(state.paths.log_dir, stem, error)) {
+        state.add_event(error.empty() ? L"session ended with no logs to archive"
+                                      : L"session logs not archived: " + wide_from_utf8(error));
+        return;
+    }
+    if (!error.empty()) {
+        state.add_event(L"session archive is incomplete: " + wide_from_utf8(error));
+    }
+    if (!spawn_session_archiver(session_archive_dir(state.paths.log_dir), error)) {
+        state.add_event(L"session logs kept uncompressed (" + wide_from_utf8(error) +
+                        L"); they are archived at the next start");
+        return;
+    }
+    state.add_event(L"archiving " + std::to_wstring(minutes) + L" min session logs to logs\\sessions\\" +
+                    wide_from_utf8(stem) + L".zip");
+}
+
+}  // namespace
+
 void poll_engine(AppState& state) {
     const EngineProcessState previous = state.engine.snapshot().state;
     state.engine.poll(state.now_s);
+    if (state.session_open && !state.engine.snapshot().process_alive) {
+        finish_session_logs(state);
+    }
 
     // Adopt a stabilisation level changed inside the engine (Ctrl+Alt+S), so
     // the dashboard shows it and the next start keeps it.

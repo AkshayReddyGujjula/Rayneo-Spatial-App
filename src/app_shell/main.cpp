@@ -10,10 +10,13 @@
 #include "app_shell/app_window.h"
 #include "app_shell/clock.h"
 #include "app_shell/diagnostics.h"
+#include "app_shell/session_logs.h"
 
 #include <windows.h>
+#include <shellapi.h>
 #include <shobjidl.h>
 
+#include <filesystem>
 #include <string>
 
 namespace {
@@ -69,12 +72,41 @@ bool bootstrap(gt::AppState& state, std::string& fatal_error) {
     }
     gt::refresh_layout_presets(state);
     gt::run_expensive_diagnostics(state);
+    // Archive what a previous run could not finish (crash, power cut).
+    const std::filesystem::path archive_dir = gt::session_archive_dir(state.paths.log_dir);
+    if (gt::has_pending_session_logs(archive_dir)) {
+        std::string archive_error;
+        if (gt::spawn_session_archiver(archive_dir, archive_error)) {
+            state.add_event(L"archiving session logs left by a previous run");
+        } else {
+            state.add_event(L"session log archive not started: " + gt::wide_from_utf8(archive_error));
+        }
+    }
     return true;
+}
+
+// Detached log-archive helper: no window, no single-instance guard.
+bool run_archiver_mode(int& exit_code) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv == nullptr) {
+        return false;
+    }
+    const bool archiver = argc == 3 && std::wstring(argv[1]) == gt::kArchiveSessionsSwitch;
+    if (archiver) {
+        exit_code = gt::run_session_archiver(std::filesystem::path(argv[2]));
+    }
+    LocalFree(argv);
+    return archiver;
 }
 
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+    int archiver_exit = 0;
+    if (run_archiver_mode(archiver_exit)) {
+        return archiver_exit;
+    }
     enable_dpi_awareness();
     SetCurrentProcessExplicitAppUserModelID(gt::app_user_model_id());
 
