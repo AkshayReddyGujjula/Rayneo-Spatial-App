@@ -166,6 +166,28 @@ int main() {
                                           std::fabs(loaded[i] - result.sensor_to_head[i]));
         }
         check(maximum_difference < 1e-6f, "saved matrix round-trips", maximum_difference, 1e-6f);
+
+        // Magnetometer calibration: optional, round-trips, and survives a
+        // later re-save of the orientation calibration.
+        gt::MagCalibration mag;
+        check(gt::load_mag_calibration(path.string(), mag, error) && !mag.valid,
+              "missing mag calibration is not an error");
+        gt::MagCalibration stored;
+        stored.valid = true;
+        stored.hard_iron_ut = gt::Vec3{-16.97f, -18.64f, 1.82f};
+        stored.field_ut = 51.47f;
+        check(gt::save_mag_calibration(path.string(), stored, error), "mag calibration saves");
+        check(gt::load_mag_calibration(path.string(), mag, error) && mag.valid &&
+                  std::fabs(mag.hard_iron_ut.x + 16.97f) < 1e-3f &&
+                  std::fabs(mag.hard_iron_ut.y + 18.64f) < 1e-3f &&
+                  std::fabs(mag.hard_iron_ut.z - 1.82f) < 1e-3f && std::fabs(mag.field_ut - 51.47f) < 1e-3f,
+              "mag calibration round-trips");
+        check(gt::load_orientation_calibration(path.string(), loaded, error),
+              "orientation still loads with mag keys present");
+        check(gt::save_orientation_calibration(path.string(), result, error) &&
+                  gt::load_mag_calibration(path.string(), mag, error) && mag.valid &&
+                  std::fabs(mag.hard_iron_ut.y + 18.64f) < 1e-3f,
+              "re-saving the orientation keeps the mag calibration");
         std::error_code remove_error;
         std::filesystem::remove(path, remove_error);
     }

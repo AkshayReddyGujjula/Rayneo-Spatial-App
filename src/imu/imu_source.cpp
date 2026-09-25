@@ -2,10 +2,13 @@
 
 #include "imu/gt_hid.h"
 #include "imu/gt_protocol.h"
+#include "util/utf8_path.h"
 
 #include <hidapi.h>
 
 #include <chrono>
+#include <filesystem>
+#include <cstdio>
 
 namespace gt {
 namespace {
@@ -86,6 +89,7 @@ void ImuSource::run() {
         set_status("hidapi initialization failed");
         return;
     }
+    bool raw_log_opened = false;
     while (running_.load()) {
         GtHidDevice device;
         if (!device.open_first()) {
@@ -111,9 +115,27 @@ void ImuSource::run() {
         PoseEstimator estimator;
         PoseEstimator::Config estimator_config;
         estimator_config.sensor_to_head = sensor_to_head_;
+        estimator_config.mag_calibration = mag_calibration_;
         estimator.configure(estimator_config);
         has_pose_.store(false);
         sample_rate_hz_.store(0.0, std::memory_order_relaxed);
+
+        std::FILE* raw_log = nullptr;
+        if (!raw_log_path_.empty()) {
+#ifdef _WIN32
+            if (_wfopen_s(&raw_log, path_from_utf8(raw_log_path_).c_str(),
+                          raw_log_opened ? L"ab" : L"wb") != 0) {
+                raw_log = nullptr;
+            }
+#else
+            raw_log = std::fopen(raw_log_path_.c_str(), raw_log_opened ? "ab" : "wb");
+#endif
+            if (raw_log && !raw_log_opened) {
+                raw_log_opened = true;
+                std::fputs("host_us,tick_100us,ax,ay,az,gx,gy,gz,mx,my,mz,temp_c\n", raw_log);
+            }
+        }
+        const auto raw_log_epoch = SteadyClock::now();
 
         auto rate_window_start = SteadyClock::now();
         int rate_window_samples = 0;
@@ -160,7 +182,30 @@ void ImuSource::run() {
                 rate_window_samples = 0;
             }
 
+            if (raw_log) {
+                const auto host_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                         SteadyClock::now() - raw_log_epoch)
+                                         .count();
+                std::fprintf(raw_log, "%lld,%u,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.2f\n",
+                             static_cast<long long>(host_us), r.imu.tick_100us, r.imu.accel_mps2.x,
+                             r.imu.accel_mps2.y, r.imu.accel_mps2.z, r.imu.gyro_degs.x, r.imu.gyro_degs.y,
+                             r.imu.gyro_degs.z, r.imu.mag_ut.x, r.imu.mag_ut.y, r.imu.mag_ut.z, r.imu.temp_c);
+            }
             const bool ready = estimator.add_sample(r.imu);
+            temp_c_.store(r.imu.temp_c, std::memory_order_relaxed);
+            {
+                const MagHeadingLock& lock = estimator.mag_lock();
+                mag_active_.store(estimator.mag_lock_active(), std::memory_order_relaxed);
+                mag_state_.store(static_cast<int>(lock.state()), std::memory_order_relaxed);
+                mag_error_deg_.store(lock.error_deg(), std::memory_order_relaxed);
+                mag_field_ut_.store(lock.field_ut(), std::memory_order_relaxed);
+                mag_dip_deg_.store(lock.dip_deg(), std::memory_order_relaxed);
+                mag_ref_field_ut_.store(lock.reference_field_ut(), std::memory_order_relaxed);
+                mag_ref_dip_deg_.store(lock.reference_dip_deg(), std::memory_order_relaxed);
+                mag_integral_degs_.store(lock.integral_degs(), std::memory_order_relaxed);
+                mag_total_deg_.store(lock.total_correction_deg(), std::memory_order_relaxed);
+                mag_reacq_.store(lock.reacquisitions(), std::memory_order_relaxed);
+            }
             gx_.store(r.imu.gyro_degs.x, std::memory_order_relaxed);
             gy_.store(r.imu.gyro_degs.y, std::memory_order_relaxed);
             gz_.store(r.imu.gyro_degs.z, std::memory_order_relaxed);
@@ -207,6 +252,9 @@ void ImuSource::run() {
             }
         }
 
+        if (raw_log) {
+            std::fclose(raw_log);
+        }
         device.send_command_verified(kCmdStreamOff, 300, nullptr);
     }
     hid_exit();

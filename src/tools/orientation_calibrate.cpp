@@ -5,6 +5,7 @@
 #include <hidapi.h>
 #include <windows.h>
 
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -21,6 +22,7 @@ using SteadyClock = std::chrono::steady_clock;
 struct Options {
     std::string output_path;
     std::string log_path;
+    bool mag_only = false;
 };
 
 const char* phase_name(gt::CalibrationPhase phase) {
@@ -41,7 +43,9 @@ void print_usage() {
     std::printf(
         "orientation_calibrate - measure RayNeo GT sensor-to-head alignment\n"
         "  --output FILE  calibration output (default config/orientation.json)\n"
-        "  --log FILE     optional raw calibration CSV for diagnosis\n");
+        "  --log FILE     optional raw calibration CSV for diagnosis\n"
+        "  --mag          only calibrate the magnetometer (needs an existing orientation\n"
+        "                 calibration); enables the drift-free heading lock\n");
 }
 
 bool parse_args(int argc, char** argv, Options& options) {
@@ -50,6 +54,8 @@ bool parse_args(int argc, char** argv, Options& options) {
             options.output_path = argv[++i];
         } else if (std::strcmp(argv[i], "--log") == 0 && i + 1 < argc) {
             options.log_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--mag") == 0) {
+            options.mag_only = true;
         } else if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
             print_usage();
             return false;
@@ -248,6 +254,84 @@ bool capture_motion(gt::GtHidDevice& device, gt::CalibrationPhase phase, float c
     return false;
 }
 
+// Guided magnetometer calibration: one contiguous recording of a full slow turn
+// plus nods and tilts. The gyro tracks the attitude, so the fit needs no
+// perfect sphere of orientations - but it does need one uninterrupted
+// recording (a gap breaks the attitude integration).
+int calibrate_magnetometer(gt::GtHidDevice& device, const Options& options, std::ofstream& csv) {
+    std::array<float, 9> existing{};
+    std::string error;
+    if (!gt::load_orientation_calibration(options.output_path, existing, error)) {
+        std::printf("magnetometer calibration needs the orientation calibration first (%s: %s)\n",
+                    options.output_path.c_str(), error.c_str());
+        std::printf("run orientation_calibrate.exe without --mag, then repeat with --mag\n");
+        return 1;
+    }
+    std::printf("\nMagnetometer calibration. Keep phones, speakers and magnets away from your head.\n");
+    gt::CalibrationPhaseData still;
+    gt::Vec3 bias_body;
+    if (!capture_still(device, still, bias_body, csv, error)) {
+        std::printf("calibration failed: %s\n", error.c_str());
+        return 1;
+    }
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        if (!wait_for_enter(
+                "For 45 seconds, move slowly and smoothly:\n"
+                "  1. Turn ALL the way around once (swivel chair, or stand and turn) - about 15 s.\n"
+                "  2. Then nod up and down, tilt ear to shoulder both ways, and look far left,\n"
+                "     far right, up and down, until the timer ends.")) {
+            return 1;
+        }
+        ready_countdown();
+        gt::CalibrationPhaseData motion;
+        const auto start = SteadyClock::now();
+        std::thread ticker([&start]() {
+            for (int s = 5; s <= 45; s += 5) {
+                std::this_thread::sleep_until(start + std::chrono::seconds(s));
+                std::printf("  %d s%s\n", s, s == 15 ? " - now nod, tilt and look around" : "");
+                std::fflush(stdout);
+            }
+        });
+        const bool captured = capture_phase(device, gt::CalibrationPhase::Yaw, 45.0, motion, csv, error);
+        ticker.join();
+        if (!captured) {
+            std::printf("calibration failed: %s\n", error.c_str());
+            return 1;
+        }
+        const gt::MagFitResult fit = gt::fit_mag_hard_iron(motion.samples, bias_body);
+        std::printf("[mag] fit %s: hard_iron=(%.2f, %.2f, %.2f) uT |B|=%.2f uT resid=%.3f uT "
+                    "rotation=%.0f deg tilt=%.0f deg\n",
+                    fit.code, fit.hard_iron_ut.x, fit.hard_iron_ut.y, fit.hard_iron_ut.z, fit.field_ut,
+                    fit.residual_rms_ut, fit.rotation_coverage_deg, fit.tilt_coverage_deg);
+        if (fit.ok) {
+            gt::MagCalibration mag;
+            mag.valid = true;
+            mag.hard_iron_ut = fit.hard_iron_ut;
+            mag.field_ut = fit.field_ut;
+            if (!gt::save_mag_calibration(options.output_path, mag, error)) {
+                std::printf("fit succeeded but could not be saved: %s\n", error.c_str());
+                return 1;
+            }
+            std::printf("[mag] result ok\nSaved %s - the heading lock is on at the next start.\n",
+                        options.output_path.c_str());
+            return 0;
+        }
+        if (std::strcmp(fit.code, "SMALL_COVERAGE") == 0) {
+            std::printf("Not enough movement: turn fully around AND nod/tilt. ");
+        } else if (std::strcmp(fit.code, "POOR_FIT") == 0 || std::strcmp(fit.code, "IMPLAUSIBLE_FIELD") == 0) {
+            std::printf("The field was inconsistent (a magnet, speaker or metal nearby?). "
+                        "Move away from it. ");
+        } else if (std::strcmp(fit.code, "GAP") == 0) {
+            std::printf("The IMU stream had a gap. ");
+        }
+        if (attempt < 3) {
+            std::printf("Let's repeat this step.\n");
+        }
+    }
+    std::printf("magnetometer calibration failed after three attempts; nothing was changed\n");
+    return 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -303,6 +387,10 @@ int main(int argc, char** argv) {
             return 1;
         }
         csv << "phase,host_us,tick_100us,ax,ay,az,gx,gy,gz,mx,my,mz,temp_c\n";
+    }
+
+    if (options.mag_only) {
+        return calibrate_magnetometer(device, options, csv);
     }
 
     std::printf("\nWear the glasses normally and sit upright. Keep your torso facing forward.\n"
@@ -385,5 +473,10 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::printf("[cal] result ok\nSaved %s\n", options.output_path.c_str());
+    gt::MagCalibration mag;
+    std::string mag_error;
+    if (!gt::load_mag_calibration(options.output_path, mag, mag_error) || !mag.valid) {
+        std::printf("Next: run orientation_calibrate.exe --mag once for drift-free heading.\n");
+    }
     return 0;
 }
