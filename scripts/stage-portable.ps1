@@ -18,8 +18,10 @@
       hidapi.dll                HID transport used by the engine
       config\app.json           controller preferences (rewritten at runtime)
       config\layouts\*.json     layouts (default.json is the triple arc)
+      config\layouts\presets\   named presets (triple, ultrawide; user presets are saved here)
       config\orientation.json   per-device calibration, copied only with -IncludeCalibration
-      docs\*.md, README.md      documentation and notices
+      docs\*.md, README.md,
+      LICENSE                   documentation, notices and licence
       scripts\create-start-menu-shortcut.ps1
       logs\                     created empty; engine log, telemetry CSV, status
       PORTABLE-NOTES.txt        how to run it
@@ -127,6 +129,15 @@ if (Test-Path -LiteralPath $layoutsSource) {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $destinationPath "config\layouts") -Force
         $null = $copied.Add("config\layouts\$($_.Name)")
     }
+    $presetsSource = Join-Path $layoutsSource "presets"
+    if (Test-Path -LiteralPath $presetsSource) {
+        $presetsTarget = Join-Path $destinationPath "config\layouts\presets"
+        $null = New-Item -ItemType Directory -Force -Path $presetsTarget
+        Get-ChildItem -LiteralPath $presetsSource -Filter *.json -File | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $presetsTarget -Force
+            $null = $copied.Add("config\layouts\presets\$($_.Name)")
+        }
+    }
 } else {
     throw "config\layouts is missing from the repository; the engine needs at least default.json."
 }
@@ -161,7 +172,7 @@ if ($IncludeCalibration -and (Test-Path -LiteralPath $orientationSource)) {
     Write-Host "folder instead (or re-stage with -IncludeCalibration to copy this machine's file)."
 }
 
-foreach ($document in @("README.md", "docs\WINDOWS-APP.md", "docs\THIRD_PARTY_NOTICES.md")) {
+foreach ($document in @("README.md", "LICENSE", "docs\WINDOWS-APP.md", "docs\THIRD_PARTY_NOTICES.md")) {
     $source = Join-Path $repoRoot $document
     if (Test-Path -LiteralPath $source) {
         $target = Join-Path $destinationPath (Split-Path -Parent $document)

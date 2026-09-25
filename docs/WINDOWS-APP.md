@@ -248,9 +248,9 @@ powershell -ExecutionPolicy Bypass -File scripts\stage-portable.ps1 -BuildDir bu
 
 Stages `dist\RayNeoSpatial` with `RayNeo Spatial.exe`, `spatial_desk.exe`,
 `orientation_calibrate.exe`, `hidapi.dll`, `config\` (app.json with developer state stripped,
-layouts, and per-device `orientation.json` only with `-IncludeCalibration`), `docs\`, `README.md`,
-the shortcut helper, an empty `logs\` and a `PORTABLE-NOTES.txt`. The executables resolve
-everything by walking up from their own location, so the staged folder needs no source tree.
+layouts and the named presets, and per-device `orientation.json` only with `-IncludeCalibration`),
+`docs\`, `README.md`, `LICENSE`, the shortcut helper, an empty `logs\` and a
+`PORTABLE-NOTES.txt`. The executables resolve everything by walking up from their own location, so the staged folder needs no source tree.
 Nothing is installed, no driver is touched, nothing is pinned. Calibrate from the staged folder
 after staging: copying another machine's `orientation.json` would silently bias head tracking.
 
@@ -268,7 +268,10 @@ after staging: copying another machine's `orientation.json` would silently bias 
    (the installer only extracts files; the script registers the `Root\Parsec\VDA` device).
    No reboot was required; the dashboard row flips to `ready` immediately.
 4. **Calibration** — wear the glasses normally and run the calibration tool; it writes
-   `config/orientation.json` and the app refuses to start head tracking without it.
+   `config/orientation.json` and the app refuses to start head tracking without it. Then run
+   `orientation_calibrate.exe --mag` once (turn fully around and nod/tilt while wearing them): it adds the
+   magnetometer calibration to the same file, and the engine then locks yaw to the local field so
+   the workspace cannot drift in heading.
 5. **Workspace sanity** — after *Start workspace*, confirm the new virtual desktops in Windows
    display settings, then move the mouse onto each one and check the dashboard telemetry and the
    engine log for capture errors.
@@ -282,13 +285,15 @@ after staging: copying another machine's `orientation.json` would silently bias 
 
 * Non-ASCII install paths are supported: the engine uses a wide entry point and every file path
   is handled as UTF-8 end to end (command line, status file, telemetry, layout, calibration).
-* The controller never installs a driver and never enables the magnetometer; all of that stays with
-  the engine and with you. The only display change it can make is the manual Recover displays
-  button (re-applies the Extend topology); the workspace takeover and its restore belong to the engine.
+* The controller never installs a driver; that stays with you. The magnetometer heading lock is
+  engine-side and switches on only when `config/orientation.json` carries a `--mag` calibration.
+  The only display change it can make is the manual Recover displays button (re-applies the Extend topology); the workspace takeover and its restore belong to the engine.
 * One engine at a time: `spatial_desk.exe` keeps its single-instance guard, and the controller
   attaches to an already-running engine instead of starting a second one.
-* With no absolute heading reference (magnetometer off) a steady slow yaw is indistinguishable from
-  yaw bias; the estimator's trade-offs are documented in `AGENTS.md` and are unchanged here.
+* Without a magnetometer calibration there is no absolute heading reference, so a steady slow yaw
+  is indistinguishable from yaw bias; the estimator's trade-offs are documented in `AGENTS.md`. A
+  field that changes while you work (a magnet, a moving laptop lid near your head) is gated out
+  rather than corrected.
 * Preview without head tracking is a fixed camera: it exists to verify the render path, and the
   side screens of the triple-screen world cannot be viewed by turning (the dashboard says so when
   this mode starts). Preview also shows labelled test screens, never real desktops: only Start
