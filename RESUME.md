@@ -1,7 +1,7 @@
 # Overnight improvement run — resume notes
 
 Branch: `overnight-claude-improvements` (local only — never push, never merge into `main`).
-Started 2026-11-12 ~22:55 local. Hard stop 07:30 local (2026-11-13).
+Started 2026-11-12 ~22:55 local. Hard stop 10:30 local (2026-11-13) — changed from 07:30 by the user at 23:00.
 
 ## Status
 - [x] Branch created, baseline build + 10/10 ctest green
@@ -35,3 +35,5 @@ Build dirs live under `%LOCALAPPDATA%\Temp\rayneo-overnight\` (never inside the 
   orchestrator session at 03:45. A 07:15 wrap-up nudge was refused by the permission classifier,
   so the orchestrator times the 07:30 stop itself.
 - Plan: Pro plan, weekly limit was 46% at start; keep weekly below ~90%.
+- 23:00 User moved the hard stop to 10:30 local. Second resume nudge `rayneo-overnight-resume-2` scheduled
+  for 08:50 (after the next 5-hour reset); it runs in default permission mode and may pause for approval.
