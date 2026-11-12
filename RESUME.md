@@ -7,7 +7,7 @@ Started 2026-11-12 ~22:55 local. Hard stop 10:30 local (2026-11-13) — changed 
 - [x] Branch created, baseline build + 10/10 ctest green
 - [ ] Track A — tracking, drift, stabilisation (Opus agent, own worktree branch)
 - [ ] Track B — calibration + earbud-magnet robustness (Opus agent, own worktree branch)
-- [ ] Track C — full UI redesign + first-run onboarding (Opus agent, own worktree branch)
+- [x] Track C — UI redesign + setup guide: merged (1ea0a5d), 11/11 green. Live-window check still needed.
 - [ ] Integrate track branches into `overnight-claude-improvements`, full suite, docs, report
 
 ## User decisions (asked before the run)
@@ -37,3 +37,5 @@ Build dirs live under `%LOCALAPPDATA%\Temp\rayneo-overnight\` (never inside the 
 - Plan: Pro plan, weekly limit was 46% at start; keep weekly below ~90%.
 - 23:00 User moved the hard stop to 10:30 local. Second resume nudge `rayneo-overnight-resume-2` scheduled
   for 08:50 (after the next 5-hour reset); it runs in default permission mode and may pause for approval.
+- 23:35 Track C finished (4 commits) and merged into the overnight branch; 11/11 green. Renders in
+  `.claude/worktrees/agent-af4658d0d73d6c1e7/scratch/ui/`. 5-hour usage 54%, weekly 53%.
