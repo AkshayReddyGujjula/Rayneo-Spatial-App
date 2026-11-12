@@ -29,3 +29,9 @@ Build dirs live under `%LOCALAPPDATA%\Temp\rayneo-overnight\` (never inside the 
 
 ## Log
 - 22:55 baseline green (41 s build, 10/10 tests).
+- 22:58 Tracks A/B/C launched as Opus (high) agents in separate git worktrees (branches `worktree-agent-*`).
+  Each self-stops at >=85% of the 5-hour window and writes `docs/overnight/track-<x>.md`.
+  The 5-hour window resets 03:40 local (GMT); scheduled task `rayneo-overnight-resume` nudges the
+  orchestrator session at 03:45. A 07:15 wrap-up nudge was refused by the permission classifier,
+  so the orchestrator times the 07:30 stop itself.
+- Plan: Pro plan, weekly limit was 46% at start; keep weekly below ~90%.
