@@ -151,6 +151,38 @@ bool read_bool(const Json& object, const char* key, bool& out, std::string& erro
     return true;
 }
 
+bool read_ui_fields(const Json& document, AppConfig& parsed, std::string& error) {
+    if (!read_bool(document, "onboarding_complete", parsed.onboarding_complete, error)) {
+        return false;
+    }
+    if (document.contains("theme")) {
+        const Json& value = document.at("theme");
+        if (!value.is_string() || !parse_theme_mode(value.get<std::string>(), parsed.theme)) {
+            error = "field 'theme' must be dark, light or system";
+            return false;
+        }
+    }
+    if (document.contains("last_page")) {
+        // An unknown page (a newer build's page, a typo) falls back to Home
+        // rather than rejecting the whole preference file.
+        const Json& value = document.at("last_page");
+        if (!value.is_string() || !parse_app_page(value.get<std::string>(), parsed.last_page)) {
+            parsed.last_page = AppPage::Home;
+        }
+    }
+    if (document.contains("engine_options")) {
+        const Json& node = document.at("engine_options");
+        if (!node.is_object()) {
+            error = "field 'engine_options' must be an object";
+            return false;
+        }
+        if (!read_bool(node, "motion_prediction", parsed.engine.motion_prediction, error)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool clamp_loaded(AppConfig& config, std::string& error) {
     WindowPlacement& window = config.window;
     if (window.width < 320 || window.width > 32768) {
@@ -323,6 +355,10 @@ std::string app_config_to_json_text(const AppConfig& config) {
         {"window", window_to_json(config.window)},
         {"splits", splits_to_json(config.splits)},
         {"view_comfort", comfort_to_json(config.comfort)},
+        {"onboarding_complete", config.onboarding_complete},
+        {"theme", theme_mode_name(config.theme)},
+        {"last_page", app_page_key(config.last_page)},
+        {"engine_options", Json{{"motion_prediction", config.engine.motion_prediction}}},
     };
     return document.dump(2) + "\n";
 }
@@ -396,6 +432,9 @@ bool load_app_config(const std::filesystem::path& path, AppConfig& config, std::
         return false;
     }
     if (!read_comfort(document, parsed.comfort, error)) {
+        return false;
+    }
+    if (!read_ui_fields(document, parsed, error)) {
         return false;
     }
     if (!clamp_loaded(parsed, error) || !validate_app_config(parsed, error)) {

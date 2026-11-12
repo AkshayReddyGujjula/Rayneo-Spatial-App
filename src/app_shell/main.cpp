@@ -129,6 +129,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         return 0;
     }
 
+    // Anti-aliased shapes are drawn with GDI+; it must outlive the window.
+    gt::ui::GdiplusSession gdiplus;
     gt::ui::AppWindow window;
     std::string error;
     if (!bootstrap(window.state(), error)) {

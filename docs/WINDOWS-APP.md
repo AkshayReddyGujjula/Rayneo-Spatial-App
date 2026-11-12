@@ -46,18 +46,57 @@ Targets added by the controller:
 | `rayneo_app_model` | static library | preference file, layout editing rules, engine command contract, telemetry tail reader (no windows) |
 | `rayneo_app_ui` | static library | Win32 window, tray, engine process owner, read-only health checks |
 | `rayneo_spatial_app` | `RayNeo Spatial.exe` | the GUI controller (WIN32 subsystem) |
-| `app_selftest` | test binary | app-model regression (config, presets, add/remove, session log archive, commands, telemetry) |
+| `app_selftest` | test binary | app-model regression (config, presets, add/remove, session log archive, commands, telemetry, pages/theme preferences, setup guide, calibration progress protocol, animation maths) |
+| `ui_snapshot` | test binary | renders the real UI offscreen for every page at several sizes, DPIs and both themes and checks the hotspot layout (inside the window, no overlaps, every help mark has a topic). `ui_snapshot --out scratch\ui` also writes the frames as PNGs; `--only NAME` filters |
 
 `spatial_desk.exe`, `orientation_calibrate.exe` and the existing test binaries keep their names and
 behaviour. `spatial_desk.exe` gained exactly two things: the private controller messages and the
 optional `--status FILE` switch (both additive; the existing keys, hotkeys and CSV columns are
 unchanged).
 
-## 3. Using the dashboard
+## 3. Using the app
 
-The window has three regions: **Status** (what the machine reports), **Engine control** (the two
-explicit launch actions plus live commands) and the **Layout editor** (presets, screen chips, the
-arc editor and the sliders).
+A sidebar on the left switches between six pages (`Ctrl+1` … `Ctrl+6`); its bottom card always
+shows the engine state, and clicking it returns to Home. Every setting keeps its `?` hover help.
+
+| Page | What it holds |
+|---|---|
+| **Home** | The state in one sentence with the next action (Start workspace / Start preview, or Recenter / Reload layout / Stop while running, with screens, frame rate and uptime), a **Readiness** checklist (glasses display, head calibration, sensor, virtual display driver, layout file) with a fix link for each problem, a layout thumbnail and live head angles |
+| **Layout** | Presets, the arrangement editor (2D map / 3D view, fullscreen), the screen list with Add/Remove and the selected-screen inspector; **Save and apply** and **Revert** in the page header |
+| **Comfort** | Reading stabilisation, screen dimming (with per-screen or focus sliders), night tint and warmth, cursor to centre |
+| **Tracking** | Yaw/pitch tracking (live), preview without head tracking, motion prediction, the magnetic heading lock status, and both calibrations (in-app with live progress, or in a console window) |
+| **Diagnostics** | All eight health checks with their raw detail, Recover displays, the engine log and logs folder, the controller activity log and the newest engine log lines; **Refresh** in the header |
+| **Settings** | Theme (Dark, Light, Match Windows), keep running in the notification area, run the setup guide again, keyboard shortcuts, version and paths, Quit |
+
+### First-run setup guide
+
+On first launch (`onboarding_complete` missing or false in `config/app.json`) a modal guide walks
+through: **Welcome** → **Glasses** (read-only checks: display present, Extend mode, motion sensor,
+Parsec VDD, each with a plain-language fix and *Check again*) → **Head calibration** →
+**Compass** (optional magnetometer calibration; do it wearing what you normally wear, earbuds
+included) → **Layout** (keep the current layout or pick a factory arc) → **Done**. Both
+calibration steps and the guide itself can be skipped; finishing or skipping sets
+`onboarding_complete`, and *Settings → Run setup guide* shows it again. The guide never starts the
+engine and never touches displays; the only file it writes besides `app.json` is the layout,
+and only when a preset was picked and **Finish** pressed.
+
+### In-app calibration
+
+*Calibrate now* (Tracking page or setup guide) runs `orientation_calibrate.exe --progress-json
+--output <calibration>` (plus `--mag` for the compass) with no console window and renders its
+progress: step *n of N*, a progress bar, the current instruction, an optional signal-quality bar,
+and **I'm ready** whenever the tool waits for the wearer (it sends ENTER on the tool's stdin;
+**Cancel** sends `q` and closes stdin, terminating the tool only if it has not exited 4 s later).
+The tool prints one line per state change:
+
+```
+@@progress {"flow":"orientation"|"mag","step":2,"steps":5,"state":"waiting"|"recording"|"ok"|"retry"|"failed"|"done","prompt":"…","detail":"…","quality":0.8}
+```
+
+Other output lines are ignored (the last few are shown if the run fails). If the tool exits
+without a `done` or `failed` line, the run fails with the exit code and offers **Try again**.
+Calibration is disabled while the engine runs (both need the sensor). **Open in console** keeps
+the previous behaviour: the tool in its own console window.
 
 ### Start workspace vs Start preview
 
@@ -69,7 +108,7 @@ The two actions are deliberately separate and neither silently degrades into the
 | **Start preview** | the same plus `--no-virtual-displays` | no; the engine renders labelled test screens only |
 | **Start preview** with *Preview without head tracking* ticked | the same plus `--no-imu` | no; fixed camera, no calibration needed |
 
-A blocked action is disabled and explains itself in the panel, for example:
+A blocked action is disabled and explains itself on Home, for example:
 
 * `Parsec VDD is Not installed; full workspace needs the signed driver, Start preview does not`
 * `orientation calibration is not usable: missing; run orientation_calibrate.exe`
@@ -92,8 +131,8 @@ screen, `Ctrl+Alt+Q` quit.
 
 ### View comfort
 
-The engine panel's **View comfort** section is saved in `config/app.json` (`view_comfort`), passed
-to the engine at start and applied live while it runs:
+The **Comfort** page is saved in `config/app.json` (`view_comfort`), passed to the engine at
+start and applied live while it runs:
 
 | Setting | Choices | Effect |
 |---|---|---|
@@ -106,20 +145,31 @@ to the engine at start and applied live while it runs:
 
 | Key | Effect |
 |---|---|
-| `Tab` / `Shift+Tab` | move focus through every control (focus ring is always visible) |
-| arrows | adjust the focused slider; `PgUp`/`PgDn` ×10, `Home`/`End` to the limit. On a focused button they scroll its panel instead |
+| `Tab` / `Shift+Tab` | move focus through every control; focus rings appear once you use the keyboard and hide again on a mouse click |
+| arrows | adjust the focused slider (`PgUp`/`PgDn` ×10, `Home`/`End` to the limit); move the selection of a focused segmented control (stabilisation, dimming, theme, 2D/3D); on a sidebar item, Up/Down change page. On a focused button they scroll its page instead |
 | `Space` / `Enter` | activate the focused button, chip or toggle |
-| `Esc` | hide to the tray (or quit when *Close to tray* is off) |
+| `Ctrl+1` … `Ctrl+6` | Home, Layout, Comfort, Tracking, Diagnostics, Settings |
+| `Esc` | leave the fullscreen editor; otherwise hide to the tray (or quit when *Keep running in the notification area* is off). Ignored while the setup guide is open |
 | `Ctrl+S` | save the layout and reload the engine |
-| `R` | recenter |
-| mouse wheel | scroll the panel under the cursor (scrollbars appear wherever content overflows; drag the thumb or click the track to page). Over a slider in a panel with nothing to scroll, the wheel adjusts the slider instead |
+| mouse wheel | scroll the page or panel under the cursor (scrollbars appear wherever content overflows; drag the thumb or click the track to page). Over a slider in a panel with nothing to scroll, the wheel adjusts the slider instead |
+
+### Animation and accessibility
+
+Hover and press states ease in and out, segmented controls, the sidebar selection and switches
+slide, sliders tween when changed from the keyboard, pages cross-fade, the engine status pulses
+while starting or stopping, and toasts slide in. The animation timer (15 ms) runs only while a
+value is still moving and stops as soon as everything has settled, so an idle window uses no CPU.
+With Windows *Show animations* off (`SPI_GETCLIENTAREAANIMATION`) every value snaps and nothing
+pulses. The window is per-monitor DPI aware (fonts and every size are scaled; it re-lays out on
+`WM_DPICHANGED`), double-buffered, and resizes down to 760 × 560; below about 1000 px wide the
+sidebar collapses to icons.
 
 ## 4. Layout editor
 
 * **Presets** — factory layouts include single centred, triple arc (default, −45°/0°/+45°),
   quad arc, five arc and a wide 3 × 4 m arc. Named layouts can also be saved and selected; the
   shipped names include `triple` and `ultrawide`. A preset is loaded into the editor and only
-  written when you press **Save and reload**.
+  written when you press **Save and apply**.
 * **Screens** — 1 to 8. **Add screen** allocates the lowest free `screen-N` id and the lowest free
   `vdd_index` (0..15); **Remove** frees both for reuse. Ids and indices are always unique, which is
   what `gt::validate_layout` enforces.
@@ -135,9 +185,14 @@ to the engine at start and applied live while it runs:
 * **Sliders** — yaw, pitch, roll, distance, width, height for the selected screen, plus field of
   view and the capture policy (active/mid/idle FPS, enter/leave hysteresis). Coupled values are
   normalised as you drag: `1 <= idle <= mid <= active` and `enter > leave` always hold.
-* **Save and reload** validates, writes `config/layouts/default.json` atomically through
+* **Save and apply** validates, writes `config/layouts/default.json` atomically through
   `gt::save_layout` (temporary file + `MoveFileEx`), and then tells the engine to reload it
   immediately. **Revert** re-reads the file from disk and discards unsaved edits.
+* **Splitter** — drag the divider between the arrangement editor and the inspector; the
+  inspector's share of the row is remembered in `splits.column`. (The earlier dashboard had
+  splitters between its six stacked panels; those panels are now separate pages, so
+  `splits.left` / `splits.right` are still read and written for compatibility but no longer
+  used.)
 
 `config/layouts/default.json` keeps the exact schema the engine has always read, so an edited file
 stays compatible with `spatial_desk.exe --layout`.
@@ -163,7 +218,11 @@ ignored within version 1, while an unsupported version is rejected explicitly.
   "window": { "x": 120, "y": 90, "width": 1180, "height": 860, "maximized": false },
   "view_comfort": { "stabilise": "medium", "dim_mode": "off",
                     "screen_brightness_pct": [100, 100, 100, 100, 100, 100, 100, 100],
-                    "focus_dim_pct": 40, "night_tint": false, "night_tint_pct": 50 }
+                    "focus_dim_pct": 40, "night_tint": false, "night_tint_pct": 50 },
+  "onboarding_complete": true,
+  "theme": "dark",
+  "last_page": "home",
+  "engine_options": { "motion_prediction": false }
 }
 ```
 
@@ -179,6 +238,10 @@ ignored within version 1, while an unsupported version is rejected explicitly.
 | `view_comfort.screen_brightness_pct` | up to 8 values, 10..100 | manual brightness per layout screen (`--screen-brightness`) |
 | `view_comfort.focus_dim_pct` | 10..100 | brightness of the screens you are not looking at (`--focus-dim`) |
 | `view_comfort.night_tint` / `night_tint_pct` | bool / 0..100 | warm tint (`--night-tint`, 0 = off) |
+| `onboarding_complete` | bool (missing = false) | the first-run setup guide was finished or skipped |
+| `theme` | `dark` (default), `light`, `system` | controller colours; `system` follows the Windows app theme |
+| `last_page` | `home`, `layout`, `comfort`, `tracking`, `diagnostics`, `settings` | page shown at launch; an unknown value falls back to Home |
+| `engine_options.motion_prediction` | bool (default false) | engine motion prediction; applies at the next engine start |
 
 The controller writes this file at runtime (window placement, last mode, last engine error), so a
 dirty working tree after running the app is expected.
@@ -211,11 +274,12 @@ dirty working tree after running the app is expected.
   is read back at no more than 2 Hz and only its tail is parsed.
 * **Polling**: the health timer is the only recurring timer, it can never be faster than 500 ms
   (twice per second), and HID/VDD/calibration checks run at most every 2 s. A second timer exists
-  only while a transition is on screen (engine starting, toast fading) and is killed immediately
-  afterwards; the idle UI is fully event-driven.
-* **Recovery states** are explicit: the banner names the failure, `Open engine log` shows the
-  engine's own output, `Run calibration` starts the guided tool in its own console, and the status
-  rows keep the VDD/calibration/display state visible. A failed engine never leaves a stale "ready"
+  only while something animates (see *Animation and accessibility*) and is killed as soon as it
+  settles; the idle UI is fully event-driven. In-app calibration output arrives through a posted
+  message from the reader thread, not a poll.
+* **Recovery states** are explicit: the banner (dismissible) names the failure, `Open engine log`
+  shows the engine's own output, the Tracking page runs calibration in-app or in its own console,
+  and the health checks keep the VDD/calibration/display state visible. A failed engine never leaves a stale "ready"
   claim: `logs/engine-status.txt` carries `state=failed` plus the reason.
 
 ## 7. Tray lifecycle and pinning

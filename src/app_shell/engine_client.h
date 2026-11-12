@@ -79,7 +79,15 @@ public:
     HWND window() const { return window_; }
     bool busy() const;
 
+    // Offscreen render tool only (ui_snapshot): show a given engine state
+    // without any process. The controller never calls this.
+    void set_preview_snapshot(const EngineSnapshot& snapshot, bool busy) {
+        snapshot_ = snapshot;
+        preview_busy_ = busy;
+    }
+
 private:
+    bool preview_busy_ = false;
     void close_process();
     void release();
     void query_request(HWND window);

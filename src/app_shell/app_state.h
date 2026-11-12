@@ -7,11 +7,15 @@
 
 #include "app_shell/app_config.h"
 #include "app_shell/app_layout.h"
+#include "app_shell/calibration_progress.h"
 #include "app_shell/diagnostics.h"
 #include "app_shell/engine_client.h"
 #include "app_shell/engine_commands.h"
+#include "app_shell/onboarding.h"
 #include "app_shell/paths.h"
 #include "app_shell/telemetry.h"
+#include "app_shell/ui_anim.h"
+#include "app_shell/ui_model.h"
 
 #include <windows.h>
 
@@ -67,7 +71,35 @@ enum UiId : int {
     kUiNightTint = 1331,
     kUiNightTintStrength = 1332,
     kUiCursorToCenter = 1333,
+    // Redesigned shell (sidebar pages, setup guide, in-app calibration).
+    kUiNavBase = 1400,    // + AppPage: sidebar navigation
+    kUiGoBase = 1410,     // + AppPage: in-page "go to" links
+    kUiThemeBase = 1420,  // + ThemeMode
+    kUiRunSetupGuide = 1430,
+    kUiBannerDismiss = 1431,
+    kUiEditor2D = 1432,
+    kUiEditor3D = 1433,
+    kUiMotionPrediction = 1434,
+    kUiStatusCard = 1435,
+    kUiCalHeadStart = 1440,   // in-app head calibration (--progress-json)
+    kUiCalMagStart = 1441,    // in-app compass calibration (--mag)
+    kUiCalMagConsole = 1442,  // compass calibration in a console window
+    kUiCalContinue = 1443,    // answer the tool's "press ENTER when ready"
+    kUiCalCancel = 1444,
+    kUiCalRetry = 1445,
+    kUiCalDismiss = 1446,
+    kUiWizardNext = 1450,
+    kUiWizardBack = 1451,
+    kUiWizardSkipStep = 1452,
+    kUiWizardSkipAll = 1453,
+    kUiWizardRecheck = 1454,
+    kUiWizardPresetKeep = 1459,
+    kUiWizardPresetBase = 1460,  // + LayoutPreset
 };
+
+inline bool ui_is_wizard(int id) {
+    return id >= kUiWizardNext && id < kUiWizardPresetBase + 16;
+}
 
 inline bool ui_is_comfort_slider(int id) {
     return (id >= kUiBrightnessBase && id < kUiBrightnessBase + kComfortMaxScreens) ||
@@ -120,12 +152,10 @@ inline COLORREF severity_color(Severity severity) {
 // cache below every frame, and input (wheel, thumb drag, focus reveal) works
 // off that cache.
 enum ScrollPanel : int {
-    kScrollStatus = 0,
-    kScrollEngine = 1,
-    kScrollDiagnostics = 2,
-    kScrollLayout = 3,
-    kScrollFields = 4,
-    kScrollPanelCount = 5,
+    kScrollPage = 0,       // the current page's content column
+    kScrollInspector = 1,  // the Layout page's selected-screen inspector
+    kScrollWizard = 2,     // the setup guide's step body
+    kScrollPanelCount = 3,
 };
 
 // Splitter drag geometry, refreshed by the paint pass (same cache pattern as
@@ -142,6 +172,9 @@ struct SplitterTrack {
     int span_start_px = 0;  // content start in client px (column divider)
     int column = 0;         // 0 = left gaps, 1 = right gaps, 2 = column divider
     int index = 0;          // gap index within the column (rows) or 0
+    // Column divider measured from the right: the fraction is the share of
+    // the row right of the divider ((span_start_px - x) / span_px).
+    bool from_right = false;
     bool valid = false;
 };
 
@@ -243,6 +276,22 @@ struct AppState {
     int drag_scroll_grab = 0;
     SplitterTrack split_track[kUiSplitCount];
     int drag_splitter = -1;
+
+    // Redesigned shell.
+    AppPage page = AppPage::Home;
+    anim::Transition page_transition;
+    anim::Animator anim;
+    int press_id = 0;            // element under a held mouse button
+    bool focus_visible = false;  // focus rings only after keyboard navigation
+    bool dark = true;            // resolved theme (config.theme + Windows setting)
+    bool system_light = false;   // Windows "apps use light theme"
+    bool repaint_requested = false;  // a paint clamped a scroll offset
+    OnboardingFlow onboarding;
+    CalRunState cal_run;             // the in-app calibration run, if any
+    bool cal_in_wizard = false;      // the run was started from the setup guide
+    // Magnetic heading lock as reported by the engine. Integration point:
+    // set it from the engine status file / telemetry in poll_engine().
+    HeadingLockState heading_lock = HeadingLockState::Unknown;
 
     void add_event(const std::wstring& text);
     void set_banner(const std::wstring& text, Severity severity);
