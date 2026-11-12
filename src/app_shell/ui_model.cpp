@@ -166,6 +166,8 @@ bool parse_heading_lock_state(const std::string& text, HeadingLockState& state) 
         state = HeadingLockState::Disturbed;
     } else if (key == "relearning" || key == "re-learning") {
         state = HeadingLockState::Relearning;
+    } else if (key == "acquiring") {
+        state = HeadingLockState::Acquiring;
     } else if (key == "unknown" || key.empty()) {
         state = HeadingLockState::Unknown;
     } else {
@@ -177,13 +179,15 @@ bool parse_heading_lock_state(const std::string& text, HeadingLockState& state) 
 const wchar_t* heading_lock_label(HeadingLockState state) {
     switch (state) {
         case HeadingLockState::Off:
-            return L"Off";
+            return L"Gyro only";
         case HeadingLockState::Locked:
             return L"Locked";
         case HeadingLockState::Disturbed:
-            return L"Disturbed";
+            return L"Interference";
         case HeadingLockState::Relearning:
-            return L"Re-learning";
+            return L"Checking";
+        case HeadingLockState::Acquiring:
+            return L"Finding north";
         case HeadingLockState::Unknown:
         default:
             return L"Not reported";
@@ -193,17 +197,28 @@ const wchar_t* heading_lock_label(HeadingLockState state) {
 const wchar_t* heading_lock_detail(HeadingLockState state) {
     switch (state) {
         case HeadingLockState::Off:
-            return L"No magnetic calibration is in use, so heading relies on the gyro alone.";
+            return L"Heading uses the gyro only. Calibrate the compass below to stop slow sideways drift.";
         case HeadingLockState::Locked:
-            return L"Heading is held to the local magnetic field; slow sideways drift is removed.";
+            return L"Heading locked to the magnetic field, so the centre screen cannot slowly drift sideways.";
         case HeadingLockState::Disturbed:
-            return L"A changing magnetic field was detected nearby; the lock is paused until it settles.";
+            return L"Magnetic interference nearby: holding the current heading until the field settles.";
         case HeadingLockState::Relearning:
-            return L"The surroundings changed; the lock is learning the new field without a jump.";
+            return L"Checking a magnetic change (earbuds put in or taken out?) before trusting it again.";
+        case HeadingLockState::Acquiring:
+            return L"Finding magnetic north; this takes a few seconds after the start.";
         case HeadingLockState::Unknown:
         default:
-            return L"Shown while the engine runs and reports the heading lock.";
+            return L"Shown while the engine runs with head tracking and reports the heading lock.";
     }
+}
+
+int predict_ms_choice_index(int predict_ms) {
+    for (int i = 0; i < kPredictMsChoiceCount; ++i) {
+        if (kPredictMsChoices[i] == predict_ms) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 }  // namespace gt

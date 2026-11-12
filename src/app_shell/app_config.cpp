@@ -176,7 +176,18 @@ bool read_ui_fields(const Json& document, AppConfig& parsed, std::string& error)
             error = "field 'engine_options' must be an object";
             return false;
         }
-        if (!read_bool(node, "motion_prediction", parsed.engine.motion_prediction, error)) {
+        // "motion_prediction" (bool) was written by builds whose switch was
+        // never wired to the engine; it is accepted and ignored, so older
+        // files load with the measured default (predict_ms 35).
+        bool legacy_prediction = false;
+        if (!read_bool(node, "motion_prediction", legacy_prediction, error)) {
+            return false;
+        }
+        if (!read_int(node, "predict_ms", parsed.engine.predict_ms, error)) {
+            return false;
+        }
+        parsed.engine.predict_ms = std::clamp(parsed.engine.predict_ms, 0, kPredictMsMax);
+        if (!read_bool(node, "mag_track_hard_iron", parsed.engine.mag_track_hard_iron, error)) {
             return false;
         }
     }
@@ -358,7 +369,8 @@ std::string app_config_to_json_text(const AppConfig& config) {
         {"onboarding_complete", config.onboarding_complete},
         {"theme", theme_mode_name(config.theme)},
         {"last_page", app_page_key(config.last_page)},
-        {"engine_options", Json{{"motion_prediction", config.engine.motion_prediction}}},
+        {"engine_options", Json{{"predict_ms", config.engine.predict_ms},
+                                {"mag_track_hard_iron", config.engine.mag_track_hard_iron}}},
     };
     return document.dump(2) + "\n";
 }

@@ -266,6 +266,86 @@ void test_engine_commands() {
               gt::engine_status_summary(failed_status).find("virtual display startup failed") !=
                   std::string::npos,
           "a failed status carries its reason into the summary");
+
+    // Engine options (Tracking page) -> engine flags.
+    const auto value_after = [](const std::vector<std::string>& arguments, const char* flag) {
+        for (size_t index = 0; index + 1 < arguments.size(); ++index) {
+            if (arguments[index] == flag) {
+                return arguments[index + 1];
+            }
+        }
+        return std::string();
+    };
+    const auto has_flag = [](const std::vector<std::string>& arguments, const char* flag) {
+        for (const std::string& argument : arguments) {
+            if (argument == flag) {
+                return true;
+            }
+        }
+        return false;
+    };
+    check(gt::build_engine_launch_command(engine, working, layout, calibration, status, engine_log, telemetry,
+                                          gt::LaunchMode::Workspace, true, -1, 0.0f, command, error) &&
+              value_after(command.arguments, gt::kEngineArgPredictMs) == "35" &&
+              !has_flag(command.arguments, gt::kEngineArgMagTrackHardIron),
+          "default engine options pass --predict-ms 35 and no hard-iron tracking");
+    gt::EngineOptions options;
+    options.predict_ms = 0;
+    options.mag_track_hard_iron = true;
+    check(gt::build_engine_launch_command(engine, working, layout, calibration, status, engine_log, telemetry,
+                                          gt::LaunchMode::Preview, true, -1, 0.0f, command, error,
+                                          gt::ViewComfort{}, options) &&
+              value_after(command.arguments, gt::kEngineArgPredictMs) == "0" &&
+              has_flag(command.arguments, gt::kEngineArgMagTrackHardIron) &&
+              command.command_line.find(" --predict-ms 0") != std::string::npos,
+          "prediction off passes --predict-ms 0; the earbud switch passes --mag-track-hard-iron");
+    options.predict_ms = 50;
+    check(gt::build_engine_launch_command(engine, working, layout, calibration, status, engine_log, telemetry,
+                                          gt::LaunchMode::Preview, false, -1, 0.0f, command, error,
+                                          gt::ViewComfort{}, options) &&
+              !has_flag(command.arguments, gt::kEngineArgPredictMs) &&
+              !has_flag(command.arguments, gt::kEngineArgMagTrackHardIron),
+          "without head tracking no IMU option is passed");
+    check(gt::build_engine_launch_command(engine, working, layout, calibration, status, engine_log, telemetry,
+                                          gt::LaunchMode::Preview, true, -1, 0.0f, command, error,
+                                          gt::ViewComfort{}, options) &&
+              value_after(command.arguments, gt::kEngineArgPredictMs) == "50",
+          "a 50 ms choice is forwarded");
+    options.predict_ms = 101;
+    check(!gt::build_engine_launch_command(engine, working, layout, calibration, status, engine_log, telemetry,
+                                           gt::LaunchMode::Preview, true, -1, 0.0f, command, error,
+                                           gt::ViewComfort{}, options),
+          "a prediction horizon outside 0..100 ms is rejected");
+    check(gt::predict_ms_choice_index(0) == 0 && gt::predict_ms_choice_index(35) == 2 &&
+              gt::predict_ms_choice_index(50) == 3 && gt::predict_ms_choice_index(40) == -1,
+          "prediction choices map to segment indices; other values select none");
+
+    // Heading-lock status keys -> Tracking page badge state.
+    const auto lock_of = [&](const std::string& text) {
+        gt::EngineStatusFile parsed;
+        std::string parse_error;
+        if (!gt::parse_engine_status(text, parsed, parse_error)) {
+            return gt::HeadingLockState::Unknown;
+        }
+        return gt::heading_lock_from_status(parsed);
+    };
+    gt::EngineStatusFile mag_status;
+    check(gt::parse_engine_status("state=ready\nimu=1\nmag=locked\nmag_error_deg=0.62\nmag_offset_ut=1.25\n",
+                                  mag_status, error) &&
+              mag_status.mag == "locked" && std::fabs(mag_status.mag_error_deg - 0.62) < 1e-9 &&
+              std::fabs(mag_status.mag_offset_ut - 1.25) < 1e-9,
+          "mag, mag_error_deg and mag_offset_ut are read back");
+    check(lock_of("state=ready\nimu=1\nmag=off\n") == gt::HeadingLockState::Off &&
+              lock_of("state=ready\nimu=1\nmag=acquiring\n") == gt::HeadingLockState::Acquiring &&
+              lock_of("state=ready\nimu=1\nmag=locked\n") == gt::HeadingLockState::Locked &&
+              lock_of("state=ready\nimu=1\nmag=disturbed\n") == gt::HeadingLockState::Disturbed &&
+              lock_of("state=ready\nimu=1\nmag=relearning\n") == gt::HeadingLockState::Relearning,
+          "every engine mag state maps to its badge state");
+    check(lock_of("state=ready\nimu=1\n") == gt::HeadingLockState::Unknown &&
+              lock_of("state=ready\nimu=0\nmag=off\n") == gt::HeadingLockState::Unknown &&
+              lock_of("state=ready\nimu=1\nmag=spinning\n") == gt::HeadingLockState::Unknown &&
+              gt::heading_lock_from_status(gt::EngineStatusFile{}) == gt::HeadingLockState::Unknown,
+          "an older engine, a fixed camera, an unknown value or no status reads as Not reported");
 }
 
 void test_app_config(const std::filesystem::path& directory) {
@@ -1026,6 +1106,7 @@ void test_ui_model(const std::filesystem::path& directory) {
               gt::parse_heading_lock_state("relearning", lock) &&
               lock == gt::HeadingLockState::Relearning &&
               gt::parse_heading_lock_state("off", lock) && lock == gt::HeadingLockState::Off &&
+              gt::parse_heading_lock_state("acquiring", lock) && lock == gt::HeadingLockState::Acquiring &&
               !gt::parse_heading_lock_state("spinning", lock),
           "heading-lock states parse; unknown words are refused");
     check(std::wcslen(gt::heading_lock_detail(gt::HeadingLockState::Locked)) > 30 &&
@@ -1035,19 +1116,23 @@ void test_ui_model(const std::filesystem::path& directory) {
     // Persistence: defaults, round trip, legacy files and bad values.
     gt::AppConfig defaults;
     check(!defaults.onboarding_complete && defaults.theme == gt::ThemeMode::Dark &&
-              defaults.last_page == gt::AppPage::Home && !defaults.engine.motion_prediction,
-          "new UI preferences default to: guide pending, dark theme, Home page, prediction off");
+              defaults.last_page == gt::AppPage::Home && defaults.engine.predict_ms == 35 &&
+              !defaults.engine.mag_track_hard_iron,
+          "new UI preferences default to: guide pending, dark theme, Home page, prediction 35 ms, "
+          "hard-iron tracking off");
     gt::AppConfig custom;
     custom.onboarding_complete = true;
     custom.theme = gt::ThemeMode::System;
     custom.last_page = gt::AppPage::Diagnostics;
-    custom.engine.motion_prediction = true;
+    custom.engine.predict_ms = 20;
+    custom.engine.mag_track_hard_iron = true;
     std::string error;
     gt::AppConfig loaded;
     check(gt::save_app_config(directory / "ui-prefs.json", custom, error) &&
               gt::load_app_config(directory / "ui-prefs.json", loaded, error) &&
               loaded.onboarding_complete && loaded.theme == gt::ThemeMode::System &&
-              loaded.last_page == gt::AppPage::Diagnostics && loaded.engine.motion_prediction,
+              loaded.last_page == gt::AppPage::Diagnostics && loaded.engine.predict_ms == 20 &&
+              loaded.engine.mag_track_hard_iron,
           "guide completion, theme, last page and engine options round-trip through app.json");
     write_text(directory / "ui-legacy.json", "{\"version\": 1, \"close_to_tray\": false}\n");
     check(gt::load_app_config(directory / "ui-legacy.json", loaded, error) &&
@@ -1066,6 +1151,22 @@ void test_ui_model(const std::filesystem::path& directory) {
                "{\"version\": 1, \"engine_options\": {\"motion_prediction\": 1}}\n");
     check(!gt::load_app_config(directory / "ui-badopts.json", loaded, error),
           "a non-boolean engine option is rejected");
+    check(gt::load_app_config(directory / "ui-legacy.json", loaded, error) && loaded.engine.predict_ms == 35 &&
+              !loaded.engine.mag_track_hard_iron,
+          "an app.json without engine options loads with prediction 35 ms and tracking off");
+    write_text(directory / "ui-oldopts.json",
+               "{\"version\": 1, \"engine_options\": {\"motion_prediction\": false}}\n");
+    check(gt::load_app_config(directory / "ui-oldopts.json", loaded, error) && loaded.engine.predict_ms == 35,
+          "the never-wired motion_prediction switch is ignored: old files get the 35 ms default");
+    write_text(directory / "ui-predict.json",
+               "{\"version\": 1, \"engine_options\": {\"predict_ms\": 250, \"mag_track_hard_iron\": true}}\n");
+    check(gt::load_app_config(directory / "ui-predict.json", loaded, error) && loaded.engine.predict_ms == 100 &&
+              loaded.engine.mag_track_hard_iron,
+          "a hand-edited prediction above the engine range is clamped to 100 ms");
+    write_text(directory / "ui-predict-bad.json",
+               "{\"version\": 1, \"engine_options\": {\"predict_ms\": \"fast\"}}\n");
+    check(!gt::load_app_config(directory / "ui-predict-bad.json", loaded, error),
+          "a non-integer prediction horizon is rejected");
 }
 
 void test_calibration_progress() {

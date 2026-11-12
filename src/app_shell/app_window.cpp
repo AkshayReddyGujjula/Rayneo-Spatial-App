@@ -1227,6 +1227,7 @@ void AppWindow::adjust_focused(WPARAM key) {
     const Group groups[] = {{kUiStabiliseBase, kComfortStabiliseLevels},
                             {kUiDimModeBase, kDimModeCount},
                             {kUiThemeBase, kThemeModeCount},
+                            {kUiPredictBase, kPredictMsChoiceCount},
                             {kUiEditor2D, 2}};
     for (const Group& group : groups) {
         if (focus >= group.base && focus < group.base + group.count && (key == VK_LEFT || key == VK_RIGHT)) {
@@ -1464,12 +1465,16 @@ void AppWindow::execute(int id, int arg) {
             state_.editor_3d = id == kUiEditor3D;
             invalidate();
             return;
-        case kUiMotionPrediction:
-            state_.config.engine.motion_prediction = !state_.config.engine.motion_prediction;
+        case kUiMagTrackHardIron:
+            state_.config.engine.mag_track_hard_iron = !state_.config.engine.mag_track_hard_iron;
             save_comfort(state_);
-            state_.show_toast(state_.config.engine.motion_prediction
-                                  ? L"Motion prediction on; applies the next time the engine starts"
-                                  : L"Motion prediction off; applies the next time the engine starts");
+            state_.show_toast(state_.config.engine.mag_track_hard_iron
+                                  ? L"Earbud magnet compensation on; applies the next time the engine starts"
+                                  : L"Earbud magnet compensation off; applies the next time the engine starts");
+            invalidate();
+            return;
+        case kUiCalEarbuds:
+            state_.cal_earbuds = !state_.cal_earbuds;
             invalidate();
             return;
         case kUiCalHeadStart:
@@ -1512,6 +1517,16 @@ void AppWindow::execute(int id, int arg) {
             return;
         default:
             break;
+    }
+    if (id >= kUiPredictBase && id < kUiPredictBase + kPredictMsChoiceCount) {
+        state_.config.engine.predict_ms = kPredictMsChoices[id - kUiPredictBase];
+        save_comfort(state_);
+        state_.show_toast(state_.config.engine.predict_ms == 0
+                              ? std::wstring(L"Turn prediction off; applies the next time the engine starts")
+                              : L"Turn prediction " + std::to_wstring(state_.config.engine.predict_ms) +
+                                    L" ms; applies the next time the engine starts");
+        invalidate();
+        return;
     }
     if (id >= kUiStabiliseBase && id < kUiStabiliseBase + kComfortStabiliseLevels) {
         state_.config.comfort.stabilise_level = id - kUiStabiliseBase;

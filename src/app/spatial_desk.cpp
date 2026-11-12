@@ -470,11 +470,11 @@ bool parse_args(int argc, char** argv, Options& opt, bool& show_help) {
             opt.no_imu = true;
         } else if (std::strcmp(a, "--no-smoothing") == 0) {
             opt.smoothing = false;
-        } else if (std::strcmp(a, "--predict-ms") == 0 && i + 1 < argc) {
+        } else if (std::strcmp(a, gt::kEngineArgPredictMs) == 0 && i + 1 < argc) {
             opt.predict_ms = std::max(0.0f, std::min(100.0f, static_cast<float>(std::atof(argv[++i]))));
         } else if (std::strcmp(a, "--no-mag") == 0) {
             opt.mag = false;
-        } else if (std::strcmp(a, "--mag-track-hard-iron") == 0) {
+        } else if (std::strcmp(a, gt::kEngineArgMagTrackHardIron) == 0) {
             opt.mag_track_hard_iron = true;
         } else if (std::strcmp(a, "--freeze-still") == 0 ||
                    std::strcmp(a, "--no-freeze-still") == 0) {

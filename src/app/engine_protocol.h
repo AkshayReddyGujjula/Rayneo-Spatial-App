@@ -81,6 +81,10 @@ inline constexpr const char* kEngineArgMonitor = "--monitor";
 inline constexpr const char* kEngineArgFov = "--fov";
 inline constexpr const char* kEngineArgNoVirtualDisplays = "--no-virtual-displays";
 inline constexpr const char* kEngineArgNoImu = "--no-imu";
+// Turn prediction horizon in ms (0 = off, engine default 35, clamped 0..100).
+inline constexpr const char* kEngineArgPredictMs = "--predict-ms";
+// Experimental online hard-iron tracking for head-worn magnets (default off).
+inline constexpr const char* kEngineArgMagTrackHardIron = "--mag-track-hard-iron";
 
 // Status-file keys and values (one "key=value" per line, LF terminated).
 inline constexpr const char* kStatusKeyState = "state";

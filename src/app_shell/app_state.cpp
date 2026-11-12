@@ -167,7 +167,7 @@ bool start_engine(AppState& state, LaunchMode mode, std::wstring& error) {
             narrow_utf8(state.paths.layout_path), narrow_utf8(state.paths.calibration_path),
             narrow_utf8(state.paths.engine_status), narrow_utf8(state.paths.engine_log),
             narrow_utf8(state.paths.telemetry_log), mode, head_tracking, state.config.monitor_index,
-            0.0f, command, build_error, state.config.comfort)) {
+            0.0f, command, build_error, state.config.comfort, state.config.engine)) {
         error = wide_from_utf8(build_error);
         return false;
     }
@@ -528,6 +528,7 @@ void poll_engine(AppState& state) {
             state.engine_status = EngineStatusFile{};
         }
     }
+    state.heading_lock = heading_lock_from_status(state.engine_status);
 
     if (state.engine.snapshot().state == EngineProcessState::Exited && state.engine_status.parsed &&
         state.engine_status.state == kStatusFailed) {

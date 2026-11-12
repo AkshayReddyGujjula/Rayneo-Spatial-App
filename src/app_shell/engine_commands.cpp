@@ -111,7 +111,7 @@ bool build_engine_launch_command(const std::string& engine_executable,
                                  const std::string& telemetry_path, LaunchMode mode,
                                  bool head_tracking, int monitor_index, float fov_deg,
                                  EngineLaunchCommand& command, std::string& error,
-                                 const ViewComfort& comfort) {
+                                 const ViewComfort& comfort, const EngineOptions& options) {
     if (engine_executable.empty()) {
         error = "engine executable path is empty";
         return false;
@@ -137,6 +137,10 @@ bool build_engine_launch_command(const std::string& engine_executable,
         return false;
     }
     if (!validate_view_comfort(comfort, error)) {
+        return false;
+    }
+    if (options.predict_ms < 0 || options.predict_ms > kPredictMsMax) {
+        error = "turn prediction must be 0..100 ms";
         return false;
     }
 
@@ -169,6 +173,15 @@ bool build_engine_launch_command(const std::string& engine_executable,
         built.arguments.push_back(number_text(static_cast<double>(fov_deg)));
     }
     append_view_comfort_args(comfort, built.arguments);
+    if (head_tracking) {
+        // Always explicit, so the controller's choice wins over whatever
+        // default a rebuilt engine ships with.
+        built.arguments.push_back(kEngineArgPredictMs);
+        built.arguments.push_back(std::to_string(options.predict_ms));
+        if (options.mag_track_hard_iron) {
+            built.arguments.push_back(kEngineArgMagTrackHardIron);
+        }
+    }
     if (!telemetry_path.empty()) {
         built.arguments.push_back(kEngineArgLog);
         built.arguments.push_back(telemetry_path);
@@ -237,6 +250,12 @@ bool parse_engine_status(const std::string& text, EngineStatusFile& status, std:
             parse_double(value, parsed.elapsed_s);
         } else if (key == kStatusKeyUpdated) {
             parse_uint64(value, parsed.updated_unix);
+        } else if (key == kStatusKeyMag) {
+            parsed.mag = value;
+        } else if (key == kStatusKeyMagError) {
+            parse_double(value, parsed.mag_error_deg);
+        } else if (key == kStatusKeyMagOffset) {
+            parse_double(value, parsed.mag_offset_ut);
         }
     }
     if (!saw_state) {
@@ -246,6 +265,15 @@ bool parse_engine_status(const std::string& text, EngineStatusFile& status, std:
     parsed.parsed = true;
     status = parsed;
     return true;
+}
+
+HeadingLockState heading_lock_from_status(const EngineStatusFile& status) {
+    HeadingLockState state = HeadingLockState::Unknown;
+    if (!status.parsed || !status.imu || status.mag.empty() ||
+        !parse_heading_lock_state(status.mag, state)) {
+        return HeadingLockState::Unknown;
+    }
+    return state;
 }
 
 bool engine_status_is_fresh(const EngineStatusFile& status, uint64_t now_unix, uint64_t max_age_s) {

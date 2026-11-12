@@ -459,10 +459,14 @@ int tracking_card_head(Ui& ui, int left, int top, int width) {
         {kUiPreviewWithoutHeadTracking, L"Preview without head tracking",
          L"Start preview pins the camera still, for arranging screens at your desk (--no-imu).",
          s.config.preview_without_head_tracking, !busy, kRowNoImu, HelpTopic::EngineNoImu},
-        {kUiMotionPrediction, L"Motion prediction",
-         L"Predicts head motion slightly ahead to reduce lag on fast turns. Applies at the next start.",
-         s.config.engine.motion_prediction, true, kRowPrediction, HelpTopic::EngineMotionPrediction},
+        {kUiMagTrackHardIron, L"Earbud magnet compensation (experimental)",
+         L"Keeps the compass steady when earbuds go in or out. Untested on glasses. Applies at the next "
+         L"start.",
+         s.config.engine.mag_track_hard_iron, true, kRowMagTrack, HelpTopic::EngineMagTrackHardIron},
     };
+    const std::wstring predict_desc =
+        L"Shows the world slightly ahead during fast head turns. Raise it if screens trail a quick turn, "
+        L"lower it if they overshoot. Applies at the next start.";
     // Measure.
     const int text_w = inner_w - ui.px(size::switch_w) - help_mark_width(ui.dpi) - ui.px(space::lg) * 2;
     int rows_h = 0;
@@ -470,9 +474,13 @@ int tracking_card_head(Ui& ui, int left, int top, int width) {
         rows_h += std::max(ui.px(44), ui.px(24) + wrapped_text_height(ui.c.dc(), ui.f.small, text_w, row.description)) +
                   ui.px(space::lg) * 2 + 1;
     }
+    const int predict_desc_h = wrapped_text_height(ui.c.dc(), ui.f.small, text_w, predict_desc);
+    const int predict_h = ui.px(24) + predict_desc_h + ui.px(space::md) + ui.px(size::control) +
+                          ui.px(space::lg) * 2 + 1;
     const std::wstring lock_detail = heading_lock_detail(s.heading_lock);
     const int lock_h = ui.px(24) + wrapped_text_height(ui.c.dc(), ui.f.small, text_w, lock_detail);
-    const int height = pad + ui.px(30) + ui.px(space::sm) + rows_h + std::max(ui.px(44), lock_h) + pad;
+    const int height =
+        pad + ui.px(30) + ui.px(space::sm) + rows_h + predict_h + std::max(ui.px(44), lock_h) + pad;
     RECT frame = rect_of(left, top, width, height);
     card(ui, frame);
     ui.c.text(ui.f.title, ui.t.text, rect_of(left + pad, top + pad, inner_w, ui.px(28)), L"Head tracking");
@@ -482,6 +490,25 @@ int tracking_card_head(Ui& ui, int left, int top, int width) {
         y += switch_row(ui, row.id, left + pad, y, inner_w, row.title, row.description, row.value, row.enabled,
                         kHelpEngine, row.help_row, row.topic);
         y += ui.px(space::lg);
+        ui.c.fill(rect_of(left + pad, y, inner_w, 1), ui.t.border);
+        y += 1;
+    }
+    // Turn prediction (--predict-ms): Off / 20 / 35 / 50 ms.
+    {
+        const int help_w = help_mark_width(ui.dpi);
+        y += ui.px(space::lg);
+        ui.c.text(ui.f.body_strong, ui.t.text, rect_of(left + pad, y, text_w, ui.px(22)), L"Turn prediction");
+        ui.c.text(ui.f.small, ui.t.text_dim, rect_of(left + pad, y + ui.px(24), text_w, predict_desc_h), predict_desc,
+                  DT_LEFT | DT_TOP | DT_WORDBREAK);
+        y += ui.px(24) + predict_desc_h + ui.px(space::md);
+        static const wchar_t* const kNames[kPredictMsChoiceCount] = {L"Off", L"20 ms", L"35 ms", L"50 ms"};
+        RECT seg = rect_of(left + pad, y, std::min(inner_w - help_w - ui.px(space::md), ui.px(420)),
+                           ui.px(size::control));
+        segmented(ui, kUiPredictBase, seg, kNames, kPredictMsChoiceCount,
+                  predict_ms_choice_index(s.config.engine.predict_ms));
+        ui.help(kHelpEngine, kRowPrediction, HelpTopic::EngineMotionPrediction,
+                rect_of(seg.right + ui.px(space::md), y + (rh(seg) - help_w) / 2, help_w, help_w));
+        y += rh(seg) + ui.px(space::lg);
         ui.c.fill(rect_of(left + pad, y, inner_w, 1), ui.t.border);
         y += 1;
     }
@@ -496,6 +523,7 @@ int tracking_card_head(Ui& ui, int left, int top, int width) {
             dot = ui.t.warning;
             break;
         case HeadingLockState::Relearning:
+        case HeadingLockState::Acquiring:
             dot = ui.t.accent;
             break;
         case HeadingLockState::Off:
@@ -512,7 +540,8 @@ int tracking_card_head(Ui& ui, int left, int top, int width) {
     RECT badge = rect_of(frame.right - pad - help_w - ui.px(space::lg) - badge_w, y + ui.px(4), badge_w, ui.px(28));
     draw_badge(ui.c, badge, L"", dot, ui.f.small_strong);
     draw_status_dot(ui.c, badge.left + ui.px(14), (badge.top + badge.bottom) / 2, ui.px(4), dot,
-                    pulse_phase(ui, s.heading_lock == HeadingLockState::Relearning));
+                    pulse_phase(ui, s.heading_lock == HeadingLockState::Relearning ||
+                                        s.heading_lock == HeadingLockState::Acquiring));
     ui.c.text(ui.f.small_strong, dot == ui.t.text_faint ? ui.t.text_dim : dot,
               RECT{badge.left + ui.px(26), badge.top, badge.right - ui.px(10), badge.bottom}, lock_label);
     ui.help(kHelpEngine, kRowHeadingLock, HelpTopic::HeadingLockStatus,

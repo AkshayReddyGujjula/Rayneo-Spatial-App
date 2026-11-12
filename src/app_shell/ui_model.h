@@ -50,25 +50,38 @@ bool theme_is_dark(ThemeMode mode, bool system_uses_light_theme);
 // engine at integration time (launch switch or live message); the UI only
 // edits and persists them. Add new options here, then wire them in
 // app_state.cpp (launch command) and the Tracking page.
+// Turn prediction choices offered by the Tracking page (engine --predict-ms;
+// 0 = off). 35 ms is the engine default measured in docs/overnight/track-a.md.
+inline constexpr int kPredictMsDefault = 35;
+inline constexpr int kPredictMsMax = 100;  // the engine clamps to 0..100
+inline constexpr int kPredictMsChoiceCount = 4;
+inline constexpr int kPredictMsChoices[kPredictMsChoiceCount] = {0, 20, 35, 50};
+// Index of value in kPredictMsChoices, or -1 for a hand-edited other value.
+int predict_ms_choice_index(int predict_ms);
+
 struct EngineOptions {
-    // Short-horizon head-motion prediction in the renderer. Default off
-    // until the engine side ships and is measured.
-    bool motion_prediction = false;
+    // Motion-to-photon prediction horizon during fast head turns, passed as
+    // --predict-ms. 0 = off. Inactive below 10 deg/s, so reading is unaffected.
+    int predict_ms = kPredictMsDefault;
+    // Experimental online hard-iron tracking for head-worn magnets such as
+    // earbuds (--mag-track-hard-iron). Off by default: unverified on glasses.
+    bool mag_track_hard_iron = false;
 
     bool operator==(const EngineOptions& other) const {
-        return motion_prediction == other.motion_prediction;
+        return predict_ms == other.predict_ms && mag_track_hard_iron == other.mag_track_hard_iron;
     }
     bool operator!=(const EngineOptions& other) const { return !(*this == other); }
 };
 
-// Magnetic heading lock as reported by the engine (status file or
-// telemetry). Unknown means "this engine does not report it".
+// Magnetic heading lock as reported by the engine (status file key "mag").
+// Unknown means "not running / this engine does not report it".
 enum class HeadingLockState : int {
     Unknown = 0,
     Off,
     Locked,
     Disturbed,
     Relearning,
+    Acquiring,
 };
 
 bool parse_heading_lock_state(const std::string& text, HeadingLockState& state);
