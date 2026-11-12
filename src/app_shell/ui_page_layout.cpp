@@ -507,8 +507,16 @@ void paint_editor_card(Ui& ui, const RECT& frame) {
     } else {
         hint = L"Drag a screen sideways for yaw and up or down for pitch. Tab to the map for arrow keys.";
     }
-    ui.c.text(ui.f.caption, t.text_faint, rect_of(frame.left + pad, canvas_rect.bottom + ui.px(space::sm), rw(frame) - pad * 2, hint_h),
-              hint, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    // Layout summary on the right of the hint row (the hint yields first).
+    const std::wstring summary = wide_from_utf8(layout_summary(s.layout));
+    const int row_w = rw(frame) - pad * 2;
+    const int summary_w = std::min(text_width(ui.c.dc(), ui.f.caption, summary), row_w / 2);
+    const int hint_y = canvas_rect.bottom + ui.px(space::sm);
+    ui.c.text(ui.f.caption, t.text_dim, rect_of(frame.right - pad - summary_w, hint_y, summary_w, hint_h), summary,
+              DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    ui.c.text(ui.f.caption, t.text_faint,
+              rect_of(frame.left + pad, hint_y, std::max(0, row_w - summary_w - ui.px(space::lg)), hint_h), hint,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     if (!quick) {
         return;
     }

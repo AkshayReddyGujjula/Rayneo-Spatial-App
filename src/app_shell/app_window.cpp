@@ -450,11 +450,8 @@ void AppWindow::navigate(AppPage page) {
     state_.page_transition.begin(state_.now_s, kPageTransitionS);
     state_.scroll[kScrollPage].offset = 0;
     state_.hover_id = kUiNone;
+    // Persisted with the rest of the preferences on close (no disk write per click).
     state_.config.last_page = page;
-    if (state_.config_valid) {
-        std::wstring ignored;
-        save_config_to_disk(state_, ignored);
-    }
     invalidate();
     update_animation_timer();
 }
