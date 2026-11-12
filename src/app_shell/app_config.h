@@ -9,6 +9,7 @@
 // a full disk can never leave a half-written preference file behind.
 
 #include "app/view_comfort.h"
+#include "app_shell/ui_model.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -54,6 +55,13 @@ struct AppConfig {
     WindowPlacement window;
     SplitFractions splits;
     ViewComfort comfort;  // reading stabilisation, dimming, night tint
+    // Controller UI: first-run guide completion, colour theme and the page
+    // shown at launch.
+    bool onboarding_complete = false;
+    ThemeMode theme = ThemeMode::Dark;
+    AppPage last_page = AppPage::Home;
+    // Options carried to the engine (see EngineOptions in ui_model.h).
+    EngineOptions engine;
 };
 
 inline constexpr int kMinHealthPollMs = 500;

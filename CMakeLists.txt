@@ -74,9 +74,13 @@ add_library(rayneo_app_model STATIC
   src/app/view_comfort.cpp
   src/app_shell/app_config.cpp
   src/app_shell/app_layout.cpp
+  src/app_shell/calibration_progress.cpp
   src/app_shell/engine_commands.cpp
+  src/app_shell/onboarding.cpp
   src/app_shell/session_logs.cpp
   src/app_shell/telemetry.cpp
+  src/app_shell/ui_anim.cpp
+  src/app_shell/ui_model.cpp
 )
 target_include_directories(rayneo_app_model PUBLIC src)
 target_link_libraries(rayneo_app_model PUBLIC nlohmann_json::nlohmann_json rayneo_layout)

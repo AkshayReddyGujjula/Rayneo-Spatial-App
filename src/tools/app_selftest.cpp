@@ -10,7 +10,11 @@
 #include "app/view_comfort.h"
 #include "app_shell/app_config.h"
 #include "app_shell/app_layout.h"
+#include "app_shell/calibration_progress.h"
 #include "app_shell/engine_commands.h"
+#include "app_shell/onboarding.h"
+#include "app_shell/ui_anim.h"
+#include "app_shell/ui_model.h"
 #include "app_shell/session_logs.h"
 #include "util/utf8_path.h"
 #include "app_shell/telemetry.h"
@@ -985,6 +989,362 @@ void test_view_comfort(const std::filesystem::path& directory) {
           "launch refuses invalid comfort settings");
 }
 
+void test_ui_model(const std::filesystem::path& directory) {
+    std::printf("app_selftest: pages, theme and engine-option preferences\n");
+    bool pages_round_trip = true;
+    std::set<std::string> keys;
+    for (int i = 0; i < gt::kAppPageCount; ++i) {
+        const auto page = static_cast<gt::AppPage>(i);
+        gt::AppPage parsed = gt::AppPage::Count;
+        pages_round_trip = pages_round_trip && gt::parse_app_page(gt::app_page_key(page), parsed) &&
+                           parsed == page && std::wcslen(gt::app_page_label(page)) > 0 &&
+                           std::wcslen(gt::app_page_title(page)) > 0 &&
+                           std::wcslen(gt::app_page_subtitle(page)) > 20;
+        keys.insert(gt::app_page_key(page));
+    }
+    check(pages_round_trip, "every page has a key, label, title and description that round-trip");
+    check(keys.size() == static_cast<size_t>(gt::kAppPageCount), "page keys are distinct");
+    gt::AppPage page = gt::AppPage::Layout;
+    check(!gt::parse_app_page("nonsense", page) && page == gt::AppPage::Layout,
+          "an unknown page key is refused and leaves the value alone");
+
+    gt::ThemeMode mode = gt::ThemeMode::Dark;
+    check(gt::parse_theme_mode("Light", mode) && mode == gt::ThemeMode::Light &&
+              gt::parse_theme_mode("system", mode) && mode == gt::ThemeMode::System &&
+              !gt::parse_theme_mode("sepia", mode),
+          "theme names parse case-insensitively and reject unknown names");
+    check(gt::theme_is_dark(gt::ThemeMode::Dark, true) &&
+              !gt::theme_is_dark(gt::ThemeMode::Light, false) &&
+              gt::theme_is_dark(gt::ThemeMode::System, false) &&
+              !gt::theme_is_dark(gt::ThemeMode::System, true),
+          "System follows the Windows app theme; Dark and Light are fixed");
+
+    gt::HeadingLockState lock = gt::HeadingLockState::Unknown;
+    check(gt::parse_heading_lock_state("locked", lock) && lock == gt::HeadingLockState::Locked &&
+              gt::parse_heading_lock_state("Disturbed", lock) &&
+              lock == gt::HeadingLockState::Disturbed &&
+              gt::parse_heading_lock_state("relearning", lock) &&
+              lock == gt::HeadingLockState::Relearning &&
+              gt::parse_heading_lock_state("off", lock) && lock == gt::HeadingLockState::Off &&
+              !gt::parse_heading_lock_state("spinning", lock),
+          "heading-lock states parse; unknown words are refused");
+    check(std::wcslen(gt::heading_lock_detail(gt::HeadingLockState::Locked)) > 30 &&
+              std::wstring(gt::heading_lock_label(gt::HeadingLockState::Unknown)) == L"Not reported",
+          "heading-lock states have user-facing wording");
+
+    // Persistence: defaults, round trip, legacy files and bad values.
+    gt::AppConfig defaults;
+    check(!defaults.onboarding_complete && defaults.theme == gt::ThemeMode::Dark &&
+              defaults.last_page == gt::AppPage::Home && !defaults.engine.motion_prediction,
+          "new UI preferences default to: guide pending, dark theme, Home page, prediction off");
+    gt::AppConfig custom;
+    custom.onboarding_complete = true;
+    custom.theme = gt::ThemeMode::System;
+    custom.last_page = gt::AppPage::Diagnostics;
+    custom.engine.motion_prediction = true;
+    std::string error;
+    gt::AppConfig loaded;
+    check(gt::save_app_config(directory / "ui-prefs.json", custom, error) &&
+              gt::load_app_config(directory / "ui-prefs.json", loaded, error) &&
+              loaded.onboarding_complete && loaded.theme == gt::ThemeMode::System &&
+              loaded.last_page == gt::AppPage::Diagnostics && loaded.engine.motion_prediction,
+          "guide completion, theme, last page and engine options round-trip through app.json");
+    write_text(directory / "ui-legacy.json", "{\"version\": 1, \"close_to_tray\": false}\n");
+    check(gt::load_app_config(directory / "ui-legacy.json", loaded, error) &&
+              !loaded.onboarding_complete && loaded.theme == gt::ThemeMode::Dark &&
+              loaded.last_page == gt::AppPage::Home && !loaded.close_to_tray,
+          "an app.json written before the redesign loads with the guide pending");
+    write_text(directory / "ui-badpage.json", "{\"version\": 1, \"last_page\": \"future\"}\n");
+    check(gt::load_app_config(directory / "ui-badpage.json", loaded, error) &&
+              loaded.last_page == gt::AppPage::Home,
+          "an unknown last_page falls back to Home instead of rejecting the file");
+    write_text(directory / "ui-badtheme.json", "{\"version\": 1, \"theme\": \"neon\"}\n");
+    check(!gt::load_app_config(directory / "ui-badtheme.json", loaded, error) &&
+              error.find("theme") != std::string::npos,
+          "an unknown theme is rejected with a reason");
+    write_text(directory / "ui-badopts.json",
+               "{\"version\": 1, \"engine_options\": {\"motion_prediction\": 1}}\n");
+    check(!gt::load_app_config(directory / "ui-badopts.json", loaded, error),
+          "a non-boolean engine option is rejected");
+}
+
+void test_calibration_progress() {
+    std::printf("app_selftest: calibration progress protocol\n");
+    gt::CalProgressEvent event;
+    std::string error;
+    check(gt::parse_cal_progress_line(
+              "@@progress {\"flow\":\"orientation\",\"step\":2,\"steps\":5,\"state\":\"recording\","
+              "\"prompt\":\"Look left\",\"detail\":\"hold still\",\"quality\":0.75}\r\n",
+              event, error) == gt::CalLineKind::Progress &&
+              event.flow == gt::CalFlow::Orientation && event.step == 2 && event.steps == 5 &&
+              event.state == gt::CalStepState::Recording && event.prompt == "Look left" &&
+              event.detail == "hold still" && std::fabs(event.quality - 0.75f) < 1e-6f,
+          "a full progress line parses every field (CRLF tolerated)");
+    check(gt::parse_cal_progress_line("@@progress {\"flow\":\"mag\",\"state\":\"waiting\"}", event,
+                                      error) == gt::CalLineKind::Progress &&
+              event.flow == gt::CalFlow::Mag && event.step == 0 && event.steps == 0 &&
+              event.prompt.empty() && event.quality < 0.0f,
+          "missing optional fields take their defaults");
+    check(gt::parse_cal_progress_line("@@progress {\"flow\":\"mag\",\"state\":\"ok\","
+                                      "\"quality\":-1}",
+                                      event, error) == gt::CalLineKind::Progress &&
+              event.quality < 0.0f,
+          "quality -1 means no figure");
+    check(gt::parse_cal_progress_line("@@progress {\"flow\":\"mag\",\"state\":\"ok\","
+                                      "\"quality\":3.5,\"step\":9,\"steps\":4}",
+                                      event, error) == gt::CalLineKind::Progress &&
+              event.quality < 0.0f && event.step == 4,
+          "out-of-range quality reads as none and step is clamped to steps");
+    check(gt::parse_cal_progress_line("Press ENTER when ready", event, error) ==
+                  gt::CalLineKind::NotProgress &&
+              gt::parse_cal_progress_line("", event, error) == gt::CalLineKind::NotProgress &&
+              gt::parse_cal_progress_line("@@progressive scan", event, error) ==
+                  gt::CalLineKind::NotProgress,
+          "ordinary console lines are not progress");
+    const char* const malformed[] = {
+        "@@progress",
+        "@@progress {not json",
+        "@@progress [1,2]",
+        "@@progress {\"state\":\"ok\"}",
+        "@@progress {\"flow\":\"orientation\"}",
+        "@@progress {\"flow\":\"compass\",\"state\":\"ok\"}",
+        "@@progress {\"flow\":\"mag\",\"state\":\"thinking\"}",
+        "@@progress {\"flow\":\"mag\",\"state\":\"ok\",\"step\":\"2\"}",
+        "@@progress {\"flow\":\"mag\",\"state\":\"ok\",\"prompt\":5}",
+        "@@progress {\"flow\":\"mag\",\"state\":\"ok\",\"quality\":\"high\"}",
+    };
+    bool all_malformed = true;
+    for (const char* line : malformed) {
+        const bool rejected =
+            gt::parse_cal_progress_line(line, event, error) == gt::CalLineKind::Malformed &&
+            !error.empty();
+        if (!rejected) {
+            std::printf("    not rejected: %s\n", line);
+        }
+        all_malformed = all_malformed && rejected;
+    }
+    check(all_malformed, "malformed progress lines (bad JSON, missing/invalid flow or state, "
+                         "wrong field types) are rejected with a reason");
+
+    gt::CalRunState run;
+    run.begin(gt::CalFlow::Orientation);
+    check(run.running() && !run.awaiting_user() && run.fraction() == 0.0f,
+          "a started run is running with no progress");
+    run.consume_line("RayNeo GT orientation calibration");
+    run.consume_line("@@progress {\"flow\":\"orientation\",\"step\":1,\"steps\":4,"
+                     "\"state\":\"waiting\",\"prompt\":\"Sit upright\"}");
+    check(run.awaiting_user() && run.prompt == "Sit upright" && run.recent_output.size() == 1,
+          "a waiting event asks the wearer to continue; console text is kept aside");
+    run.consume_line("@@progress {\"flow\":\"orientation\",\"step\":1,\"steps\":4,"
+                     "\"state\":\"recording\"}");
+    check(!run.awaiting_user() && run.prompt == "Sit upright" &&
+              std::fabs(run.fraction() - 0.125f) < 1e-6f,
+          "recording keeps the last prompt and counts half a step");
+    run.consume_line("@@progress {\"flow\":\"orientation\",\"step\":3,\"steps\":4,"
+                     "\"state\":\"ok\",\"quality\":0.9}");
+    check(std::fabs(run.fraction() - 0.75f) < 1e-6f && run.quality > 0.89f,
+          "an ok step completes that step");
+    run.consume_line("@@progress {broken");
+    check(run.malformed_lines == 1 && run.running(), "a malformed line is counted, not fatal");
+    run.consume_line("@@progress {\"flow\":\"orientation\",\"step\":4,\"steps\":4,"
+                     "\"state\":\"done\",\"prompt\":\"Saved\"}");
+    run.process_exited(0);
+    check(run.phase == gt::CalRunState::Phase::Succeeded && run.fraction() == 1.0f,
+          "done finishes the run; the later exit does not overturn it");
+
+    gt::CalRunState failed;
+    failed.begin(gt::CalFlow::Mag);
+    failed.consume_line("@@progress {\"flow\":\"mag\",\"step\":2,\"steps\":3,\"state\":\"failed\","
+                        "\"detail\":\"Field too weak\"}");
+    check(failed.phase == gt::CalRunState::Phase::Failed && failed.failure == "Field too weak",
+          "a failed event fails the run with the tool's reason");
+
+    gt::CalRunState silent;
+    silent.begin(gt::CalFlow::Orientation);
+    silent.consume_line("unknown or incomplete option: --progress-json");
+    silent.process_exited(1);
+    check(silent.phase == gt::CalRunState::Phase::Failed &&
+              silent.failure.find("exit code 1") != std::string::npos &&
+              silent.failure.find("--progress-json") != std::string::npos &&
+              !silent.recent_output.empty(),
+          "an exit without done/failed is a clear failure naming the exit code");
+
+    gt::CalRunState partial;
+    partial.begin(gt::CalFlow::Orientation);
+    partial.consume_line("@@progress {\"flow\":\"orientation\",\"step\":2,\"steps\":4,"
+                         "\"state\":\"recording\"}");
+    partial.process_exited(3);
+    check(partial.phase == gt::CalRunState::Phase::Failed &&
+              partial.failure.find("--progress-json") == std::string::npos,
+          "a mid-run exit fails without blaming the protocol");
+
+    gt::CalRunState cancelled;
+    cancelled.begin(gt::CalFlow::Orientation);
+    cancelled.cancel();
+    cancelled.process_exited(1);
+    check(cancelled.phase == gt::CalRunState::Phase::Cancelled,
+          "a cancelled run stays cancelled when the tool then exits");
+
+    gt::CalRunState noisy;
+    noisy.begin(gt::CalFlow::Orientation);
+    for (int i = 0; i < 40; ++i) {
+        noisy.consume_line("line " + std::to_string(i));
+    }
+    check(noisy.recent_output.size() == gt::CalRunState::kRecentLines &&
+              noisy.recent_output.back() == "line 39",
+          "recent console output is bounded to the newest lines");
+}
+
+void test_onboarding(const std::filesystem::path& directory) {
+    std::printf("app_selftest: first-run setup guide\n");
+    gt::AppConfig config;
+    check(gt::onboarding_should_show(config), "a fresh install shows the setup guide");
+    gt::OnboardingFlow flow;
+    flow.start();
+    check(flow.active && flow.step == gt::OnboardingStep::Welcome && !flow.can_go_back() &&
+              !flow.step_skippable(),
+          "the guide opens on Welcome with no Back and no Skip");
+    flow.back();
+    check(flow.step == gt::OnboardingStep::Welcome, "Back on the first step stays put");
+    flow.next();
+    check(flow.step == gt::OnboardingStep::GlassesCheck && flow.can_go_back(),
+          "Next moves to the glasses check");
+    flow.next();
+    check(flow.step == gt::OnboardingStep::HeadCalibration && flow.step_skippable(),
+          "the head calibration step is skippable");
+    flow.mark_head_calibrated();
+    flow.next();
+    check(flow.head == gt::StepOutcome::Completed && flow.step == gt::OnboardingStep::MagCalibration,
+          "a completed calibration stays completed when moving on");
+    flow.skip_step();
+    check(flow.mag == gt::StepOutcome::Skipped && flow.step == gt::OnboardingStep::LayoutPreset,
+          "Skip marks the compass step skipped and advances");
+    flow.back();
+    flow.back();
+    check(flow.step == gt::OnboardingStep::HeadCalibration && flow.head == gt::StepOutcome::Completed,
+          "Back keeps earlier outcomes");
+    flow.next();
+    flow.next();
+    flow.preset_choice = static_cast<int>(gt::LayoutPreset::QuadArc);
+    flow.next();
+    check(flow.on_last_step() && flow.preset_choice == static_cast<int>(gt::LayoutPreset::QuadArc),
+          "the layout choice survives to the final step");
+    flow.next();
+    check(flow.step == gt::OnboardingStep::Done, "Next on Done does not run past the end");
+
+    gt::OnboardingFlow passed;
+    passed.start();
+    for (int i = 0; i < 4; ++i) {
+        passed.next();
+    }
+    check(passed.head == gt::StepOutcome::Skipped && passed.mag == gt::StepOutcome::Skipped,
+          "pressing Next through pending calibrations records them as skipped");
+    bool labelled = true;
+    for (int i = 0; i < gt::kOnboardingStepCount; ++i) {
+        const auto step = static_cast<gt::OnboardingStep>(i);
+        labelled = labelled && std::wcslen(gt::onboarding_step_label(step)) > 0 &&
+                   std::wcslen(gt::onboarding_step_title(step)) > 5;
+    }
+    check(labelled, "every step has a stepper label and a title");
+
+    gt::onboarding_close(flow, config);
+    check(!flow.active && config.onboarding_complete && !gt::onboarding_should_show(config),
+          "finishing (or skipping) closes the guide and marks it complete");
+    std::string error;
+    gt::AppConfig reloaded;
+    check(gt::save_app_config(directory / "onboarding.json", config, error) &&
+              gt::load_app_config(directory / "onboarding.json", reloaded, error) &&
+              !gt::onboarding_should_show(reloaded),
+          "completion persists, so the guide does not reappear on the next launch");
+    reloaded.onboarding_complete = false;
+    check(gt::onboarding_should_show(reloaded),
+          "clearing the flag (Run setup guide again) shows it again");
+}
+
+void test_animation() {
+    std::printf("app_selftest: animation maths\n");
+    check(gt::anim::ease_out_cubic(0.0f) == 0.0f && gt::anim::ease_out_cubic(1.0f) == 1.0f &&
+              gt::anim::ease_out_cubic(0.5f) > 0.5f && gt::anim::ease_out_cubic(-3.0f) == 0.0f &&
+              gt::anim::ease_out_cubic(9.0f) == 1.0f,
+          "ease-out starts at 0, ends at 1, front-loads motion and clamps");
+    check(std::fabs(gt::anim::ease_in_out_cubic(0.5f) - 0.5f) < 1e-6f &&
+              gt::anim::ease_in_out_cubic(0.25f) < 0.25f &&
+              gt::anim::ease_in_out_cubic(0.75f) > 0.75f,
+          "ease-in-out is symmetric about the midpoint");
+    bool monotonic = true;
+    float previous = 0.0f;
+    for (int i = 1; i <= 100; ++i) {
+        const float value = gt::anim::ease_in_out_cubic(static_cast<float>(i) / 100.0f);
+        monotonic = monotonic && value >= previous;
+        previous = value;
+    }
+    check(monotonic, "ease-in-out never moves backwards");
+    check(gt::anim::ease_out_back(1.0f) > 0.999f && gt::anim::ease_out_back(0.7f) > 1.0f,
+          "ease-out-back overshoots slightly then lands on 1");
+
+    // Exponential approach: frame-rate independent and exact at the end.
+    float coarse = 0.0f;
+    float fine = 0.0f;
+    coarse = gt::anim::approach(coarse, 1.0f, 0.1f, 0.1f, 0.0f);
+    for (int i = 0; i < 10; ++i) {
+        fine = gt::anim::approach(fine, 1.0f, 0.01f, 0.1f, 0.0f);
+    }
+    check(std::fabs(coarse - fine) < 1e-4f && std::fabs(coarse - (1.0f - std::exp(-1.0f))) < 1e-4f,
+          "approach is frame-rate independent (one 100 ms step == ten 10 ms steps)");
+    check(gt::anim::approach(0.999f, 1.0f, 0.016f, 0.1f) == 1.0f,
+          "approach snaps onto the target inside epsilon");
+
+    gt::anim::Transition transition;
+    check(transition.progress(5.0) == 1.0f && !transition.active(5.0),
+          "an unstarted transition reads as finished");
+    transition.begin(10.0, 0.2);
+    check(transition.active(10.1) && std::fabs(transition.progress(10.1) - 0.5f) < 1e-5f &&
+              transition.progress(11.0) == 1.0f && !transition.active(11.0),
+          "a transition runs linearly over its duration");
+
+    gt::anim::Animator animator;
+    const uint64_t hover = gt::anim::key(gt::anim::kHover, 42);
+    animator.begin_frame();
+    check(animator.track(hover, 0.0f) == 0.0f, "a new value starts at its target (no pop-in)");
+    animator.end_frame();
+    check(!animator.animating(), "a settled animator wants no timer");
+    animator.begin_frame();
+    animator.track(hover, 1.0f);
+    animator.end_frame();
+    check(animator.animating(), "a new target starts an animation");
+    int frames = 0;
+    while (animator.step(0.016) && frames < 200) {
+        ++frames;
+    }
+    animator.begin_frame();
+    const float settled = animator.track(hover, 1.0f);
+    animator.end_frame();
+    check(settled == 1.0f && frames > 3 && frames < 60,
+          "a hover fade settles exactly within a second, then the timer can stop");
+    animator.begin_frame();
+    animator.end_frame();
+    check(animator.size() == 0, "values not painted this frame are dropped");
+
+    animator.set_reduce_motion(true);
+    animator.begin_frame();
+    animator.track(hover, 0.0f);
+    animator.track(hover, 1.0f);
+    const float reduced = animator.track(hover, 1.0f);
+    animator.end_frame();
+    check(reduced == 1.0f && !animator.animating(),
+          "with Windows animations off every value snaps");
+    animator.begin_frame();
+    animator.request_frames();
+    check(!animator.wants_frames(), "pulses request no frames when animations are off");
+    animator.set_reduce_motion(false);
+    animator.request_frames();
+    check(animator.wants_frames(), "a pulse requests frames while animations are on");
+    animator.begin_frame();
+    check(!animator.wants_frames(), "the frame request lasts one paint");
+    animator.snap(hover, 0.25f);
+    check(animator.track(hover, 0.25f) == 0.25f, "snap jumps a value (slider drag)");
+}
+
 int main() {
     std::printf("app_selftest: controller app model\n");
     std::filesystem::path directory;
@@ -1014,6 +1374,10 @@ int main() {
     test_session_logs(directory);
     test_telemetry();
     test_view_comfort(directory);
+    test_ui_model(directory);
+    test_calibration_progress();
+    test_onboarding(directory);
+    test_animation();
 
     std::filesystem::remove_all(directory, directory_error);
     std::printf("app_selftest: %s (%d failures)\n", failures == 0 ? "PASS" : "FAIL", failures);
