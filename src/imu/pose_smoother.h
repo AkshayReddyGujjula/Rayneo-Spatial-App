@@ -30,6 +30,24 @@ public:
         float hold_inner_deg = 0.0f;
         float hold_outer_deg = 0.0f;
         float hold_settle_tau_s = 0.0f;
+        // Motion-to-photon prediction (applied to the output, after the
+        // 1-euro and the hold): the shown pose is extrapolated by predict_s
+        // along the head's raw angular velocity (frame-to-frame, low-passed
+        // at predict_cutoff_hz). The
+        // extrapolation fades in between predict_gate_lo_degs and
+        // predict_gate_hi_degs of head speed, so it is exactly zero while
+        // reading or still (no added jitter) and full during turns.
+        // predict_s <= 0 disables it. 35 ms: on the 2026-09-25 worn session
+        // (imu_replay --smooth-eval --latency L) it cuts the turning error
+        // against the pose L later by 49-65% (rms 3.72 -> 1.91, 2.92 -> 1.19,
+        // 2.44 -> 0.86 deg at L = 40/25/15 ms, medium stabilisation; the
+        // 1-euro and reading hold add lag of their own, so the best horizon
+        // is longer than the display latency) with every reading metric
+        // unchanged to the printed digit.
+        float predict_s = 0.035f;
+        float predict_cutoff_hz = 8.0f;
+        float predict_gate_lo_degs = 10.0f;
+        float predict_gate_hi_degs = 30.0f;
     };
 
     void configure(const Config& config) { config_ = config; }
@@ -41,12 +59,17 @@ public:
 
 private:
     Quat apply_hold(const Quat& target, float dt_s);
+    Quat prediction_lead(const Quat& input, float dt_s);
 
     Config config_;
     Quat smoothed_{1.0f, 0.0f, 0.0f, 0.0f};
     Quat held_{1.0f, 0.0f, 0.0f, 0.0f};
     float speed_degs_ = 0.0f;
     bool have_sample_ = false;
+    // Prediction: previous raw pose and the low-passed body-frame angular
+    // velocity (deg/s).
+    Quat prev_raw_{1.0f, 0.0f, 0.0f, 0.0f};
+    Vec3 omega_degs_{};
 };
 
 // Reading-stabilisation presets (the engine's --stabilise and Ctrl+Alt+S):

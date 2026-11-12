@@ -43,6 +43,9 @@ public:
     uint32_t escape_rollbacks() const {
         return escape_rollbacks_.load(std::memory_order_relaxed);
     }
+    // Startup confirmation outcomes (PoseEstimator::Config::startup_confirm_s).
+    uint32_t startup_reseeds() const { return startup_reseeds_.load(std::memory_order_relaxed); }
+    uint32_t startup_reverts() const { return startup_reverts_.load(std::memory_order_relaxed); }
     // True once the startup bias came from a contiguous rest window. Diagnostic
     // timeouts never open the pose with an unqualified estimate.
     bool calibrated() const { return calibrated_.load(std::memory_order_relaxed); }
@@ -98,6 +101,8 @@ private:
     std::atomic<float> stillness_degs_{0.0f};
     std::atomic<float> accel_dev_mps2_{0.0f};
     std::atomic<uint32_t> escape_rollbacks_{0};
+    std::atomic<uint32_t> startup_reseeds_{0};
+    std::atomic<uint32_t> startup_reverts_{0};
     std::atomic<bool> calibrated_{false};
     std::atomic<float> drift_degs_{0.0f};
     std::atomic<bool> mag_active_{false};

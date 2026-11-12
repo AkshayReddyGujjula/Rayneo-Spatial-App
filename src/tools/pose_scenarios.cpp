@@ -41,6 +41,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <random>
+#include <utility>
+#include <vector>
 
 using namespace gt;
 
@@ -1058,6 +1060,259 @@ int main() {
         check(ultra_offset < 0.1f, "ultra still converges on the world-locked pose", ultra_offset,
               0.1f);
     }
+    // --- 20/21: startup confirmation ------------------------------------------
+    // Ground-truth yaw of the synthetic head (body X heading in the earth frame).
+    auto true_yaw = [](const HeadSim& s) {
+        return std::atan2(s.attitude.m[1][0], s.attitude.m[0][0]) / kDegToRad;
+    };
+    // A quick look to a side screen and back: a detected motion that separates
+    // rest episodes, net zero yaw.
+    auto glance = [](HeadSim& s) {
+        s.move(40.0f, 0.25f, 0.25f, Vec3{0.0f, 0.0f, 1.0f});
+        s.hold(0.3f);
+        s.move(-40.0f, 0.25f, 0.25f, Vec3{0.0f, 0.0f, 1.0f});
+    };
+    struct StartupRun {
+        float drift_deg;     // published minus true yaw change over the work period
+        float bias_err_degs; // |yaw-axis bias error| at the end
+        unsigned reseeds;
+    };
+
+    std::printf("\n-- scenario 20: startup window absorbs a slow 0.8 deg/s turn, then 55 s of work --\n");
+    {
+        // The recorded 2026-09-25 session started exactly like this: the one
+        // ~1.3 s startup window caught a smooth head movement (it passes every
+        // fluctuation gate), the bias came out 1.4 deg/s off, the routine
+        // update could not touch it (outside its 0.35 deg/s cap) and the slow
+        // escape let the world turn ~35 deg in five minutes. Here a 0.8 deg/s
+        // yaw turn spans the whole startup window, then the wearer works:
+        // 3 s looking at the screen, a glance to the side and back, repeated.
+        auto run = [&](float confirm_s) {
+            PoseEstimator::Config cfg;
+            cfg.startup_confirm_s = confirm_s;
+            HeadSim sim(0x5EED0020u);
+            sim.bias_walk_degs = 0.0f;
+            sim.bias_pkg_degs.y = 0.4f;
+            sim.est.configure(cfg);
+            sim.hold(3.5f);
+            sim.move(0.8f, 0.5f, 3.5f, Vec3{0.0f, 0.0f, 1.0f});  // 3.5-8.0 s, window ~4.5-5.8 s
+            const float pub0 = sim.yaw();
+            const float true0 = true_yaw(sim);
+            for (int i = 0; i < 12; ++i) {
+                sim.hold(3.0f);
+                glance(sim);
+            }
+            sim.hold(3.0f);
+            StartupRun r{};
+            r.drift_deg = (sim.yaw() - pub0) - (true_yaw(sim) - true0);
+            // Package Y carries yaw in the harness's default mounting.
+            r.bias_err_degs = std::fabs(sim.est.gyro_bias_degs().y - sim.bias_pkg_degs.y);
+            r.reseeds = sim.est.startup_reseeds();
+            return r;
+        };
+        const StartupRun off = run(0.0f);
+        const StartupRun on = run(PoseEstimator::Config{}.startup_confirm_s);
+        std::printf("  confirmation off: drift %.3f deg, yaw bias error %.4f deg/s at the end\n",
+                    off.drift_deg, off.bias_err_degs);
+        std::printf("  confirmation on : drift %.3f deg, yaw bias error %.4f deg/s, reseeds %u\n",
+                    on.drift_deg, on.bias_err_degs, on.reseeds);
+        check(std::fabs(off.drift_deg) > 10.0f,
+              "without confirmation the contaminated startup bias drifts (the defect)",
+              std::fabs(off.drift_deg), 10.0f);
+        // The drift that remains accrues before two clean episodes exist; the
+        // bound is relative to the unconfirmed run so it names the property.
+        check(std::fabs(on.drift_deg) < 0.3f * std::fabs(off.drift_deg),
+              "confirmation removes at least 70% of that drift", std::fabs(on.drift_deg),
+              0.3f * std::fabs(off.drift_deg));
+        check(on.bias_err_degs < 0.1f, "and the bias ends close to the truth", on.bias_err_degs, 0.1f);
+        check(on.reseeds == 1, "exactly one startup reseed", static_cast<float>(on.reseeds), 1.0f);
+    }
+
+    std::printf("\n-- scenario 21: clean startup, glance, slow 1.0 deg/s turn for 20 s (confirmation active) --\n");
+    {
+        // Scenario 11 again, but inside the confirmation period and after a
+        // detected motion, so the turn is its own rest episode. A continuous
+        // turn is one episode and cannot confirm itself; the startup episode
+        // disagrees with it, so it must never be learned as a bias.
+        auto run = [&](float confirm_s, float& registered, float& max_reverse, unsigned& reseeds) {
+            PoseEstimator::Config cfg;
+            cfg.startup_confirm_s = confirm_s;
+            HeadSim sim(0xC0FFEE21u);
+            sim.bias_walk_degs = 0.0f;
+            sim.bias_pkg_degs.y = 0.4f;
+            sim.est.configure(cfg);
+            sim.hold(kWarmupS);
+            glance(sim);
+            sim.hold(2.0f);
+            const float y0 = sim.yaw();
+            sim.move(1.0f, 0.5f, 19.5f, Vec3{0.0f, 0.0f, 1.0f});
+            const float y_stop = sim.yaw();
+            registered = y_stop - y0;
+            max_reverse = 0.0f;
+            const int hold_samples = static_cast<int>(std::lround(10.0f * kRateHz));
+            for (int i = 0; i < hold_samples; ++i) {
+                sim.step(Vec3{});
+                max_reverse = std::max(max_reverse, y_stop - sim.yaw());
+            }
+            // A later rest episode at the true bias agrees with the startup one.
+            glance(sim);
+            sim.hold(4.0f);
+            reseeds = sim.est.startup_reseeds();
+            return sim.yaw();
+        };
+        float reg_on = 0.0f, rev_on = 0.0f, reg_off = 0.0f, rev_off = 0.0f;
+        unsigned rs_on = 0, rs_off = 0;
+        const float end_on = run(PoseEstimator::Config{}.startup_confirm_s, reg_on, rev_on, rs_on);
+        const float end_off = run(0.0f, reg_off, rev_off, rs_off);
+        std::printf("  confirmation on : registered %.4f deg, max reverse %.4f deg, reseeds %u, end yaw %.4f\n",
+                    reg_on, rev_on, rs_on, end_on);
+        std::printf("  confirmation off: registered %.4f deg, max reverse %.4f deg, end yaw %.4f\n", reg_off,
+                    rev_off, end_off);
+        check(reg_on >= 16.0f, "at least 80% of the slow turn registers", reg_on, 16.0f);
+        check(rev_on < 0.25f, "no post-stop reverse slide", rev_on, 0.25f);
+        check(rs_on == 0, "the turn is never learned as a startup bias", static_cast<float>(rs_on), 0.0f);
+        check(std::fabs(end_on - end_off) < 1e-3f, "identical to the unconfirmed estimator",
+              std::fabs(end_on - end_off), 1e-3f);
+    }
+
+    std::printf("\n-- scenario 22: two separate slow 0.6 deg/s turns outvote a clean startup, then revert --\n");
+    {
+        // Two rest episodes that each hold a steady 0.6 deg/s yaw are, to a
+        // gyro without a heading reference, exactly two agreeing measurements
+        // of a bias (lesson 5: the startup window has the same blind spot).
+        // The consensus is therefore applied with a snapshot: the next rest
+        // episode back at the true rate agrees with the snapshot, not the
+        // consensus, and reverts it in one step.
+        auto run = [&](float confirm_s, unsigned& reseeds, unsigned& reverts) {
+            PoseEstimator::Config cfg;
+            cfg.startup_confirm_s = confirm_s;
+            HeadSim sim(0xC0FFEE22u);
+            sim.bias_walk_degs = 0.0f;
+            sim.bias_pkg_degs.y = 0.4f;
+            sim.est.configure(cfg);
+            sim.hold(kWarmupS);
+            glance(sim);
+            sim.move(0.6f, 0.5f, 4.0f, Vec3{0.0f, 0.0f, 1.0f});
+            glance(sim);
+            sim.move(0.6f, 0.5f, 4.0f, Vec3{0.0f, 0.0f, 1.0f});
+            const float y0 = sim.yaw();
+            const float t0 = true_yaw(sim);
+            glance(sim);
+            sim.hold(20.0f);
+            reseeds = sim.est.startup_reseeds();
+            reverts = sim.est.startup_reverts();
+            return (sim.yaw() - y0) - (true_yaw(sim) - t0);
+        };
+        unsigned rs_on = 0, rv_on = 0, rs_off = 0, rv_off = 0;
+        const float drift_on = run(PoseEstimator::Config{}.startup_confirm_s, rs_on, rv_on);
+        const float drift_off = run(0.0f, rs_off, rv_off);
+        std::printf("  confirmation on : reseeds %u, reverts %u, drift over the next ~21 s %.3f deg\n", rs_on,
+                    rv_on, drift_on);
+        std::printf("  confirmation off: drift over the same period %.3f deg\n", drift_off);
+        check(rs_on == 1 && rv_on == 1, "the turns were learned once and reverted once",
+              static_cast<float>(rs_on + rv_on), 2.0f);
+        // The cost that remains is the part of the second turn published at
+        // the learned rate plus the revert's own confirmation window (~4 s
+        // at 0.6 deg/s); without the revert the escape would take minutes.
+        check(std::fabs(drift_on) < 3.5f, "the reverted consensus leaves a bounded drift",
+              std::fabs(drift_on), 3.5f);
+    }
+
+    std::printf("\n-- scenario 23: motion-to-photon prediction during turns, none while reading --\n");
+    {
+        // The displayed pose reaches the eye some latency after it is
+        // sampled, and the 1-euro and reading hold trail a turn on top of
+        // that. The prediction lead (applied to the output, faded in between
+        // 10 and 30 deg/s) must cut the error against the pose 25 ms later
+        // during a turn, leave reading sway bit-identical, and not overshoot
+        // when the turn stops.
+        constexpr int kFrameEvery = 8;
+        constexpr float kFrameDt = kFrameEvery * kDt;
+        constexpr int kLatencySamples = 12;  // 25.2 ms at 476 Hz
+        struct Run {
+            float read_diff;   // max |shown - shown without prediction| while reading
+            float turn_rms;    // yaw error vs raw 25 ms later, frames above 30 deg/s
+            float overshoot;   // shown yaw beyond the final raw yaw after the stop
+        };
+        auto run = [&](float predict_s, const std::vector<float>* reference_read) {
+            HeadSim sim = make_sim(0xC0FFEE23u);
+            sim.bias_walk_degs = 0.0f;
+            PoseSmoother smoother;
+            PoseSmoother::Config scfg;
+            apply_reading_hold(kReadingHoldDefault, scfg);
+            scfg.predict_s = predict_s;
+            smoother.configure(scfg);
+            auto yaw_of = [](const Quat& q) { return quat_to_euler(q).yaw_deg; };
+            std::vector<float> raw_yaw;
+            std::vector<std::pair<size_t, float>> shown;  // (sample index, shown yaw)
+            std::vector<float> read_yaw;
+            std::vector<float> rate_at;
+            // 6 s of reading sway, then a 0.5 s, 40 deg turn (sine profile,
+            // peak 126 deg/s), then 2 s still.
+            sim.sway = true;
+            sim.sway_hz = 0.4f;
+            sim.sway_amp_degs = 0.3f;
+            const int read_frames = static_cast<int>(std::lround(6.0f / kFrameDt));
+            const int turn_frames = static_cast<int>(std::lround(1.0f / kFrameDt));
+            const int still_frames = static_cast<int>(std::lround(2.0f / kFrameDt));
+            for (int f = 0; f < read_frames + turn_frames + still_frames; ++f) {
+                if (f == read_frames) {
+                    sim.sway = false;
+                }
+                float rate = 0.0f;
+                for (int k = 0; k < kFrameEvery; ++k) {
+                    rate = 0.0f;
+                    if (f >= read_frames && f < read_frames + turn_frames) {
+                        const float local = static_cast<float>((f - read_frames) * kFrameEvery + k) * kDt;
+                        rate = local < 0.5f ? 40.0f * kPi / 1.0f * std::sin(kPi * local / 0.5f) : 0.0f;
+                    }
+                    sim.step(Vec3{0.0f, 0.0f, rate});
+                    raw_yaw.push_back(sim.yaw());
+                }
+                const float y = yaw_of(smoother.update(sim.est.quat(), kFrameDt));
+                if (f < read_frames) {
+                    read_yaw.push_back(y);
+                }
+                shown.emplace_back(raw_yaw.size() - 1, y);
+                rate_at.push_back(rate);
+            }
+            Run r{};
+            if (reference_read) {
+                for (size_t i = 0; i < read_yaw.size(); ++i) {
+                    r.read_diff = std::max(r.read_diff, std::fabs(read_yaw[i] - (*reference_read)[i]));
+                }
+            }
+            double sq = 0.0;
+            int n = 0;
+            for (size_t i = 0; i < shown.size(); ++i) {
+                const size_t later = shown[i].first + kLatencySamples;
+                if (later < raw_yaw.size() && std::fabs(rate_at[i]) > 30.0f) {
+                    const float e = shown[i].second - raw_yaw[later];
+                    sq += e * e;
+                    ++n;
+                }
+            }
+            r.turn_rms = static_cast<float>(std::sqrt(sq / std::max(n, 1)));
+            const float final_raw = raw_yaw.back();
+            for (size_t i = static_cast<size_t>(read_frames); i < shown.size(); ++i) {
+                r.overshoot = std::max(r.overshoot, shown[i].second - final_raw);
+            }
+            return std::make_pair(r, read_yaw);
+        };
+        const auto off = run(0.0f, nullptr);
+        const auto on = run(PoseSmoother::Config{}.predict_s, &off.second);
+        std::printf("  turning error vs the pose 25 ms later: %.3f deg rms without prediction, %.3f deg with\n",
+                    off.first.turn_rms, on.first.turn_rms);
+        std::printf("  reading sway difference %.2e deg; overshoot past the stop %.4f deg (without %.4f)\n",
+                    on.first.read_diff, on.first.overshoot, off.first.overshoot);
+        check(on.first.turn_rms < 0.6f * off.first.turn_rms, "prediction cuts the turning photon error",
+              on.first.turn_rms, 0.6f * off.first.turn_rms);
+        check(on.first.read_diff == 0.0f, "reading sway is bit-identical (gate closed)", on.first.read_diff,
+              0.0f);
+        check(on.first.overshoot < 0.25f, "no visible overshoot when the turn stops", on.first.overshoot,
+              0.25f);
+    }
+
     std::printf("\npose_scenarios: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

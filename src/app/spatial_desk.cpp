@@ -85,6 +85,7 @@ struct Options {
     bool fov_explicit = false;
     bool no_imu = false;
     bool smoothing = true;
+    float predict_ms = -1.0f;  // < 0: PoseSmoother::Config default
     gt::ViewComfort comfort;
     bool mag = true;
     double seconds = 0.0;
@@ -410,6 +411,8 @@ void print_usage() {
         "  --seconds N   exit after N seconds (0 = run until quit)\n"
         "  --no-imu      run without head tracking (fixed camera)\n"
         "  --no-smoothing  disable 1-euro view smoothing (raw pose to renderer)\n"
+        "  --predict-ms N  motion-to-photon prediction horizon during head turns (default 35,\n"
+        "                0 = off; inactive below 10 deg/s head speed, so reading is unaffected)\n"
         "  --stabilise L   reading stabilisation off|low|medium|high|ultra (default medium);\n"
         "                Ctrl+Alt+S cycles it live\n"
         "  --dim-mode M    screen dimming off|manual|focus (default off)\n"
@@ -455,6 +458,8 @@ bool parse_args(int argc, char** argv, Options& opt, bool& show_help) {
             opt.no_imu = true;
         } else if (std::strcmp(a, "--no-smoothing") == 0) {
             opt.smoothing = false;
+        } else if (std::strcmp(a, "--predict-ms") == 0 && i + 1 < argc) {
+            opt.predict_ms = std::max(0.0f, std::min(100.0f, static_cast<float>(std::atof(argv[++i]))));
         } else if (std::strcmp(a, "--no-mag") == 0) {
             opt.mag = false;
         } else if (std::strcmp(a, "--freeze-still") == 0 ||
@@ -1219,6 +1224,9 @@ int wmain(int argc, wchar_t** argv) {
     state.screen_count = static_cast<int>(layout.screens.size());
     state.virtual_displays = opt.virtual_displays;
     state.comfort = opt.comfort;
+    if (opt.predict_ms >= 0.0f) {
+        state.view_smoother_config.predict_s = opt.predict_ms * 1e-3f;
+    }
     gt::apply_reading_hold(state.comfort.stabilise_level, state.view_smoother_config);
     state.view_smoother.configure(state.view_smoother_config);
     if (opt.smoothing) {
@@ -1290,6 +1298,8 @@ int wmain(int argc, wchar_t** argv) {
     double late_gap_ms_sum = 0.0;
     double late_diff_deg_sum = 0.0;
     int late_samples = 0;
+    uint32_t logged_reseeds = 0;
+    uint32_t logged_reverts = 0;
     while (!state.quit) {
         MSG message;
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -1661,6 +1671,15 @@ int wmain(int argc, wchar_t** argv) {
                     imu.corrected_rate_degs(), imu.stillness_degs(), imu.accel_dev_mps2(),
                     static_cast<unsigned>(imu.escape_rollbacks()),
                     e.yaw_deg, e.pitch_deg, e.roll_deg);
+                const uint32_t reseeds = imu.startup_reseeds();
+                const uint32_t reverts = imu.startup_reverts();
+                if (reseeds != logged_reseeds || reverts != logged_reverts) {
+                    std::printf("  startup confirmation: reseeds=%u reverts=%u bias=(%+.3f,%+.3f,%+.3f)\n",
+                                static_cast<unsigned>(reseeds), static_cast<unsigned>(reverts), bias.x,
+                                bias.y, bias.z);
+                    logged_reseeds = reseeds;
+                    logged_reverts = reverts;
+                }
                 if (imu.mag_lock_active()) {
                     static const char* const kMagStates[] = {"off", "acquiring", "locked", "disturbed"};
                     const int ms = imu.mag_state();
