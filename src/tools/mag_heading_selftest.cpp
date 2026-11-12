@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 using namespace gt;
@@ -452,6 +453,18 @@ int main() {
         PoseEstimator est(PoseEstimator::Config{});
         check(!est.mag_lock_active(), "lock inactive without calibration", est.mag_lock_active() ? 1.0f : 0.0f,
               0.0f);
+    }
+
+    std::printf("mag_heading_selftest: status names for the controller\n");
+    {
+        check(std::string(mag_state_name(MagHeadingLock::State::off)) == "off" &&
+                  std::string(mag_state_name(MagHeadingLock::State::acquiring)) == "acquiring" &&
+                  std::string(mag_state_name(MagHeadingLock::State::locked)) == "locked" &&
+                  std::string(mag_state_name(MagHeadingLock::State::disturbed)) == "disturbed" &&
+                  std::string(mag_state_name(MagHeadingLock::State::relearning)) == "relearning",
+              "every lock state has its status name", 0.0f, 0.0f);
+        MagHeadingLock::Config defaults;
+        check(!defaults.hard_iron.enabled, "online hard-iron tracking is opt-in", 0.0f, 0.0f);
     }
 
     std::printf("mag_heading_selftest: online hard-iron tracking (worn head, full estimator)\n");
