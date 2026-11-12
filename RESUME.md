@@ -6,12 +6,14 @@ Started 2026-11-12 ~22:55 local. Hard stop 10:30 local (2026-11-13) — changed 
 ## Status
 - [x] Branch created, baseline build + 10/10 ctest green
 - [x] Track A — startup-bias confirmation + 35 ms turn prediction: merged (e28e4ef), 11/11 green.
-- [ ] Track B — calibration + earbud-magnet robustness (Opus agent, own worktree branch)
+- [x] Track B — calibration --progress-json/--auto/--earbuds, mag status keys, opt-in earbud hard-iron tracker: merged (dd5e995), 11/11 green. Orientation-calibration averaging NOT done.
 - [x] Track C — UI redesign + setup guide: merged (1ea0a5d), 11/11 green. Live-window check still needed.
 - [ ] Integrate track branches into `overnight-claude-improvements`, full suite, docs, report
 
 ## Integration TODO (orchestrator)
-1. Merge Track B branch `worktree-agent-adb4e6e0fd7294fe2` (if it stopped early, re-spawn it from its branch).
+1. DONE: Track B merged (imu_replay.cpp conflict resolved by keeping both tool sets).
+   Items 2-5 delegated at 00:00 to an integration agent (worktree branch `worktree-agent-aa47a624fb8f72fa7`,
+   reset onto overnight-claude-improvements). Merge it when done; if it stopped early, re-spawn from its branch.
 2. Wire the UI's `EngineOptions.motion_prediction` (src/app_shell/ui_model.h, Tracking page) to the
    engine flag `--predict-ms N` (default 35, 0 = off) in the launch command (app_state.cpp).
    Decision: UI default ON at 35 ms (replay: turn error 2.92 -> 1.19 deg rms, reading bit-identical).
@@ -54,3 +56,11 @@ Build dirs live under `%LOCALAPPDATA%\Temp\rayneo-overnight\` (never inside the 
 - 23:35 Track C finished (4 commits) and merged into the overnight branch; 11/11 green. Renders in
   `.claude/worktrees/agent-af4658d0d73d6c1e7/scratch/ui/`. 5-hour usage 54%, weekly 53%.
 - 23:50 Track A finished (4 commits) and merged; 11/11 green. 5-hour usage 70%, weekly 55%.
+- 00:00 Track B finished (4 commits) and merged; 11/11 green. Integration agent launched (UI <-> engine wiring).
+  5-hour usage 72%, weekly 55%.
+
+## Round 2 ideas (after the 03:40 reset)
+- Code review of everything merged (bugs in the redesigned UI's live paths: hover/drag/tray/DPI/timer; estimator changes).
+- Track B item 4: orientation calibration averaging + quality/consistency scoring.
+- Track A next: guard for the single-long-rest-episode startup case; seed bias from last session.
+- Fold docs/overnight/*.md into AGENTS.md; write docs/overnight/REPORT.md (morning report).
