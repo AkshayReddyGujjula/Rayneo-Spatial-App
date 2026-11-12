@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -63,9 +64,35 @@ struct SmoothEval {
     double turn_frames = 0, turn_lag_sq = 0;
     float max_offset = 0.0f;
     std::vector<float> read_steps;
+    // Motion-to-photon view: each shown frame is compared with the raw pose
+    // `latency_s` later (when the frame would reach the eye), by speed class.
+    float latency_s = 0.025f;
+    struct Pending {
+        double t;
+        Quat shown;
+        int cls;  // 0 reading (< 3 deg/s), 1 transition, 2 turning (> 20 deg/s)
+    };
+    std::deque<Pending> pending;
+    double photon_sq[3] = {0, 0, 0};
+    double photon_n[3] = {0, 0, 0};
+    float photon_max = 0.0f;
 
-    void frame(const Quat& raw, float dt) {
+    void sample(double t, const Quat& raw) {
+        while (!pending.empty() && pending.front().t + latency_s <= t) {
+            const Pending& p = pending.front();
+            const float off = angle_between_deg(p.shown, raw);
+            photon_sq[p.cls] += off * off;
+            photon_n[p.cls] += 1;
+            photon_max = std::max(photon_max, off);
+            pending.pop_front();
+        }
+    }
+
+    void frame(const Quat& raw, float dt, double t) {
         const Quat shown = smoother.update(raw, dt);
+        if (have_prev) {
+            pending.push_back(Pending{t, shown, speed_ema < 3.0f ? 0 : (speed_ema > 20.0f ? 2 : 1)});
+        }
         if (have_prev) {
             const float raw_step = angle_between_deg(prev_raw, raw);
             const float shown_step = angle_between_deg(prev_shown, shown);
@@ -102,6 +129,10 @@ struct SmoothEval {
         std::printf("smooth-eval: turning %.0f s | rms lag %.3f deg | max offset %.3f deg\n",
                     turn_frames * frame_dt, std::sqrt(turn_lag_sq / std::max(turn_frames, 1.0)),
                     max_offset);
+        auto rms = [&](int c) { return std::sqrt(photon_sq[c] / std::max(photon_n[c], 1.0)); };
+        std::printf("smooth-eval: photon error at +%.0f ms | reading %.4f | transition %.3f | turning %.3f "
+                    "deg rms | max %.3f deg\n",
+                    latency_s * 1000.0f, rms(0), rms(1), rms(2), photon_max);
     }
 };
 
@@ -356,6 +387,17 @@ int main(int argc, char** argv) {
             eval.enabled = true;
         } else if (!std::strcmp(a, "--min-cutoff") && i + 1 < argc) {
             smooth_cfg.min_cutoff_hz = static_cast<float>(std::atof(argv[++i]));
+        } else if (!std::strcmp(a, "--predict") && i + 1 < argc) {
+            smooth_cfg.predict_s = static_cast<float>(std::atof(argv[++i]));
+        } else if (!std::strcmp(a, "--predict-gate") && i + 1 < argc) {
+            Vec3 g{};
+            if (parse_vec(argv[++i], g)) {
+                smooth_cfg.predict_gate_lo_degs = g.x;
+                smooth_cfg.predict_gate_hi_degs = g.y;
+                smooth_cfg.predict_cutoff_hz = g.z;
+            }
+        } else if (!std::strcmp(a, "--latency") && i + 1 < argc) {
+            eval.latency_s = static_cast<float>(std::atof(argv[++i]));
         } else if (!std::strcmp(a, "--beta") && i + 1 < argc) {
             smooth_cfg.beta = static_cast<float>(std::atof(argv[++i]));
         } else if (!std::strcmp(a, "--lock-tau") && i + 1 < argc) {
@@ -536,9 +578,12 @@ int main(int argc, char** argv) {
             }
         }
         const Euler e = est.euler();
-        if (eval.enabled && t >= next_frame) {
-            eval.frame(est.quat(), kFrameDt);
-            next_frame = (next_frame < 0.0f ? t : next_frame) + kFrameDt;
+        if (eval.enabled) {
+            eval.sample(t, est.quat());
+            if (t >= next_frame) {
+                eval.frame(est.quat(), kFrameDt, t);
+                next_frame = (next_frame < 0.0f ? t : next_frame) + kFrameDt;
+            }
         }
         ++n_int;
         n_rest += est.rest() ? 1 : 0;

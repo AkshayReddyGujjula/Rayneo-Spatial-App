@@ -63,6 +63,42 @@ void PoseSmoother::reset() {
     held_ = smoothed_;
     speed_degs_ = 0.0f;
     have_sample_ = false;
+    prev_raw_ = smoothed_;
+    omega_degs_ = Vec3{};
+}
+
+// The prediction lead: a body-frame rotation by predict_s along the
+// low-passed raw angular velocity, faded in by head speed (smoothstep between
+// the gates), so it is exactly the identity while reading or still.
+Quat PoseSmoother::prediction_lead(const Quat& input, float dt_s) {
+    Quat d = quat_multiply(quat_conjugate(prev_raw_), input);
+    prev_raw_ = input;
+    if (d.w < 0.0f) {
+        d = Quat{-d.w, -d.x, -d.y, -d.z};
+    }
+    const float v = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+    Vec3 rate{};
+    if (v > 1e-9f) {
+        const float degs = 2.0f * std::atan2(v, d.w) * 180.0f / kPi / dt_s;
+        rate = Vec3{d.x / v * degs, d.y / v * degs, d.z / v * degs};
+    }
+    const float a = lowpass_alpha(config_.predict_cutoff_hz, dt_s);
+    omega_degs_.x += a * (rate.x - omega_degs_.x);
+    omega_degs_.y += a * (rate.y - omega_degs_.y);
+    omega_degs_.z += a * (rate.z - omega_degs_.z);
+    const float speed = std::sqrt(omega_degs_.x * omega_degs_.x + omega_degs_.y * omega_degs_.y +
+                                  omega_degs_.z * omega_degs_.z);
+    const float span = config_.predict_gate_hi_degs - config_.predict_gate_lo_degs;
+    float gain = span > 0.0f ? (speed - config_.predict_gate_lo_degs) / span
+                             : (speed >= config_.predict_gate_lo_degs ? 1.0f : 0.0f);
+    gain = std::clamp(gain, 0.0f, 1.0f);
+    gain = gain * gain * (3.0f - 2.0f * gain);
+    if (!(config_.predict_s > 0.0f) || !(gain > 0.0f) || !(speed > 0.0f)) {
+        return Quat{1.0f, 0.0f, 0.0f, 0.0f};
+    }
+    const float half = 0.5f * gain * speed * config_.predict_s * kPi / 180.0f;
+    const float s = std::sin(half) / speed;
+    return Quat{std::cos(half), omega_degs_.x * s, omega_degs_.y * s, omega_degs_.z * s};
 }
 
 // Soft hysteresis. With off = conj(held) * target of angle d, the new held
@@ -104,8 +140,15 @@ Quat PoseSmoother::update(const Quat& raw, float dt_s) {
         held_ = input;
         speed_degs_ = 0.0f;
         have_sample_ = true;
+        prev_raw_ = input;
+        omega_degs_ = Vec3{};
         return smoothed_;
     }
+    // The velocity estimate always runs, so enabling prediction live never
+    // starts from a stale previous pose. The lead is applied to the output,
+    // after the 1-euro and the hold, so neither filter sees it: their own
+    // behaviour (and the reading metrics) is unchanged.
+    const Quat lead = prediction_lead(input, dt_s);
     Quat target = input;
     if (quat_dot(smoothed_, target) < 0.0f) {
         target.w = -target.w;
@@ -121,7 +164,11 @@ Quat PoseSmoother::update(const Quat& raw, float dt_s) {
     const float cutoff = config_.min_cutoff_hz + config_.beta * speed_degs_;
     const float alpha = lowpass_alpha(cutoff, dt_s);
     smoothed_ = quat_normalize(quat_multiply(smoothed_, quat_scaled(delta, alpha)));
-    return apply_hold(smoothed_, dt_s);
+    const Quat held = apply_hold(smoothed_, dt_s);
+    if (lead.w >= 1.0f) {
+        return held;
+    }
+    return quat_normalize(quat_multiply(held, lead));
 }
 
 }  // namespace gt

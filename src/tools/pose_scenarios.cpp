@@ -41,6 +41,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <random>
+#include <utility>
+#include <vector>
 
 using namespace gt;
 
@@ -1214,6 +1216,101 @@ int main() {
         // at 0.6 deg/s); without the revert the escape would take minutes.
         check(std::fabs(drift_on) < 3.5f, "the reverted consensus leaves a bounded drift",
               std::fabs(drift_on), 3.5f);
+    }
+
+    std::printf("\n-- scenario 23: motion-to-photon prediction during turns, none while reading --\n");
+    {
+        // The displayed pose reaches the eye some latency after it is
+        // sampled, and the 1-euro and reading hold trail a turn on top of
+        // that. The prediction lead (applied to the output, faded in between
+        // 10 and 30 deg/s) must cut the error against the pose 25 ms later
+        // during a turn, leave reading sway bit-identical, and not overshoot
+        // when the turn stops.
+        constexpr int kFrameEvery = 8;
+        constexpr float kFrameDt = kFrameEvery * kDt;
+        constexpr int kLatencySamples = 12;  // 25.2 ms at 476 Hz
+        struct Run {
+            float read_diff;   // max |shown - shown without prediction| while reading
+            float turn_rms;    // yaw error vs raw 25 ms later, frames above 30 deg/s
+            float overshoot;   // shown yaw beyond the final raw yaw after the stop
+        };
+        auto run = [&](float predict_s, const std::vector<float>* reference_read) {
+            HeadSim sim = make_sim(0xC0FFEE23u);
+            sim.bias_walk_degs = 0.0f;
+            PoseSmoother smoother;
+            PoseSmoother::Config scfg;
+            apply_reading_hold(kReadingHoldDefault, scfg);
+            scfg.predict_s = predict_s;
+            smoother.configure(scfg);
+            auto yaw_of = [](const Quat& q) { return quat_to_euler(q).yaw_deg; };
+            std::vector<float> raw_yaw;
+            std::vector<std::pair<size_t, float>> shown;  // (sample index, shown yaw)
+            std::vector<float> read_yaw;
+            std::vector<float> rate_at;
+            // 6 s of reading sway, then a 0.5 s, 40 deg turn (sine profile,
+            // peak 126 deg/s), then 2 s still.
+            sim.sway = true;
+            sim.sway_hz = 0.4f;
+            sim.sway_amp_degs = 0.3f;
+            const int read_frames = static_cast<int>(std::lround(6.0f / kFrameDt));
+            const int turn_frames = static_cast<int>(std::lround(1.0f / kFrameDt));
+            const int still_frames = static_cast<int>(std::lround(2.0f / kFrameDt));
+            for (int f = 0; f < read_frames + turn_frames + still_frames; ++f) {
+                if (f == read_frames) {
+                    sim.sway = false;
+                }
+                float rate = 0.0f;
+                for (int k = 0; k < kFrameEvery; ++k) {
+                    rate = 0.0f;
+                    if (f >= read_frames && f < read_frames + turn_frames) {
+                        const float local = static_cast<float>((f - read_frames) * kFrameEvery + k) * kDt;
+                        rate = local < 0.5f ? 40.0f * kPi / 1.0f * std::sin(kPi * local / 0.5f) : 0.0f;
+                    }
+                    sim.step(Vec3{0.0f, 0.0f, rate});
+                    raw_yaw.push_back(sim.yaw());
+                }
+                const float y = yaw_of(smoother.update(sim.est.quat(), kFrameDt));
+                if (f < read_frames) {
+                    read_yaw.push_back(y);
+                }
+                shown.emplace_back(raw_yaw.size() - 1, y);
+                rate_at.push_back(rate);
+            }
+            Run r{};
+            if (reference_read) {
+                for (size_t i = 0; i < read_yaw.size(); ++i) {
+                    r.read_diff = std::max(r.read_diff, std::fabs(read_yaw[i] - (*reference_read)[i]));
+                }
+            }
+            double sq = 0.0;
+            int n = 0;
+            for (size_t i = 0; i < shown.size(); ++i) {
+                const size_t later = shown[i].first + kLatencySamples;
+                if (later < raw_yaw.size() && std::fabs(rate_at[i]) > 30.0f) {
+                    const float e = shown[i].second - raw_yaw[later];
+                    sq += e * e;
+                    ++n;
+                }
+            }
+            r.turn_rms = static_cast<float>(std::sqrt(sq / std::max(n, 1)));
+            const float final_raw = raw_yaw.back();
+            for (size_t i = static_cast<size_t>(read_frames); i < shown.size(); ++i) {
+                r.overshoot = std::max(r.overshoot, shown[i].second - final_raw);
+            }
+            return std::make_pair(r, read_yaw);
+        };
+        const auto off = run(0.0f, nullptr);
+        const auto on = run(PoseSmoother::Config{}.predict_s, &off.second);
+        std::printf("  turning error vs the pose 25 ms later: %.3f deg rms without prediction, %.3f deg with\n",
+                    off.first.turn_rms, on.first.turn_rms);
+        std::printf("  reading sway difference %.2e deg; overshoot past the stop %.4f deg (without %.4f)\n",
+                    on.first.read_diff, on.first.overshoot, off.first.overshoot);
+        check(on.first.turn_rms < 0.6f * off.first.turn_rms, "prediction cuts the turning photon error",
+              on.first.turn_rms, 0.6f * off.first.turn_rms);
+        check(on.first.read_diff == 0.0f, "reading sway is bit-identical (gate closed)", on.first.read_diff,
+              0.0f);
+        check(on.first.overshoot < 0.25f, "no visible overshoot when the turn stops", on.first.overshoot,
+              0.25f);
     }
 
     std::printf("\npose_scenarios: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);

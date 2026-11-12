@@ -85,6 +85,7 @@ struct Options {
     bool fov_explicit = false;
     bool no_imu = false;
     bool smoothing = true;
+    float predict_ms = -1.0f;  // < 0: PoseSmoother::Config default
     gt::ViewComfort comfort;
     bool mag = true;
     double seconds = 0.0;
@@ -410,6 +411,8 @@ void print_usage() {
         "  --seconds N   exit after N seconds (0 = run until quit)\n"
         "  --no-imu      run without head tracking (fixed camera)\n"
         "  --no-smoothing  disable 1-euro view smoothing (raw pose to renderer)\n"
+        "  --predict-ms N  motion-to-photon prediction horizon during head turns (default 35,\n"
+        "                0 = off; inactive below 10 deg/s head speed, so reading is unaffected)\n"
         "  --stabilise L   reading stabilisation off|low|medium|high|ultra (default medium);\n"
         "                Ctrl+Alt+S cycles it live\n"
         "  --dim-mode M    screen dimming off|manual|focus (default off)\n"
@@ -455,6 +458,8 @@ bool parse_args(int argc, char** argv, Options& opt, bool& show_help) {
             opt.no_imu = true;
         } else if (std::strcmp(a, "--no-smoothing") == 0) {
             opt.smoothing = false;
+        } else if (std::strcmp(a, "--predict-ms") == 0 && i + 1 < argc) {
+            opt.predict_ms = std::max(0.0f, std::min(100.0f, static_cast<float>(std::atof(argv[++i]))));
         } else if (std::strcmp(a, "--no-mag") == 0) {
             opt.mag = false;
         } else if (std::strcmp(a, "--freeze-still") == 0 ||
@@ -1219,6 +1224,9 @@ int wmain(int argc, wchar_t** argv) {
     state.screen_count = static_cast<int>(layout.screens.size());
     state.virtual_displays = opt.virtual_displays;
     state.comfort = opt.comfort;
+    if (opt.predict_ms >= 0.0f) {
+        state.view_smoother_config.predict_s = opt.predict_ms * 1e-3f;
+    }
     gt::apply_reading_hold(state.comfort.stabilise_level, state.view_smoother_config);
     state.view_smoother.configure(state.view_smoother_config);
     if (opt.smoothing) {
