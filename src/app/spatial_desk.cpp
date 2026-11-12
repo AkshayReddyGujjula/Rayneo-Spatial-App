@@ -1290,6 +1290,8 @@ int wmain(int argc, wchar_t** argv) {
     double late_gap_ms_sum = 0.0;
     double late_diff_deg_sum = 0.0;
     int late_samples = 0;
+    uint32_t logged_reseeds = 0;
+    uint32_t logged_reverts = 0;
     while (!state.quit) {
         MSG message;
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -1661,6 +1663,15 @@ int wmain(int argc, wchar_t** argv) {
                     imu.corrected_rate_degs(), imu.stillness_degs(), imu.accel_dev_mps2(),
                     static_cast<unsigned>(imu.escape_rollbacks()),
                     e.yaw_deg, e.pitch_deg, e.roll_deg);
+                const uint32_t reseeds = imu.startup_reseeds();
+                const uint32_t reverts = imu.startup_reverts();
+                if (reseeds != logged_reseeds || reverts != logged_reverts) {
+                    std::printf("  startup confirmation: reseeds=%u reverts=%u bias=(%+.3f,%+.3f,%+.3f)\n",
+                                static_cast<unsigned>(reseeds), static_cast<unsigned>(reverts), bias.x,
+                                bias.y, bias.z);
+                    logged_reseeds = reseeds;
+                    logged_reverts = reverts;
+                }
                 if (imu.mag_lock_active()) {
                     static const char* const kMagStates[] = {"off", "acquiring", "locked", "disturbed"};
                     const int ms = imu.mag_state();

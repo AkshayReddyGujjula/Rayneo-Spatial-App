@@ -47,6 +47,28 @@ public:
         // dead zone after startup.
         float calibration_gyro_dev_degs = 1.5f;
         float calibration_accel_dev_mps2 = 0.3f;
+        // Startup confirmation. Tracking opens on the first window, but one
+        // ~1.3 s window on a worn head is a weak estimate: replaying the
+        // 2026-09-25 session from 870 start points, 20% of startup biases
+        // were more than 0.35 deg/s off on the yaw axis (outside routine
+        // authority), and the slow escape then let the world turn tens of
+        // degrees in the first minutes (the recorded session's own start:
+        // 1.4 deg/s off, ~35 deg of gyro-only drift in 5 min). For
+        // startup_confirm_s after tracking opens the same calibration-grade
+        // windows keep being collected and averaged per rest episode (a
+        // detected motion separates episodes). The first two episodes whose
+        // means agree within startup_confirm_agree_degs form a consensus;
+        // one continuous slow turn is a single episode, so it can never vote
+        // twice. A consensus outside the routine residual cap replaces the
+        // startup bias in one step (the pose stays continuous; only its rate
+        // changes) and the escape state is cleared; the replaced bias is
+        // snapshotted, and a later episode agreeing with the snapshot rather
+        // than the consensus reverts it in one step (two separate steady slow
+        // turns at matching rates had outvoted a correct startup). The first
+        // decisive episode, or the end of the period, ends confirmation for
+        // good. <= 0 disables it.
+        float startup_confirm_s = 60.0f;
+        float startup_confirm_agree_degs = 0.3f;
         // Legacy floors kept for existing callers/tools: the warmup must also
         // consume this many samples, and the calibration window must also hold
         // this many contiguous samples.
@@ -165,6 +187,11 @@ public:
     // True when the startup bias came from one contiguous high-confidence rest
     // window. Tracking never opens while this is false.
     bool calibrated() const { return calibrated_; }
+    // Startup confirmation (see Config): how many times a consensus replaced
+    // the startup bias, and how many times a later episode reverted it (each
+    // 0 or 1 per startup).
+    uint32_t startup_reseeds() const { return startup_reseeds_; }
+    uint32_t startup_reverts() const { return startup_reverts_; }
     // Instantaneous rest conditions (both deviation gates inside the enter
     // thresholds); `still()` is the dwell-qualified rest state.
     bool rest() const { return rest_now_; }
@@ -181,6 +208,10 @@ public:
     float drift_correction_degs() const;
     Euler euler() const;
     Quat quat() const;
+    // The fusion state itself (calibrated head frame -> earth, Z up), before
+    // the recenter reference. Diagnostic: replay tools use it to place the
+    // magnetometer field in the estimate's earth frame.
+    const Quat& fused_orientation() const { return filter_.orientation(); }
 
 private:
     Vec3 map_gyro(const Vec3& v) const;
@@ -190,6 +221,11 @@ private:
     void update_rest_detector(const Vec3& raw, const Vec3& accel, float dt);
     void step_bias(const Vec3& target, float k, float max_step);
     void finish_calibration();
+    void reset_calibration_window();
+    bool accumulate_calibration_window(const Vec3& raw, float dt, bool qualifies);
+    void confirm_startup_window(const Vec3& mean);
+    void reset_escape();
+    Vec3 confirm_episode_mean(int index) const;
     void set_reference(const Quat& q);
 
     void apply_mag_heading(const ImuSample& sample, float dt);
@@ -207,6 +243,27 @@ private:
     float calibration_run_s_ = 0.0f;
     int calibration_run_samples_ = 0;
     Vec3 calibration_sum_;
+    // Startup confirmation: per rest episode (index 0 opens with the startup
+    // window), the sum and count of its calibration-grade window means.
+    static constexpr int kMaxConfirmEpisodes = 8;
+    std::array<Vec3, kMaxConfirmEpisodes> confirm_sums_{};
+    std::array<int, kMaxConfirmEpisodes> confirm_windows_{};
+    std::array<uint32_t, kMaxConfirmEpisodes> confirm_episodes_{};
+    int confirm_count_ = 0;
+    bool confirm_active_ = false;
+    float confirm_time_s_ = 0.0f;
+    // After a reseed: the replaced bias, the consensus, and the newest
+    // episode of the consensus pair (later episodes verify it).
+    bool confirm_reseeded_ = false;
+    Vec3 confirm_snapshot_;
+    Vec3 confirm_consensus_;
+    int confirm_pair_last_ = -1;
+    uint32_t startup_reseeds_ = 0;
+    uint32_t startup_reverts_ = 0;
+    // Counts detected motion events; a window's rest episode is the count at
+    // its completion (motion breaks any open window, so a window never spans
+    // two episodes).
+    uint32_t motion_events_ = 0;
     bool bias_done_ = false;
     bool calibrated_ = false;
 

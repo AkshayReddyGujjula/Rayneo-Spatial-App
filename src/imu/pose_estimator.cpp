@@ -52,9 +52,20 @@ void PoseEstimator::configure(const Config& cfg) {
 
     warmup_samples_ = 0;
     calibration_phase_s_ = 0.0f;
-    calibration_run_s_ = 0.0f;
-    calibration_run_samples_ = 0;
-    calibration_sum_ = Vec3{};
+    reset_calibration_window();
+    confirm_sums_ = {};
+    confirm_windows_ = {};
+    confirm_episodes_ = {};
+    confirm_count_ = 0;
+    confirm_active_ = false;
+    confirm_time_s_ = 0.0f;
+    startup_reseeds_ = 0;
+    startup_reverts_ = 0;
+    confirm_reseeded_ = false;
+    confirm_pair_last_ = -1;
+    confirm_snapshot_ = Vec3{};
+    confirm_consensus_ = Vec3{};
+    motion_events_ = 0;
     bias_done_ = false;
     calibrated_ = false;
 
@@ -182,6 +193,9 @@ void PoseEstimator::update_rest_detector(const Vec3& raw, const Vec3& accel, flo
                         raw_rate > cfg_.motion_raw_rate_degs;
     rest_now_ = quiet;
     if (motion) {
+        if (still_ || still_time_ > 0.0f) {
+            ++motion_events_;
+        }
         still_time_ = 0.0f;
         still_ = false;
         holdoff_s_ = cfg_.motion_holdoff_s;
@@ -212,16 +226,124 @@ void PoseEstimator::step_bias(const Vec3& target, float k, float max_step) {
     }
 }
 
-void PoseEstimator::finish_calibration() {
-    const float n = static_cast<float>(calibration_run_samples_);
-    bias_degs_ = clamp_bias(
-        Vec3{calibration_sum_.x / n, calibration_sum_.y / n, calibration_sum_.z / n},
-        cfg_.bias_limit_degs);
-    calibrated_ = true;
-    bias_done_ = true;
+void PoseEstimator::reset_calibration_window() {
     calibration_run_s_ = 0.0f;
     calibration_run_samples_ = 0;
     calibration_sum_ = Vec3{};
+}
+
+// Adds one sample to the contiguous calibration window (or discards the window
+// when the sample does not qualify) and returns true once a complete window is
+// available in calibration_sum_ / calibration_run_samples_. The caller
+// consumes it and resets the window.
+bool PoseEstimator::accumulate_calibration_window(const Vec3& raw, float dt, bool qualifies) {
+    if (!qualifies) {
+        reset_calibration_window();
+        return false;
+    }
+    calibration_run_s_ += dt;
+    calibration_run_samples_ += 1;
+    calibration_sum_.x += raw.x;
+    calibration_sum_.y += raw.y;
+    calibration_sum_.z += raw.z;
+    return calibration_run_samples_ >= 1 && calibration_run_samples_ >= cfg_.bias_samples &&
+           calibration_run_s_ >= cfg_.calibration_window_s;
+}
+
+Vec3 PoseEstimator::confirm_episode_mean(int index) const {
+    const float n = static_cast<float>(confirm_windows_[index]);
+    return Vec3{confirm_sums_[index].x / n, confirm_sums_[index].y / n, confirm_sums_[index].z / n};
+}
+
+void PoseEstimator::reset_escape() {
+    escape_dwell_s_ = 0.0f;
+    escape_open_ = false;
+    escape_armed_ = false;
+    escape_return_dwell_s_ = 0.0f;
+}
+
+// A further calibration-grade window during startup confirmation. Windows are
+// averaged per rest episode (the startup window opens the first one); the
+// first pair of episodes whose means agree decides. A consensus inside
+// routine authority confirms the estimate and ends confirmation. A consensus
+// outside it replaces the bias in one step (the pre-reseed bias is
+// snapshotted) and confirmation keeps watching later episodes: the first one
+// that agrees with the consensus ends it; one that instead agrees with the
+// snapshot reverts the bias to it in one step (two separate steady slow turns
+// had outvoted a correct startup bias) and ends it. One continuous slow turn
+// is a single episode, so it can never confirm itself.
+void PoseEstimator::confirm_startup_window(const Vec3& mean) {
+    int current = confirm_count_ - 1;
+    if (current >= 0 && confirm_episodes_[current] == motion_events_) {
+        confirm_sums_[current].x += mean.x;
+        confirm_sums_[current].y += mean.y;
+        confirm_sums_[current].z += mean.z;
+        ++confirm_windows_[current];
+    } else if (confirm_count_ < kMaxConfirmEpisodes) {
+        current = confirm_count_++;
+        confirm_sums_[current] = mean;
+        confirm_windows_[current] = 1;
+        confirm_episodes_[current] = motion_events_;
+    } else {
+        confirm_active_ = false;
+        return;
+    }
+    const Vec3 episode = confirm_episode_mean(current);
+    const float agree = cfg_.startup_confirm_agree_degs;
+    if (confirm_reseeded_) {
+        if (current <= confirm_pair_last_) {
+            return;  // still inside the consensus episode
+        }
+        if (vec_norm(vec_sub(episode, confirm_consensus_)) <= agree) {
+            confirm_active_ = false;
+        } else if (vec_norm(vec_sub(episode, confirm_snapshot_)) <= agree) {
+            bias_degs_ = clamp_bias(confirm_snapshot_, cfg_.bias_limit_degs);
+            ++startup_reverts_;
+            reset_escape();
+            confirm_active_ = false;
+        }
+        return;
+    }
+    for (int j = 0; j < current; ++j) {
+        const Vec3 other = confirm_episode_mean(j);
+        if (vec_norm(vec_sub(episode, other)) > agree) {
+            continue;
+        }
+        const Vec3 consensus{0.5f * (episode.x + other.x), 0.5f * (episode.y + other.y),
+                             0.5f * (episode.z + other.z)};
+        if (vec_norm(vec_sub(consensus, bias_degs_)) > cfg_.adapt_residual_cap_degs) {
+            confirm_snapshot_ = bias_degs_;
+            confirm_consensus_ = consensus;
+            confirm_pair_last_ = current;
+            confirm_reseeded_ = true;
+            bias_degs_ = clamp_bias(consensus, cfg_.bias_limit_degs);
+            ++startup_reseeds_;
+            reset_escape();
+        } else {
+            confirm_active_ = false;
+        }
+        return;
+    }
+}
+
+void PoseEstimator::finish_calibration() {
+    const float n = static_cast<float>(calibration_run_samples_);
+    const Vec3 mean{calibration_sum_.x / n, calibration_sum_.y / n, calibration_sum_.z / n};
+    bias_degs_ = clamp_bias(mean, cfg_.bias_limit_degs);
+    calibrated_ = true;
+    bias_done_ = true;
+    reset_calibration_window();
+    confirm_count_ = 0;
+    confirm_time_s_ = 0.0f;
+    confirm_reseeded_ = false;
+    confirm_pair_last_ = -1;
+    confirm_active_ = cfg_.startup_confirm_s > 0.0f;
+    if (confirm_active_) {
+        confirm_sums_[0] = mean;
+        confirm_windows_[0] = 1;
+        confirm_episodes_[0] = motion_events_;
+        confirm_count_ = 1;
+    }
 
     // Restart the fusion from a clean, gravity-aligned state.
     filter_.reset();
@@ -264,9 +386,8 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
             // startup calibration, rest qualification, rollback confirmation and
             // drift-absorption continuity.
             last_tick_ = tick;
-            calibration_run_s_ = 0.0f;
-            calibration_run_samples_ = 0;
-            calibration_sum_ = Vec3{};
+            reset_calibration_window();
+            ++motion_events_;
             gyro_lpf_ = sample.gyro_degs;
             gyro_dev_ema_ = Vec3{};
             accel_lpf_ = sample.accel_mps2;
@@ -305,22 +426,8 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
             still_ && rest_now_ && holdoff_s_ <= 0.0f &&
             stillness_degs_ < cfg_.calibration_gyro_dev_degs &&
             accel_dev_mps2_ < cfg_.calibration_accel_dev_mps2;
-        if (window_sample) {
-            calibration_run_s_ += dt;
-            calibration_run_samples_ += 1;
-            calibration_sum_.x += raw.x;
-            calibration_sum_.y += raw.y;
-            calibration_sum_.z += raw.z;
-        } else {
-            calibration_run_s_ = 0.0f;
-            calibration_run_samples_ = 0;
-            calibration_sum_ = Vec3{};
-        }
         calibration_phase_s_ += dt;
-        const bool window_complete = calibration_run_samples_ >= 1 &&
-                                     calibration_run_samples_ >= cfg_.bias_samples &&
-                                     calibration_run_s_ >= cfg_.calibration_window_s;
-        if (window_complete) {
+        if (accumulate_calibration_window(raw, dt, window_sample)) {
             finish_calibration();
         } else if (cfg_.calibration_timeout_s > 0.0f &&
                    calibration_phase_s_ >= cfg_.calibration_timeout_s) {
@@ -334,9 +441,30 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
     }
 
     // --- runtime bias ownership ------------------------------------------------
+    const bool rest_eligible = still_ && rest_now_ && holdoff_s_ <= 0.0f;
+    if (confirm_active_) {
+        // Startup confirmation keeps collecting calibration-grade windows
+        // (same gates as the startup window, plus the runtime raw-rate rest
+        // ceiling) for a bounded time after tracking opens.
+        const bool window_sample = rest_eligible &&
+                                   stillness_degs_ < cfg_.calibration_gyro_dev_degs &&
+                                   accel_dev_mps2_ < cfg_.calibration_accel_dev_mps2;
+        if (accumulate_calibration_window(raw, dt, window_sample)) {
+            const float n = static_cast<float>(calibration_run_samples_);
+            const Vec3 mean{calibration_sum_.x / n, calibration_sum_.y / n, calibration_sum_.z / n};
+            reset_calibration_window();
+            confirm_startup_window(mean);
+        }
+        confirm_time_s_ += dt;
+        if (confirm_time_s_ >= cfg_.startup_confirm_s) {
+            confirm_active_ = false;
+        }
+        if (!confirm_active_) {
+            reset_calibration_window();
+        }
+    }
     const float raw_rate_magnitude = vec_norm(gyro_lpf_);
     const Vec3 residual = vec_sub(gyro_lpf_, bias_degs_);
-    const bool rest_eligible = still_ && rest_now_ && holdoff_s_ <= 0.0f;
     const bool routine_eligible = rest_eligible && vec_norm(residual) <= cfg_.adapt_residual_cap_degs;
 
     // Guarded escape rollback, checked before any adaptation this sample. Once
