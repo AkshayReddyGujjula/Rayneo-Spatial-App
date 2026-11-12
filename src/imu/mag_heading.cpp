@@ -98,6 +98,70 @@ Mat3d rotvec_to_mat(double x, double y, double z) {
 
 }  // namespace
 
+// Cyclic Jacobi on a symmetric 3x3; values ascending, vectors[k] is the unit
+// eigenvector (column k stored as row k) for values[k].
+void symmetric3_eigen(const double a_in[3][3], double values[3], double vectors[3][3]) {
+    double a[3][3];
+    double v[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            a[i][j] = 0.5 * (a_in[i][j] + a_in[j][i]);
+        }
+    }
+    for (int sweep = 0; sweep < 50; ++sweep) {
+        const double off = std::fabs(a[0][1]) + std::fabs(a[0][2]) + std::fabs(a[1][2]);
+        if (off < 1e-15) {
+            break;
+        }
+        for (int p = 0; p < 2; ++p) {
+            for (int q = p + 1; q < 3; ++q) {
+                if (std::fabs(a[p][q]) < 1e-18) {
+                    continue;
+                }
+                const double theta = 0.5 * std::atan2(2.0 * a[p][q], a[q][q] - a[p][p]);
+                const double c = std::cos(theta);
+                const double s = std::sin(theta);
+                for (int k = 0; k < 3; ++k) {
+                    const double kp = a[k][p];
+                    const double kq = a[k][q];
+                    a[k][p] = c * kp - s * kq;
+                    a[k][q] = s * kp + c * kq;
+                }
+                for (int k = 0; k < 3; ++k) {
+                    const double pk = a[p][k];
+                    const double qk = a[q][k];
+                    a[p][k] = c * pk - s * qk;
+                    a[q][k] = s * pk + c * qk;
+                }
+                for (int k = 0; k < 3; ++k) {
+                    const double kp = v[k][p];
+                    const double kq = v[k][q];
+                    v[k][p] = c * kp - s * kq;
+                    v[k][q] = s * kp + c * kq;
+                }
+            }
+        }
+    }
+    int order[3] = {0, 1, 2};
+    std::sort(order, order + 3, [&](int x, int y) { return a[x][x] < a[y][y]; });
+    for (int k = 0; k < 3; ++k) {
+        const int j = order[k];
+        values[k] = a[j][j];
+        for (int r = 0; r < 3; ++r) {
+            vectors[k][r] = v[r][j];
+        }
+    }
+}
+
+float mag_fit_quality(const MagFitResult& fit) {
+    if (!std::isfinite(fit.residual_rms_ut) || !std::isfinite(fit.observability)) {
+        return 0.0f;
+    }
+    const float residual = std::max(0.0f, std::min(1.0f, 1.0f - fit.residual_rms_ut / 1.5f));
+    const float coverage = std::max(0.0f, std::min(1.0f, fit.observability / 0.15f));
+    return residual * coverage;
+}
+
 Vec3 mag_to_package(const Vec3& raw_ut, const MagCalibration& cal) {
     const Vec3 centred{raw_ut.x - cal.hard_iron_ut.x, raw_ut.y - cal.hard_iron_ut.y,
                        raw_ut.z - cal.hard_iron_ut.z};
@@ -130,6 +194,7 @@ MagFitResult fit_mag_hard_iron(const std::vector<ImuSample>& samples, const Vec3
     double max_tilt_rad = 0.0;
     const Vec3 a0 = samples.front().accel_mps2;
     const double a0n = std::sqrt(a0.x * a0.x + a0.y * a0.y + a0.z * a0.z);
+    Mat3d rp_sum{};
     std::vector<Mat3d> used_rp;
     std::vector<Vec3> used_m;
     used_rp.reserve(samples.size() / 8);
@@ -186,11 +251,37 @@ MagFitResult fit_mag_hard_iron(const std::vector<ImuSample>& samples, const Vec3
         }
         used_rp.push_back(rp);
         used_m.push_back(s.mag_ut);
+        for (int r = 0; r < 3; ++r) {
+            for (int col = 0; col < 3; ++col) {
+                rp_sum.m[r][col] += rp.m[r][col];
+            }
+        }
         ++rows;
     }
     if (rows < 200) {
         result.code = "TOO_FEW_MAG_SAMPLES";
         return result;
+    }
+
+    {
+        // Observability of the hard-iron vector: I - Mbar^T Mbar.
+        double info[3][3];
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                double mtm = 0.0;
+                for (int k = 0; k < 3; ++k) {
+                    mtm += (rp_sum.m[k][i] / rows) * (rp_sum.m[k][j] / rows);
+                }
+                info[i][j] = (i == j ? 1.0 : 0.0) - mtm;
+            }
+        }
+        double values[3];
+        double vectors[3][3];
+        symmetric3_eigen(info, values, vectors);
+        result.observability = static_cast<float>(std::max(0.0, values[0]));
+        const Vec3 weak_raw{static_cast<float>(vectors[0][0]), static_cast<float>(vectors[0][1]),
+                            static_cast<float>(vectors[0][2])};
+        result.weak_axis_package = mat_apply(kMagToPackage, weak_raw);
     }
 
     double x[6] = {};

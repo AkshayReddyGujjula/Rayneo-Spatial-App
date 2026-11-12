@@ -209,6 +209,45 @@ int main() {
         check(err < 0.5f, "hard iron recovered", err, 0.5f);
         check(std::fabs(fit.field_ut - 51.5f) < 0.5f, "field magnitude recovered",
               std::fabs(fit.field_ut - 51.5f), 0.5f);
+        std::printf("  observability %.3f (weak axis %.2f %.2f %.2f), quality %.2f\n", fit.observability,
+                    fit.weak_axis_package.x, fit.weak_axis_package.y, fit.weak_axis_package.z,
+                    mag_fit_quality(fit));
+        check(fit.observability > 0.15f, "full turn plus nods observes every direction", fit.observability,
+              0.15f);
+        check(mag_fit_quality(fit) > 0.6f, "good recording scores well", mag_fit_quality(fit), 0.6f);
+
+        // Yaw-only recording (rotation about package Z alone): the Z component
+        // of the hard iron is unobservable and must be reported as the weak axis.
+        {
+            std::vector<ImuSample> yaw_only;
+            float Rz = 0.0f;
+            Vec3 hold{};
+            uint32_t t2 = 5000;
+            for (int i = 0; i < static_cast<int>(40.0f / dt); ++i) {
+                ImuSample s;
+                s.gyro_degs = Vec3{0.0f, 0.0f, 12.0f};
+                s.accel_mps2 = Vec3{0.0f, 0.0f, 9.81f};
+                if (i % 9 == 0) {
+                    const float c = std::cos(Rz);
+                    const float sn = std::sin(Rz);
+                    const Vec3 pkg{c * b_earth.x + sn * b_earth.y, -sn * b_earth.x + c * b_earth.y, b_earth.z};
+                    hold = Vec3{-pkg.y + hard_iron.x, pkg.x + hard_iron.y, pkg.z + hard_iron.z};
+                }
+                s.mag_ut = hold;
+                s.tick_100us = t2 += 21;
+                yaw_only.push_back(s);
+                Rz += 12.0f * kPi / 180.0f * dt;
+            }
+            const MagFitResult yfit = fit_mag_hard_iron(yaw_only, Vec3{});
+            std::printf("  yaw-only: %s observability %.4f weak axis (%.2f %.2f %.2f) quality %.2f\n", yfit.code,
+                        yfit.observability, yfit.weak_axis_package.x, yfit.weak_axis_package.y,
+                        yfit.weak_axis_package.z, mag_fit_quality(yfit));
+            check(yfit.observability < 0.01f, "yaw-only leaves one direction unobserved", yfit.observability,
+                  0.01f);
+            check(std::fabs(yfit.weak_axis_package.z) > 0.99f, "weak axis is the turn axis",
+                  std::fabs(yfit.weak_axis_package.z), 0.99f);
+            check(mag_fit_quality(yfit) < 0.1f, "yaw-only scores low", mag_fit_quality(yfit), 0.1f);
+        }
 
         // A turn-only recording must be rejected (the axis component is weak).
         std::vector<ImuSample> short_window(samples.begin(), samples.begin() + 400);

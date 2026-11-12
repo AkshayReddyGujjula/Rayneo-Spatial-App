@@ -554,6 +554,93 @@ OrientationCalibrationResult calibrate_orientation(const CalibrationPhaseData& s
     return result;
 }
 
+namespace {
+
+void append_json_string(std::string& out, const std::string& value) {
+    out += '"';
+    for (const char raw : value) {
+        const unsigned char c = static_cast<unsigned char>(raw);
+        switch (c) {
+            case '"':
+                out += "\\\"";
+                break;
+            case '\\':
+                out += "\\\\";
+                break;
+            case '\n':
+                out += "\\n";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
+            default:
+                if (c < 0x20) {
+                    char escaped[8];
+                    std::snprintf(escaped, sizeof(escaped), "\\u%04x", static_cast<unsigned>(c));
+                    out += escaped;
+                } else {
+                    out += static_cast<char>(c);  // UTF-8 bytes pass through unchanged
+                }
+        }
+    }
+    out += '"';
+}
+
+float clamp01(float v) {
+    if (!std::isfinite(v)) {
+        return 0.0f;
+    }
+    return std::max(0.0f, std::min(1.0f, v));
+}
+
+}  // namespace
+
+std::string format_calibration_progress(const CalibrationProgress& progress) {
+    std::string out = kProgressPrefix;
+    out += "{\"flow\":";
+    append_json_string(out, progress.flow);
+    out += ",\"step\":" + std::to_string(progress.step);
+    out += ",\"steps\":" + std::to_string(progress.steps);
+    out += ",\"state\":";
+    append_json_string(out, progress.state);
+    out += ",\"prompt\":";
+    append_json_string(out, progress.prompt);
+    out += ",\"detail\":";
+    append_json_string(out, progress.detail);
+    out += ",\"quality\":";
+    if (!std::isfinite(progress.quality) || progress.quality < 0.0f) {
+        out += "-1";
+    } else {
+        char number[16];
+        std::snprintf(number, sizeof(number), "%.3f", clamp01(progress.quality));
+        out += number;
+    }
+    out += '}';
+    return out;
+}
+
+float still_quality(float gyro_rms_degs) {
+    return clamp01(1.0f - gyro_rms_degs / 1.5f);
+}
+
+float axis_quality(const CalibrationAxisDiagnostics& axis) {
+    const float purity = axis.dominance > 0.0f ? clamp01(1.0f - kMinDominance / axis.dominance) : 0.0f;
+    const float travel = clamp01(axis.excursion_deg / 25.0f);
+    return std::sqrt(purity * travel);
+}
+
+float orientation_quality(const OrientationCalibrationResult& result) {
+    const float headroom = (clamp01(1.0f - result.up_vs_yaw_deg / 8.0f) +
+                            clamp01(1.0f - result.nod_level_error_deg / 8.0f) +
+                            clamp01(1.0f - result.nod_tilt_error_deg / 20.0f) +
+                            clamp01(1.0f - result.handedness_error_deg / 15.0f)) /
+                           4.0f;
+    return result.ok ? headroom : 0.0f;
+}
+
 static bool write_calibration_file(const std::string& path, const std::array<float, 9>& sensor_to_head,
                                    const MagCalibration& mag, std::string& error) {
     const std::filesystem::path destination = path_from_utf8(path);
@@ -576,7 +663,10 @@ static bool write_calibration_file(const std::string& path, const std::array<flo
     if (mag.valid) {
         output << std::setprecision(3) << ",\n  \"mag_hard_iron_ut\": [" << mag.hard_iron_ut.x << ", "
                << mag.hard_iron_ut.y << ", " << mag.hard_iron_ut.z << "],\n  \"mag_field_ut\": "
-               << mag.field_ut;
+               << mag.field_ut << ",\n  \"mag_earbuds\": " << (mag.earbuds ? "true" : "false");
+        if (mag.quality >= 0.0f && std::isfinite(mag.quality)) {
+            output << ",\n  \"mag_quality\": " << mag.quality;
+        }
     }
     output << "\n}\n";
     if (!output) {
@@ -686,6 +776,21 @@ bool load_mag_calibration(const std::string& path, MagCalibration& mag, std::str
     mag.valid = true;
     mag.hard_iron_ut = v;
     mag.field_ut = std::isfinite(field) ? field : 0.0f;
+    const size_t earbuds_key = text.find("\"mag_earbuds\"");
+    if (earbuds_key != std::string::npos) {
+        const size_t colon = text.find(':', earbuds_key);
+        const size_t value = colon == std::string::npos ? std::string::npos
+                                                        : text.find_first_not_of(" \t\r\n", colon + 1);
+        mag.earbuds = value != std::string::npos && text.compare(value, 4, "true") == 0;
+    }
+    const size_t quality_key = text.find("\"mag_quality\"");
+    if (quality_key != std::string::npos) {
+        const size_t colon = text.find(':', quality_key);
+        if (colon != std::string::npos) {
+            const float q = std::strtof(text.c_str() + colon + 1, nullptr);
+            mag.quality = std::isfinite(q) && q >= 0.0f && q <= 1.0f ? q : -1.0f;
+        }
+    }
     return true;
 }
 

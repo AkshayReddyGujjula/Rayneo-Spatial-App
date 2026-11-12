@@ -29,6 +29,11 @@ struct MagCalibration {
     bool valid = false;
     Vec3 hard_iron_ut;
     float field_ut = 0.0f;  // |B| seen during calibration (diagnostic only)
+    // Metadata for the UI (optional keys in the file): recorded with in-ear
+    // earbuds worn, and the calibration tool's 0..1 guidance score (-1 when
+    // unknown, e.g. files written before it existed).
+    bool earbuds = false;
+    float quality = -1.0f;
 };
 
 Vec3 mag_to_package(const Vec3& raw_ut, const MagCalibration& cal);
@@ -41,8 +46,27 @@ struct MagFitResult {
     float residual_rms_ut = 0.0f;
     float rotation_coverage_deg = 0.0f;  // largest attitude change from the start
     float tilt_coverage_deg = 0.0f;      // largest change of the gravity direction
+    // How well the recording pinned each hard-iron component down: the
+    // eigenvalues of I - Mbar^T Mbar, where Mbar is the mean of the
+    // gyro-tracked rotations R_t P over the used samples. 0 = that direction
+    // never rotated (unobservable), 1 = rotations spread uniformly over all
+    // orientations. `observability` is the smallest one, `weak_axis_package`
+    // the package-frame direction it belongs to (rotate about other axes to
+    // improve it).
+    float observability = 0.0f;
+    Vec3 weak_axis_package;
     const char* code = "";
 };
+
+// Heuristic 0..1 guidance score for a fit: residual headroom against the
+// 1.5 uT acceptance limit times the weakest-direction observability (full
+// marks from 0.15, which a full turn plus about +/-25 deg of nod and tilt
+// reaches). Not an acceptance gate.
+float mag_fit_quality(const MagFitResult& fit);
+
+// Eigen-decomposition of a symmetric 3x3 matrix (cyclic Jacobi): values in
+// ascending order, vectors[k] the unit eigenvector of values[k].
+void symmetric3_eigen(const double a[3][3], double values[3], double vectors[3][3]);
 
 // Linear least-squares hard-iron fit. The earth field is constant in the world
 // frame, so with R_t the gyro-integrated package attitude:
