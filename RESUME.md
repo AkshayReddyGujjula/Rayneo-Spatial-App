@@ -1,0 +1,31 @@
+# Overnight improvement run — resume notes
+
+Branch: `overnight-claude-improvements` (local only — never push, never merge into `main`).
+Started 2026-11-12 ~22:55 local. Hard stop 07:30 local (2026-11-13).
+
+## Status
+- [x] Branch created, baseline build + 10/10 ctest green
+- [ ] Track A — tracking, drift, stabilisation (Opus agent, own worktree branch)
+- [ ] Track B — calibration + earbud-magnet robustness (Opus agent, own worktree branch)
+- [ ] Track C — full UI redesign + first-run onboarding (Opus agent, own worktree branch)
+- [ ] Integrate track branches into `overnight-claude-improvements`, full suite, docs, report
+
+## User decisions (asked before the run)
+- Headphones: Huawei FreeBuds Pro 5 (in-ear wireless).
+- No glasses available overnight: synthetic tests, replays and offscreen renders only. Never run the display takeover.
+- UI: full professional redesign (keep every existing feature/setting).
+- Business features: first-run onboarding only.
+- Usage rule: stop at ~90% of the 5-hour window, write this file, resume after reset.
+
+## Build (works on this machine)
+`cmd /c %LOCALAPPDATA%\Temp\rayneo-overnight\build.cmd <source_dir> <build_dir> test`
+(vcvars64 + vcpkg at `C:\Users\aksha\Desktop\GitHub\tools\vcpkg`, Ninja, RelWithDebInfo).
+Build dirs live under `%LOCALAPPDATA%\Temp\rayneo-overnight\` (never inside the Desktop tree).
+
+## How to resume
+1. `git status`, `git log --oneline main..overnight-claude-improvements`, `git worktree list`, `git branch`.
+2. Read the "Status" and "Log" sections here; each track agent writes `docs/overnight/<track>.md` in its branch.
+3. Re-spawn any unfinished track from its branch (it keeps its commits), then integrate.
+
+## Log
+- 22:55 baseline green (41 s build, 10/10 tests).
