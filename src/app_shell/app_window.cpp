@@ -1631,6 +1631,7 @@ void AppWindow::execute(int id, int arg) {
                 KillTimer(hwnd_, kTimerHealth);
                 SetTimer(hwnd_, kTimerHealth, static_cast<UINT>(state_.config.health_poll_ms),
                          nullptr);
+                apply_theme();  // a hand-edited theme takes effect too
                 state_.show_toast(L"Diagnostics and preferences refreshed");
             }
             refresh_health(true);
