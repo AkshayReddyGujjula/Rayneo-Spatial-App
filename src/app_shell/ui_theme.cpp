@@ -9,12 +9,6 @@
 namespace gt::ui {
 namespace {
 
-HFONT create_font(UINT dpi, int point_size, int weight, const wchar_t* face) {
-    return CreateFontW(-MulDiv(point_size, static_cast<int>(dpi), 72), 0, 0, 0, weight, FALSE,
-                       FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-                       ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, face);
-}
-
 struct Rgba {
     double r = 0.0;
     double g = 0.0;
@@ -59,17 +53,113 @@ int scale_px(int value, UINT dpi) {
     return MulDiv(value, static_cast<int>(dpi), 96);
 }
 
+COLORREF mix(COLORREF a, COLORREF b, float t) {
+    const float k = std::clamp(t, 0.0f, 1.0f);
+    const auto channel = [k](int x, int y) {
+        return static_cast<int>(std::lround(static_cast<float>(x) +
+                                            (static_cast<float>(y) - static_cast<float>(x)) * k));
+    };
+    return RGB(channel(GetRValue(a), GetRValue(b)), channel(GetGValue(a), GetGValue(b)),
+               channel(GetBValue(a), GetBValue(b)));
+}
+
+const Theme& dark_theme() {
+    static const Theme theme = [] {
+        Theme t;
+        t.dark = true;
+        t.window = rgb(17, 19, 24);
+        t.sidebar = rgb(12, 14, 18);
+        t.surface = rgb(25, 28, 35);
+        t.surface_alt = rgb(33, 37, 46);
+        t.surface_hover = rgb(40, 45, 56);
+        t.canvas = rgb(14, 16, 21);
+        t.grid = rgb(37, 43, 56);
+        t.border = rgb(39, 44, 55);
+        t.border_strong = rgb(60, 67, 83);
+        t.text = rgb(237, 240, 246);
+        t.text_dim = rgb(163, 171, 187);
+        t.text_faint = rgb(112, 120, 137);
+        t.disabled_text = rgb(82, 89, 103);
+        t.accent = rgb(66, 129, 247);
+        t.accent_hover = rgb(96, 152, 255);
+        t.accent_text = rgb(255, 255, 255);
+        t.accent_soft = rgb(29, 43, 71);
+        t.accent_dim = rgb(52, 98, 186);
+        t.ok = rgb(56, 199, 125);
+        t.warning = rgb(240, 178, 62);
+        t.error = rgb(240, 98, 98);
+        t.focus = rgb(140, 185, 255);
+        t.scrim = rgb(5, 7, 11);
+        t.shadow = rgb(0, 0, 0);
+        return t;
+    }();
+    return theme;
+}
+
+const Theme& light_theme() {
+    static const Theme theme = [] {
+        Theme t;
+        t.dark = false;
+        t.window = rgb(244, 246, 250);
+        t.sidebar = rgb(235, 238, 244);
+        t.surface = rgb(255, 255, 255);
+        t.surface_alt = rgb(238, 241, 246);
+        t.surface_hover = rgb(229, 233, 241);
+        t.canvas = rgb(247, 249, 252);
+        t.grid = rgb(219, 225, 235);
+        t.border = rgb(221, 226, 234);
+        t.border_strong = rgb(192, 200, 214);
+        t.text = rgb(22, 27, 36);
+        t.text_dim = rgb(78, 88, 106);
+        t.text_faint = rgb(124, 134, 151);
+        t.disabled_text = rgb(168, 175, 188);
+        t.accent = rgb(37, 99, 235);
+        t.accent_hover = rgb(29, 84, 210);
+        t.accent_text = rgb(255, 255, 255);
+        t.accent_soft = rgb(225, 234, 253);
+        t.accent_dim = rgb(122, 160, 240);
+        t.ok = rgb(22, 150, 90);
+        t.warning = rgb(190, 122, 6);
+        t.error = rgb(212, 58, 58);
+        t.focus = rgb(37, 99, 235);
+        t.scrim = rgb(18, 24, 36);
+        t.shadow = rgb(30, 40, 62);
+        return t;
+    }();
+    return theme;
+}
+
+namespace {
+
+// Point sizes in tenths, so the scale can use half points.
+HFONT create_font_tenths(UINT dpi, int tenths, int weight, const wchar_t* face) {
+    return CreateFontW(-MulDiv(tenths, static_cast<int>(dpi), 720), 0, 0, 0, weight, FALSE, FALSE,
+                       FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                       CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, face);
+}
+
+}  // namespace
+
 void FontSet::create(UINT dpi) {
     destroy();
-    title = create_font(dpi, 15, FW_SEMIBOLD, L"Segoe UI");
-    heading = create_font(dpi, 11, FW_SEMIBOLD, L"Segoe UI");
-    body = create_font(dpi, 10, FW_NORMAL, L"Segoe UI");
-    small = create_font(dpi, 9, FW_NORMAL, L"Segoe UI");
-    mono = create_font(dpi, 9, FW_NORMAL, L"Consolas");
+    display = create_font_tenths(dpi, 220, FW_SEMIBOLD, L"Segoe UI");
+    title = create_font_tenths(dpi, 140, FW_SEMIBOLD, L"Segoe UI");
+    heading = create_font_tenths(dpi, 115, FW_SEMIBOLD, L"Segoe UI");
+    body = create_font_tenths(dpi, 105, FW_NORMAL, L"Segoe UI");
+    body_strong = create_font_tenths(dpi, 105, FW_SEMIBOLD, L"Segoe UI");
+    small = create_font_tenths(dpi, 95, FW_NORMAL, L"Segoe UI");
+    small_strong = create_font_tenths(dpi, 95, FW_SEMIBOLD, L"Segoe UI");
+    caption = create_font_tenths(dpi, 90, FW_NORMAL, L"Segoe UI");
+    mono = create_font_tenths(dpi, 95, FW_NORMAL, L"Consolas");
+    metric = create_font_tenths(dpi, 180, FW_SEMIBOLD, L"Segoe UI");
+    icon = create_font_tenths(dpi, 120, FW_NORMAL, L"Segoe MDL2 Assets");
+    icon_small = create_font_tenths(dpi, 90, FW_NORMAL, L"Segoe MDL2 Assets");
+    icon_large = create_font_tenths(dpi, 200, FW_NORMAL, L"Segoe MDL2 Assets");
 }
 
 void FontSet::destroy() {
-    HFONT* fonts[] = {&title, &heading, &body, &small, &mono};
+    HFONT* fonts[] = {&display, &title,  &heading, &body, &body_strong, &small,     &small_strong,
+                      &caption, &mono,   &metric,  &icon, &icon_small,  &icon_large};
     for (HFONT* font : fonts) {
         if (*font != nullptr) {
             DeleteObject(*font);
@@ -109,7 +199,7 @@ HICON create_app_icon(int size) {
     }
 
     const Rgba plate = from_colorref(rgb(21, 34, 58), 1.0);
-    const Rgba accent = from_colorref(palette::accent, 1.0);
+    const Rgba accent = from_colorref(rgb(76, 141, 255), 1.0);
     const Rgba glyph = from_colorref(rgb(236, 242, 252), 1.0);
     const double half = static_cast<double>(size) * 0.5;
     const double radius = static_cast<double>(size) * 0.22;

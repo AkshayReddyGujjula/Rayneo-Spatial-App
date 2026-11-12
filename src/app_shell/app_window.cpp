@@ -37,7 +37,28 @@ UINT window_dpi(HWND hwnd) {
     return dpi > 0 ? static_cast<UINT>(dpi) : 96;
 }
 
-void enable_dark_title_bar(HWND hwnd) {
+// Windows "apps use light theme" (Settings > Personalisation > Colours).
+bool system_uses_light_theme() {
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER,
+                     L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                     L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size) != ERROR_SUCCESS) {
+        return false;
+    }
+    return value != 0;
+}
+
+// Windows "Show animations in Windows" (Accessibility > Visual effects).
+bool system_animations_enabled() {
+    BOOL enabled = TRUE;
+    if (!SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0)) {
+        return true;
+    }
+    return enabled != FALSE;
+}
+
+void set_title_bar_theme(HWND hwnd, bool dark) {
     using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
     HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
     if (dwm == nullptr) {
@@ -46,7 +67,7 @@ void enable_dark_title_bar(HWND hwnd) {
     auto fn = reinterpret_cast<DwmSetWindowAttributeFn>(
         GetProcAddress(dwm, "DwmSetWindowAttribute"));
     if (fn != nullptr) {
-        const BOOL enabled = TRUE;
+        const BOOL enabled = dark ? TRUE : FALSE;
         // DWMWA_USE_IMMERSIVE_DARK_MODE (20 on current builds, 19 before 20H1).
         if (FAILED(fn(hwnd, 20, &enabled, sizeof(enabled)))) {
             fn(hwnd, 19, &enabled, sizeof(enabled));
@@ -120,6 +141,7 @@ void save_comfort(AppState& state) {
 
 AppWindow::~AppWindow() {
     release_back_buffer();
+    release_fade_buffer();
     fonts_.destroy();
     if (icon_ != nullptr) {
         DestroyIcon(icon_);
@@ -138,6 +160,14 @@ AppWindow::~AppWindow() {
 bool AppWindow::create(HINSTANCE instance, std::string& error) {
     instance_ = instance;
     tray_message_ = WM_APP + 0x200;
+    calibration_message_ = WM_APP + 0x201;
+    state_.system_light = system_uses_light_theme();
+    state_.dark = theme_is_dark(state_.config.theme, state_.system_light);
+    state_.anim.set_reduce_motion(!system_animations_enabled());
+    state_.page = state_.config.last_page;
+    if (onboarding_should_show(state_.config)) {
+        state_.onboarding.start();
+    }
     taskbar_created_message_ = RegisterWindowMessageW(L"TaskbarCreated");
 
     WNDCLASSEXW window_class{};
@@ -167,8 +197,8 @@ bool AppWindow::create(HINSTANCE instance, std::string& error) {
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0);
     const int work_width = work_area.right - work_area.left;
     const int work_height = work_area.bottom - work_area.top;
-    width = std::clamp(width, 900, std::max(900, work_width));
-    height = std::clamp(height, 640, std::max(640, work_height));
+    width = std::clamp(width, 760, std::max(760, work_width));
+    height = std::clamp(height, 560, std::max(560, work_height));
     const int work_left = static_cast<int>(work_area.left);
     const int work_top = static_cast<int>(work_area.top);
     const int work_right = static_cast<int>(work_area.right);
@@ -186,7 +216,7 @@ bool AppWindow::create(HINSTANCE instance, std::string& error) {
     small_icon_ = create_app_icon(16);
     SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big_icon_));
     SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small_icon_));
-    enable_dark_title_bar(hwnd_);
+    set_title_bar_theme(hwnd_, state_.dark);
     if (placement.maximized) {
         ShowWindow(hwnd_, SW_SHOWMAXIMIZED);
     } else {
@@ -270,6 +300,13 @@ LRESULT AppWindow::dispatch(UINT message, WPARAM wparam, LPARAM lparam) {
         case WM_MOUSEMOVE:
             on_mouse_move(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
             return 0;
+        case WM_MOUSELEAVE:
+            on_mouse_leave();
+            return 0;
+        case WM_SETTINGCHANGE:
+        case WM_THEMECHANGED:
+            on_settings_change();
+            break;
         case WM_LBUTTONDOWN:
             on_lbutton_down(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
             return 0;
@@ -292,8 +329,8 @@ LRESULT AppWindow::dispatch(UINT message, WPARAM wparam, LPARAM lparam) {
             auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
             RECT work_area{0, 0, 1280, 800};
             SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0);
-            const LONG min_width = static_cast<LONG>(scale_px(1000, dpi_));
-            const LONG min_height = static_cast<LONG>(scale_px(680, dpi_));
+            const LONG min_width = static_cast<LONG>(scale_px(760, dpi_));
+            const LONG min_height = static_cast<LONG>(scale_px(560, dpi_));
             info->ptMinTrackSize.x = std::min(min_width, work_area.right - work_area.left);
             info->ptMinTrackSize.y = std::min(min_height, work_area.bottom - work_area.top);
             return 0;
@@ -303,6 +340,10 @@ LRESULT AppWindow::dispatch(UINT message, WPARAM wparam, LPARAM lparam) {
     }
     if (message == tray_message_) {
         on_tray_message(lparam);
+        return 0;
+    }
+    if (message == calibration_message_) {
+        on_calibration_output();
         return 0;
     }
     return DefWindowProcW(hwnd_, message, wparam, lparam);
@@ -374,6 +415,50 @@ void AppWindow::on_display_change() {
     invalidate();
 }
 
+void AppWindow::on_settings_change() {
+    const bool light = system_uses_light_theme();
+    const bool reduce = !system_animations_enabled();
+    if (light != state_.system_light || reduce != state_.anim.reduce_motion()) {
+        state_.system_light = light;
+        state_.anim.set_reduce_motion(reduce);
+        apply_theme();
+    }
+}
+
+void AppWindow::apply_theme() {
+    const bool dark = theme_is_dark(state_.config.theme, state_.system_light);
+    if (dark != state_.dark) {
+        state_.dark = dark;
+        set_title_bar_theme(hwnd_, dark);
+        // Repaint the non-client area so the title bar follows immediately.
+        SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+    invalidate();
+}
+
+void AppWindow::navigate(AppPage page) {
+    if (page == AppPage::Count) {
+        return;
+    }
+    if (page == state_.page && !state_.editor_fullscreen) {
+        return;
+    }
+    capture_fade_snapshot();
+    state_.page = page;
+    state_.editor_fullscreen = false;
+    state_.page_transition.begin(state_.now_s, kPageTransitionS);
+    state_.scroll[kScrollPage].offset = 0;
+    state_.hover_id = kUiNone;
+    state_.config.last_page = page;
+    if (state_.config_valid) {
+        std::wstring ignored;
+        save_config_to_disk(state_, ignored);
+    }
+    invalidate();
+    update_animation_timer();
+}
+
 void AppWindow::on_end_session(bool ending) {
     if (!ending) {
         return;
@@ -391,8 +476,17 @@ void AppWindow::on_timer(UINT_PTR timer_id) {
     if (timer_id == kTimerHealth) {
         refresh_health(state_.now_s >= state_.next_expensive_check_s);
         update_tooltip();
+        // A cancelled calibration gets a grace period to turn the IMU stream
+        // off itself; after that it is terminated.
+        if (calibration_.active() && calibration_.cancel_requested_at() >= 0.0 &&
+            state_.now_s - calibration_.cancel_requested_at() > 4.0) {
+            calibration_.terminate();
+        }
         invalidate();
     } else if (timer_id == kTimerAnimation) {
+        const double dt = last_animation_s_ > 0.0 ? state_.now_s - last_animation_s_ : 0.016;
+        last_animation_s_ = state_.now_s;
+        state_.anim.step(dt);
         invalidate();
     }
     update_animation_timer();
@@ -437,8 +531,13 @@ void AppWindow::on_destroy() {
     KillTimer(hwnd_, kTimerHealth);
     KillTimer(hwnd_, kTimerAnimation);
     animation_timer_ = false;
+    if (calibration_.active()) {
+        calibration_.cancel();
+        calibration_.terminate();
+    }
     tray_.remove();
     release_back_buffer();
+    release_fade_buffer();
     state_.hwnd = nullptr;
     PostQuitMessage(0);
 }
@@ -513,16 +612,72 @@ void AppWindow::on_paint() {
     const int height = client.bottom - client.top;
     ensure_back_buffer(width, height);
     if (back_dc_ != nullptr) {
+        state_.now_s = steady_now_s();
         PaintContext context;
         context.state = &state_;
         context.fonts = &fonts_;
         context.dpi = dpi_;
         context.client = client;
-        Canvas canvas(back_dc_, client);
+        Canvas canvas(back_dc_, client, current_theme(state_), dpi_);
         paint_window(canvas, context, hotspots_);
+        // Page transition: the previous frame fades out over the new page.
+        const float progress = state_.page_transition.progress(state_.now_s);
+        if (fade_dc_ != nullptr) {
+            if (progress < 1.0f && !state_.anim.reduce_motion()) {
+                BLENDFUNCTION blend{};
+                blend.BlendOp = AC_SRC_OVER;
+                blend.SourceConstantAlpha =
+                    static_cast<BYTE>(std::lround((1.0f - anim::ease_out_cubic(progress)) * 255.0f));
+                const int fade_w = std::min(width, back_width_) - fade_left_;
+                if (fade_w > 0) {
+                    GdiAlphaBlend(back_dc_, fade_left_, 0, fade_w, height, fade_dc_, fade_left_, 0, fade_w,
+                                  height, blend);
+                }
+            } else {
+                release_fade_buffer();
+            }
+        }
         BitBlt(dc, 0, 0, width, height, back_dc_, 0, 0, SRCCOPY);
     }
     EndPaint(hwnd_, &paint);
+    if (state_.repaint_requested) {
+        invalidate();
+    }
+    update_animation_timer();
+}
+
+void AppWindow::capture_fade_snapshot() {
+    release_fade_buffer();
+    if (back_dc_ == nullptr || back_width_ <= 0 || back_height_ <= 0 || state_.anim.reduce_motion()) {
+        return;
+    }
+    HDC screen = GetDC(hwnd_);
+    fade_dc_ = CreateCompatibleDC(screen);
+    fade_bitmap_ = CreateCompatibleBitmap(screen, back_width_, back_height_);
+    ReleaseDC(hwnd_, screen);
+    if (fade_dc_ == nullptr || fade_bitmap_ == nullptr) {
+        release_fade_buffer();
+        return;
+    }
+    fade_previous_ = SelectObject(fade_dc_, fade_bitmap_);
+    BitBlt(fade_dc_, 0, 0, back_width_, back_height_, back_dc_, 0, 0, SRCCOPY);
+    // Only the content area cross-fades; the sidebar animates on its own.
+    fade_left_ = sidebar_width(back_width_, dpi_);
+}
+
+void AppWindow::release_fade_buffer() {
+    if (fade_dc_ != nullptr) {
+        if (fade_previous_ != nullptr) {
+            SelectObject(fade_dc_, fade_previous_);
+            fade_previous_ = nullptr;
+        }
+        DeleteDC(fade_dc_);
+        fade_dc_ = nullptr;
+    }
+    if (fade_bitmap_ != nullptr) {
+        DeleteObject(fade_bitmap_);
+        fade_bitmap_ = nullptr;
+    }
 }
 
 int AppWindow::hit_test(int x, int y) const {
@@ -556,6 +711,9 @@ const Hotspot* AppWindow::hotspot(int id, int arg) const {
 
 int AppWindow::panel_at(int x, int y) const {
     for (int panel = 0; panel < kScrollPanelCount; ++panel) {
+        if (state_.onboarding.active != (panel == kScrollWizard)) {
+            continue;  // the setup guide is modal for scrolling too
+        }
         const RECT& panel_rect = state_.scroll[panel].panel;
         if (panel_rect.right > panel_rect.left && panel_rect.bottom > panel_rect.top &&
             x >= panel_rect.left && x < panel_rect.right && y >= panel_rect.top &&
@@ -621,8 +779,10 @@ void AppWindow::on_mouse_move(int x, int y) {
                 const int pos = track.column == 2 ? x : y;
                 const int at = std::clamp(pos, track.min_px, track.max_px);
                 if (track.column == 2) {
-                    state_.config.splits.column =
-                        static_cast<float>(at - track.span_start_px) / track.span_px;
+                    const int share = track.from_right ? track.span_start_px - at
+                                                       : at - track.span_start_px;
+                    state_.config.splits.column = std::clamp(
+                        static_cast<float>(share) / static_cast<float>(track.span_px), 0.0f, 1.0f);
                 } else {
                     const int delta = at - track.origin_px;
                     const int h0 = track.first_px + delta;
@@ -721,7 +881,18 @@ void AppWindow::on_mouse_move(int x, int y) {
         invalidate();
         return;
     }
-    const int hover = hit_test(x, y);
+    if (!tracking_mouse_) {
+        TRACKMOUSEEVENT track{};
+        track.cbSize = sizeof(track);
+        track.dwFlags = TME_LEAVE;
+        track.hwndTrack = hwnd_;
+        tracking_mouse_ = TrackMouseEvent(&track) != FALSE;
+    }
+    int hover = hit_test(x, y);
+    const Hotspot* spot = hotspot_at(x, y);
+    if (spot != nullptr && !spot->enabled) {
+        hover = kUiNone;
+    }
     if (hover != state_.hover_id) {
         state_.hover_id = hover;
         invalidate();
@@ -729,14 +900,28 @@ void AppWindow::on_mouse_move(int x, int y) {
     on_set_cursor();
 }
 
+void AppWindow::on_mouse_leave() {
+    tracking_mouse_ = false;
+    if (state_.hover_id != kUiNone && !state_.drag_active) {
+        state_.hover_id = kUiNone;
+        invalidate();
+    }
+}
+
 void AppWindow::on_lbutton_down(int x, int y) {
     SetFocus(hwnd_);
     state_.now_s = steady_now_s();
+    if (state_.focus_visible) {
+        state_.focus_visible = false;
+        invalidate();
+    }
     const Hotspot* spot = hotspot_at(x, y);
     if (spot == nullptr || !spot->enabled) {
         pending_click_id_ = kUiNone;
         return;
     }
+    state_.press_id = spot->id;
+    invalidate();
     if (spot->id >= static_cast<int>(kUiScrollBase) &&
         spot->id < static_cast<int>(kUiScrollBase) + static_cast<int>(kScrollPanelCount)) {
         pending_click_id_ = kUiNone;
@@ -825,6 +1010,10 @@ void AppWindow::on_lbutton_down(int x, int y) {
 }
 
 void AppWindow::on_lbutton_up(int x, int y) {
+    if (state_.press_id != kUiNone) {
+        state_.press_id = kUiNone;
+        invalidate();
+    }
     if (state_.drag_active) {
         const bool moved_splitter = state_.drag_splitter >= 0;
         const bool moved_comfort = state_.drag_comfort >= 0;
@@ -910,8 +1099,10 @@ void AppWindow::on_mouse_wheel(int delta) {
 
 void AppWindow::on_key_down(WPARAM key, bool shift) {
     state_.now_s = steady_now_s();
+    const bool control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     switch (key) {
         case VK_TAB:
+            state_.focus_visible = true;
             cycle_focus(shift);
             return;
         case VK_LEFT:
@@ -922,13 +1113,21 @@ void AppWindow::on_key_down(WPARAM key, bool shift) {
         case VK_NEXT:
         case VK_HOME:
         case VK_END:
+            if (!state_.focus_visible) {
+                state_.focus_visible = true;
+                invalidate();
+            }
             adjust_focused(key);
             return;
         case VK_SPACE:
         case VK_RETURN:
+            state_.focus_visible = true;
             activate_focused();
             return;
         case VK_ESCAPE:
+            if (state_.onboarding.active) {
+                return;  // the guide closes only through its own buttons
+            }
             if (state_.editor_fullscreen) {
                 state_.editor_fullscreen = false;
                 invalidate();
@@ -937,12 +1136,15 @@ void AppWindow::on_key_down(WPARAM key, bool shift) {
             on_close();
             return;
         case 'S':
-            if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+            if (control && !state_.onboarding.active) {
                 execute(kUiSaveLayout, 0);
             }
             return;
         default:
             break;
+    }
+    if (control && key >= '1' && key < '1' + kAppPageCount && !state_.onboarding.active) {
+        navigate(static_cast<AppPage>(key - '1'));
     }
 }
 
@@ -951,7 +1153,7 @@ void AppWindow::on_set_cursor() {
     GetCursorPos(&cursor);
     ScreenToClient(hwnd_, &cursor);
     const Hotspot* spot = hotspot_at(cursor.x, cursor.y);
-    if (spot == nullptr) {
+    if (spot == nullptr || !spot->enabled) {
         SetCursor(LoadCursorW(nullptr, IDC_ARROW));
         return;
     }
@@ -1010,6 +1212,34 @@ void AppWindow::adjust_focused(WPARAM key) {
     const Hotspot* live = hotspot(state_.focus_id, -1);
     if (live == nullptr || !live->enabled) {
         return;
+    }
+    const int focus = state_.focus_id;
+    if (focus >= kUiNavBase && focus < kUiNavBase + kAppPageCount && (key == VK_UP || key == VK_DOWN)) {
+        const int index = focus - kUiNavBase + (key == VK_DOWN ? 1 : -1);
+        if (index >= 0 && index < kAppPageCount) {
+            navigate(static_cast<AppPage>(index));
+            set_focus(kUiNavBase + index);
+        }
+        return;
+    }
+    // Segmented controls: left/right moves the selection like a radio group.
+    struct Group {
+        int base;
+        int count;
+    };
+    const Group groups[] = {{kUiStabiliseBase, kComfortStabiliseLevels},
+                            {kUiDimModeBase, kDimModeCount},
+                            {kUiThemeBase, kThemeModeCount},
+                            {kUiEditor2D, 2}};
+    for (const Group& group : groups) {
+        if (focus >= group.base && focus < group.base + group.count && (key == VK_LEFT || key == VK_RIGHT)) {
+            const int index = focus - group.base + (key == VK_RIGHT ? 1 : -1);
+            if (index >= 0 && index < group.count) {
+                set_focus(group.base + index);
+                execute(group.base + index, index);
+            }
+            return;
+        }
     }
     if (ui_is_comfort_slider(state_.focus_id)) {
         int minimum = 0;
@@ -1148,10 +1378,15 @@ void AppWindow::activate_focused() {
         cycle_focus(false);
         return;
     }
-    if (state_.focus_id >= kUiFieldBase) {
+    if (state_.focus_id >= kUiFieldBase && state_.focus_id < kUiFieldBase + static_cast<int>(LayoutField::Count)) {
         return;
     }
-    execute(state_.focus_id, 0);
+    if (ui_is_comfort_slider(state_.focus_id) || state_.focus_id == kUiEditorCanvas ||
+        (state_.focus_id >= kUiHelpBase && state_.focus_id < kUiHelpBase + 7 * 64) ||
+        (state_.focus_id >= kUiSplitBase && state_.focus_id < kUiSplitBase + kUiSplitCount)) {
+        return;
+    }
+    execute(state_.focus_id, spot->arg);
 }
 
 void AppWindow::execute(int id, int arg) {
@@ -1164,6 +1399,123 @@ void AppWindow::execute(int id, int arg) {
     std::string engine_error;
     std::string layout_error;
     std::string tool_error;
+    if (id >= kUiNavBase && id < kUiNavBase + kAppPageCount) {
+        navigate(static_cast<AppPage>(id - kUiNavBase));
+        return;
+    }
+    if (id >= kUiGoBase && id < kUiGoBase + kAppPageCount) {
+        navigate(static_cast<AppPage>(id - kUiGoBase));
+        return;
+    }
+    if (id >= kUiThemeBase && id < kUiThemeBase + kThemeModeCount) {
+        state_.config.theme = static_cast<ThemeMode>(id - kUiThemeBase);
+        save_comfort(state_);
+        apply_theme();
+        return;
+    }
+    if (ui_is_wizard(id)) {
+        if (!state_.onboarding.active) {
+            return;
+        }
+        if (id == kUiWizardNext) {
+            if (state_.onboarding.on_last_step()) {
+                finish_onboarding(false);
+                return;
+            }
+            state_.onboarding.next();
+        } else if (id == kUiWizardBack) {
+            state_.onboarding.back();
+        } else if (id == kUiWizardSkipStep) {
+            state_.onboarding.skip_step();
+        } else if (id == kUiWizardSkipAll) {
+            finish_onboarding(true);
+            return;
+        } else if (id == kUiWizardRecheck) {
+            refresh_health(true);
+            state_.show_toast(L"Checked again");
+        } else if (id == kUiWizardPresetKeep) {
+            state_.onboarding.preset_choice = -1;
+        } else if (id >= kUiWizardPresetBase) {
+            state_.onboarding.preset_choice = id - kUiWizardPresetBase;
+        }
+        // A finished calibration result belongs to its step only.
+        if (!state_.cal_run.running() && id != kUiWizardRecheck && id != kUiWizardPresetKeep &&
+            id < kUiWizardPresetBase) {
+            state_.cal_run = CalRunState{};
+        }
+        state_.scroll[kScrollWizard].offset = 0;
+        invalidate();
+        return;
+    }
+    switch (id) {
+        case kUiRunSetupGuide:
+            state_.onboarding.start();
+            state_.cal_run = CalRunState{};
+            state_.scroll[kScrollWizard].offset = 0;
+            refresh_health(true);
+            invalidate();
+            return;
+        case kUiBannerDismiss:
+            state_.clear_banner();
+            invalidate();
+            return;
+        case kUiStatusCard:
+            navigate(AppPage::Home);
+            return;
+        case kUiEditor2D:
+        case kUiEditor3D:
+            state_.editor_3d = id == kUiEditor3D;
+            invalidate();
+            return;
+        case kUiMotionPrediction:
+            state_.config.engine.motion_prediction = !state_.config.engine.motion_prediction;
+            save_comfort(state_);
+            state_.show_toast(state_.config.engine.motion_prediction
+                                  ? L"Motion prediction on; applies the next time the engine starts"
+                                  : L"Motion prediction off; applies the next time the engine starts");
+            invalidate();
+            return;
+        case kUiCalHeadStart:
+            start_calibration(CalFlow::Orientation);
+            return;
+        case kUiCalMagStart:
+            start_calibration(CalFlow::Mag);
+            return;
+        case kUiCalRetry:
+            start_calibration(state_.cal_run.flow);
+            return;
+        case kUiCalContinue:
+            if (calibration_.active()) {
+                calibration_.send_line("");
+            }
+            return;
+        case kUiCalCancel:
+            cancel_calibration();
+            return;
+        case kUiCalDismiss:
+            if (!state_.cal_run.running()) {
+                state_.cal_run = CalRunState{};
+            }
+            invalidate();
+            return;
+        case kUiCalMagConsole:
+            if (!state_.paths.calibration_tool_found) {
+                state_.set_banner(L"orientation_calibrate.exe was not found next to this app",
+                                  Severity::Error);
+            } else if (state_.engine.launch_tool(state_.paths.calibration_executable,
+                                                 {"--mag", "--output", narrow_utf8(state_.paths.calibration_path)},
+                                                 tool_error)) {
+                state_.show_toast(L"Compass calibration started in its own console window");
+                add_event(L"launched orientation_calibrate.exe --mag in a console window");
+            } else {
+                state_.set_banner(L"Could not start the calibration tool: " + wide_from_utf8(tool_error),
+                                  Severity::Error);
+            }
+            invalidate();
+            return;
+        default:
+            break;
+    }
     if (id >= kUiStabiliseBase && id < kUiStabiliseBase + kComfortStabiliseLevels) {
         state_.config.comfort.stabilise_level = id - kUiStabiliseBase;
         save_comfort(state_);
@@ -1444,6 +1796,116 @@ void AppWindow::execute(int id, int arg) {
     invalidate();
 }
 
+void AppWindow::start_calibration(CalFlow flow) {
+    if (calibration_.active() || state_.cal_run.running()) {
+        return;
+    }
+    if (!state_.paths.calibration_tool_found) {
+        state_.cal_run.start_failed("orientation_calibrate.exe was not found next to this app.");
+        state_.cal_run.flow = flow;
+        state_.cal_in_wizard = state_.onboarding.active;
+        invalidate();
+        return;
+    }
+    if (state_.engine.busy()) {
+        state_.set_banner(L"Stop the engine before calibrating: the calibration needs the glasses' sensor "
+                          L"to itself.",
+                          Severity::Warning);
+        invalidate();
+        return;
+    }
+    std::vector<std::string> arguments{"--progress-json", "--output",
+                                       narrow_utf8(state_.paths.calibration_path)};
+    if (flow == CalFlow::Mag) {
+        arguments.insert(arguments.begin(), "--mag");
+    }
+    state_.cal_in_wizard = state_.onboarding.active;
+    state_.cal_run.begin(flow);
+    std::string error;
+    if (!calibration_.start(state_.paths.calibration_executable, arguments, hwnd_, calibration_message_, error)) {
+        state_.cal_run.start_failed(error);
+        state_.cal_run.flow = flow;
+        add_event(L"calibration could not start: " + wide_from_utf8(error));
+    } else {
+        add_event(flow == CalFlow::Mag ? L"compass calibration started in-app"
+                                       : L"head calibration started in-app");
+    }
+    invalidate();
+    update_animation_timer();
+}
+
+void AppWindow::cancel_calibration() {
+    if (!calibration_.active()) {
+        state_.cal_run.cancel();
+        invalidate();
+        return;
+    }
+    state_.cal_run.cancel();
+    calibration_.cancel();
+    calibration_.set_cancel_time(state_.now_s);
+    add_event(L"calibration cancelled");
+    invalidate();
+}
+
+void AppWindow::on_calibration_output() {
+    state_.now_s = steady_now_s();
+    CalibrationRunner::Drain drain = calibration_.take();
+    for (const std::string& line : drain.lines) {
+        state_.cal_run.consume_line(line);
+    }
+    if (drain.exited) {
+        state_.cal_run.process_exited(drain.exit_code);
+        const bool succeeded = state_.cal_run.phase == CalRunState::Phase::Succeeded;
+        add_event(std::wstring(state_.cal_run.flow == CalFlow::Mag ? L"compass" : L"head") +
+                  L" calibration finished: " +
+                  (succeeded ? L"saved" : wide_from_utf8(state_.cal_run.failure)));
+        if (succeeded) {
+            if (state_.onboarding.active) {
+                if (state_.cal_run.flow == CalFlow::Mag) {
+                    state_.onboarding.mark_mag_calibrated();
+                } else {
+                    state_.onboarding.mark_head_calibrated();
+                }
+            }
+            state_.show_toast(state_.cal_run.flow == CalFlow::Mag ? L"Compass calibration saved"
+                                                                  : L"Head calibration saved");
+        }
+        // The calibration file may have changed: re-read it now.
+        refresh_health(true);
+    }
+    invalidate();
+}
+
+void AppWindow::finish_onboarding(bool skipped) {
+    if (state_.cal_run.running()) {
+        return;
+    }
+    const int preset = state_.onboarding.preset_choice;
+    onboarding_close(state_.onboarding, state_.config);
+    state_.cal_run = CalRunState{};
+    std::wstring error;
+    if (!skipped && preset >= 0) {
+        state_.layout = preset_layout(static_cast<LayoutPreset>(preset));
+        state_.selected_screen = 0;
+        state_.layout_dirty = true;
+        if (!save_layout_to_disk(state_, error)) {
+            state_.set_banner(error, Severity::Error);
+        }
+    }
+    // The flag is the user's decision, so it is written even when app.json
+    // failed to load earlier (that file was replaced by defaults anyway).
+    if (!save_config_to_disk(state_, error)) {
+        state_.set_banner(error, Severity::Warning);
+    }
+    state_.show_toast(skipped ? L"Setup guide skipped; run it again from Settings any time"
+                              : L"Setup complete. Start the workspace when you are ready");
+    capture_fade_snapshot();
+    state_.page = AppPage::Home;
+    state_.page_transition.begin(state_.now_s, kPageTransitionS);
+    refresh_health(true);
+    invalidate();
+}
+
 void AppWindow::handle_tray_command(TrayCommand command) {
     switch (command) {
         case TrayCommand::Show:
@@ -1514,12 +1976,15 @@ void AppWindow::update_tooltip() {
 
 void AppWindow::update_animation_timer() {
     const bool toast_active = !state_.toast.empty() && state_.now_s < state_.toast_expiry_s;
-    const bool wanted = state_.starting || toast_active;
-    if (wanted == animation_timer_) {
+    const bool wanted = state_.starting || toast_active || state_.anim.animating() ||
+                        state_.anim.wants_frames() || state_.page_transition.active(state_.now_s) ||
+                        fade_dc_ != nullptr;
+    if (wanted == animation_timer_ || hwnd_ == nullptr) {
         return;
     }
     animation_timer_ = wanted;
     if (wanted) {
+        last_animation_s_ = state_.now_s;
         SetTimer(hwnd_, kTimerAnimation, kAnimationIntervalMs, nullptr);
     } else {
         KillTimer(hwnd_, kTimerAnimation);

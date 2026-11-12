@@ -90,17 +90,27 @@ target_link_libraries(rayneo_app_model PUBLIC nlohmann_json::nlohmann_json rayne
 add_library(rayneo_app_ui STATIC
   src/app_shell/app_state.cpp
   src/app_shell/app_window.cpp
+  src/app_shell/calibration_runner.cpp
   src/app_shell/diagnostics.cpp
   src/app_shell/engine_client.cpp
   src/app_shell/paths.cpp
   src/app_shell/tray_icon.cpp
+  src/app_shell/ui_onboarding.cpp
+  src/app_shell/ui_page_layout.cpp
+  src/app_shell/ui_pages.cpp
   src/app_shell/ui_paint.cpp
   src/app_shell/ui_theme.cpp
   src/app_shell/ui_widgets.cpp
 )
 target_include_directories(rayneo_app_ui PUBLIC src)
-target_link_libraries(rayneo_app_ui PUBLIC rayneo_app_model rayneo_core rayneo_vdd user32 gdi32 shell32)
+target_link_libraries(rayneo_app_ui PUBLIC rayneo_app_model rayneo_core rayneo_vdd user32 gdi32 shell32 gdiplus advapi32)
 target_compile_definitions(rayneo_app_ui PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+
+# Offscreen render of the real controller UI into PNGs (no window, no
+# hardware): layout sanity checks under ctest, screenshots with --out DIR.
+add_executable(ui_snapshot src/tools/ui_snapshot.cpp)
+target_link_libraries(ui_snapshot PRIVATE rayneo_app_ui)
+add_test(NAME ui_snapshot COMMAND ui_snapshot)
 
 # The controller is a GUI application; spatial_desk.exe stays the renderer engine.
 # The resource script is compiled only when a resource compiler is available

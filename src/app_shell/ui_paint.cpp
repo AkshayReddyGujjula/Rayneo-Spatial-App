@@ -1,1810 +1,815 @@
 #include "app_shell/ui_paint.h"
 
-#include "app_shell/ui_help.h"
-#include "app_shell/ui_orbit.h"
 #include "app/engine_protocol.h"
+#include "app_shell/ui_paint_internal.h"
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
-#include <cwchar>
 #include <filesystem>
-#include <iterator>
 #include <string>
 #include <vector>
 
 namespace gt::ui {
-namespace {
 
-constexpr float kPi = 3.14159265358979323846f;
-
-COLORREF mix_colors(COLORREF first, COLORREF second, int second_percent) {
-    const int percent = std::clamp(second_percent, 0, 100);
-    const int red = (GetRValue(first) * (100 - percent) + GetRValue(second) * percent) / 100;
-    const int green = (GetGValue(first) * (100 - percent) + GetGValue(second) * percent) / 100;
-    const int blue = (GetBValue(first) * (100 - percent) + GetBValue(second) * percent) / 100;
-    return RGB(red, green, blue);
+const Theme& current_theme(const AppState& state) {
+    return state.dark ? dark_theme() : light_theme();
 }
 
-struct Metrics {
-    int margin = 16;
-    int gap = 14;
-    int header = 58;
-    int footer = 30;
-    int left_width = 400;
-    int pad = 14;
-    int title = 24;
-    int button = 32;
-    int slider = 40;
-    int row = 34;
-};
-
-Metrics metrics_for(UINT dpi, int client_width) {
-    Metrics metrics;
-    metrics.margin = scale_px(20, dpi);
-    metrics.gap = scale_px(18, dpi);
-    metrics.header = scale_px(64, dpi);
-    metrics.footer = scale_px(32, dpi);
-    metrics.left_width = std::clamp(client_width / 3, scale_px(340, dpi), scale_px(460, dpi));
-    metrics.pad = scale_px(18, dpi);
-    metrics.title = scale_px(28, dpi);
-    metrics.button = scale_px(34, dpi);
-    metrics.slider = scale_px(44, dpi);
-    metrics.row = scale_px(40, dpi);
-    return metrics;
+int sidebar_width(int client_width, UINT dpi) {
+    return client_width < scale_px(1000, dpi) ? scale_px(size::sidebar_compact, dpi)
+                                              : scale_px(size::sidebar, dpi);
 }
 
-RECT rect_of(int left, int top, int width, int height) {
-    RECT rect{left, top, left + width, top + height};
-    return rect;
-}
+namespace detail {
 
-void add_hotspot(std::vector<Hotspot>& hotspots, int id, int arg, const RECT& rect,
-                 bool enabled = true, int panel = -1) {
+void Ui::hot(int id, int arg, const RECT& rect, bool enabled) {
     Hotspot spot;
     spot.id = id;
     spot.arg = arg;
-    spot.rect = rect;
     spot.full = rect;
     spot.enabled = enabled;
     spot.panel = panel;
-    hotspots.push_back(spot);
-}
-
-// Clipped variant for scrollable content: rect is already in view coordinates
-// (content shifted by the offset). Fully hidden elements contribute nothing;
-// partial ones stay interactive and keep the unclipped rect in full for drags.
-void add_clipped_hotspot(std::vector<Hotspot>& hotspots, int id, int arg, const RECT& rect,
-                         const RECT& view, int panel, bool enabled = true) {
-    RECT intersection{};
-    if (IntersectRect(&intersection, &rect, &view) == 0) {
-        return;
+    if (panel >= 0) {
+        RECT clipped{};
+        if (IntersectRect(&clipped, &rect, &view) == 0) {
+            return;
+        }
+        spot.rect = clipped;
+    } else {
+        spot.rect = rect;
     }
-    Hotspot spot;
-    spot.id = id;
-    spot.arg = arg;
-    spot.rect = intersection;
-    spot.full = rect;
-    spot.enabled = enabled;
-    spot.panel = panel;
-    hotspots.push_back(spot);
+    hs.push_back(spot);
 }
 
-// Refreshes the portal cache, clamps the offset, draws the scrollbar when the
-// content overflows, and returns the offset the panel must paint with. The
-// scrollbar lives in a reserved gutter right of the view, so content never
-// shifts when it appears.
-int paint_scrollbar(Canvas& canvas, const PaintContext& context, ScrollPanel panel,
-                    const RECT& panel_rect, const RECT& view_rect, int content_h,
-                    bool follow_tail, std::vector<Hotspot>& hotspots) {
-    AppState& state = *context.state;
-    const UINT dpi = context.dpi;
-    ScrollPortal& portal = state.scroll[panel];
-    const int view_h = static_cast<int>(std::max(0L, view_rect.bottom - view_rect.top));
+WidgetState Ui::ws(int id, bool enabled) {
+    WidgetState state;
+    state.enabled = enabled;
+    state.hover = track(anim::kHover, id, enabled && s.hover_id == id ? 1.0f : 0.0f);
+    state.press = track(anim::kPress, id, enabled && s.press_id == id ? 1.0f : 0.0f, 0.035f);
+    state.focused = s.focus_visible && s.focus_id == id;
+    return state;
+}
+
+float Ui::track(uint32_t channel, int id, float target, float tau) {
+    return s.anim.track(anim::key(channel, id), target, tau);
+}
+
+void Ui::help(int help_panel, int row, HelpTopic topic, const RECT& rect) {
+    const int id = ui_help_id(help_panel, row);
+    draw_help_mark(c, rect, ws(id), f.small_strong);
+    hot(id, static_cast<int>(topic), rect);
+}
+
+ScrollArea begin_scroll(Ui& ui, ScrollPanel panel, const RECT& frame, const RECT& view) {
+    ScrollArea area;
+    area.panel = panel;
+    area.frame = frame;
+    area.view = view;
+    const ScrollPortal& portal = ui.s.scroll[panel];
+    area.offset = std::clamp(portal.offset, 0, std::max(0, portal.max_offset));
+    area.saved_panel = ui.panel;
+    area.saved_view = ui.view;
+    ui.panel = panel;
+    ui.view = view;
+    ui.c.push_clip(view);
+    return area;
+}
+
+void end_scroll(Ui& ui, ScrollArea& area, int content_h) {
+    ui.c.pop_clip();
+    ui.panel = area.saved_panel;
+    ui.view = area.saved_view;
+    ScrollPortal& portal = ui.s.scroll[area.panel];
+    const int view_h = std::max(0, rh(area.view));
     const int max_offset = std::max(0, content_h - view_h);
-    const int entry_offset = portal.offset;
-    int offset = entry_offset;
-    if (follow_tail && offset >= portal.last_max) {
-        offset = max_offset;
-    }
-    offset = std::clamp(offset, 0, max_offset);
-    if (offset != entry_offset) {
-        // Paint-time correction (follow-tail, content shrink): the highlight
-        // belongs to the cursor, not the moved content.
-        state.hover_id = kUiNone;
-    }
-    portal.offset = offset;
-    portal.panel = panel_rect;
-    portal.view = view_rect;
+    portal.panel = area.frame;
+    portal.view = area.view;
     portal.content_h = content_h;
     portal.max_offset = max_offset;
     portal.last_max = max_offset;
     portal.visible = max_offset > 0 && view_h > 0;
+    if (area.offset > max_offset) {
+        portal.offset = max_offset;
+        ui.s.repaint_requested = true;
+    } else {
+        portal.offset = area.offset;
+    }
     portal.scrollbar = RECT{};
     portal.thumb = RECT{};
     if (!portal.visible) {
-        return offset;
+        return;
     }
-    const int bar_width = scale_px(10, dpi);
-    RECT track{view_rect.right + scale_px(2, dpi), view_rect.top,
-               view_rect.right + scale_px(2, dpi) + bar_width, view_rect.bottom};
-    const int track_h = static_cast<int>(std::max(1L, track.bottom - track.top));
-    const int natural_thumb = track_h * view_h / std::max(1, content_h);
-    const int thumb_h =
-        std::clamp(natural_thumb, std::min(track_h, scale_px(8, dpi)), track_h);
+    const int bar_w = ui.px(10);
+    RECT track_rect{area.view.right + ui.px(4), area.view.top + ui.px(2),
+                    area.view.right + ui.px(4) + bar_w, area.view.bottom - ui.px(2)};
+    const int track_h = std::max(1, rh(track_rect));
+    const int thumb_h = std::clamp(track_h * view_h / std::max(1, content_h),
+                                   std::min(track_h, ui.px(28)), track_h);
     const int travel = std::max(1, track_h - thumb_h);
-    const int thumb_top = track.top + (max_offset > 0 ? offset * travel / max_offset : 0);
-    RECT thumb{track.left, thumb_top, track.right,
-                std::min(track.bottom, static_cast<LONG>(thumb_top) + thumb_h)};
-    const int scroll_id = static_cast<int>(kUiScrollBase) + static_cast<int>(panel);
-    draw_scrollbar(canvas, track, thumb, state.hover_id == scroll_id);
-    portal.scrollbar = track;
+    const int thumb_top = track_rect.top + portal.offset * travel / std::max(1, max_offset);
+    RECT thumb{track_rect.left, thumb_top, track_rect.right, thumb_top + thumb_h};
+    const int scroll_id = static_cast<int>(kUiScrollBase) + static_cast<int>(area.panel);
+    const float hover = ui.track(anim::kHover, scroll_id,
+                                 ui.s.hover_id == scroll_id || ui.s.drag_scroll_panel == area.panel
+                                     ? 1.0f
+                                     : 0.0f);
+    draw_scrollbar(ui.c, track_rect, thumb, hover);
+    portal.scrollbar = track_rect;
     portal.thumb = thumb;
-    add_hotspot(hotspots, scroll_id, static_cast<int>(panel), track, true,
-                static_cast<int>(panel));
-    return offset;
+    Hotspot spot;
+    spot.id = scroll_id;
+    spot.arg = static_cast<int>(area.panel);
+    spot.rect = track_rect;
+    spot.full = track_rect;
+    spot.panel = static_cast<int>(area.panel);
+    ui.hs.push_back(spot);
 }
 
-// Zeroes a portal when its panel has no room to paint.
-void hide_portal(const PaintContext& context, ScrollPanel panel) {
-    ScrollPortal& portal = context.state->scroll[panel];
+void hide_scroll(Ui& ui, ScrollPanel panel) {
+    ScrollPortal& portal = ui.s.scroll[panel];
     const int offset = portal.offset;
-    const int last_max = portal.last_max;
     portal = ScrollPortal{};
     portal.offset = offset;
-    portal.last_max = last_max;
 }
 
-// Splits available px among stacked panels: each gets its desired height when
-// everything fits (surplus to flex_index), otherwise each shrinks toward its
-// minimum in proportion to what it asked for. Never overlaps, never negative.
-void distribute_heights(int available, int gap, const int desired[3], const int minimum[3],
-                        int flex_index, int out[3]) {
-    const int total_desired = desired[0] + desired[1] + desired[2] + gap * 2;
-    if (available >= total_desired) {
-        out[0] = desired[0];
-        out[1] = desired[1];
-        out[2] = desired[2];
-        out[flex_index] += available - total_desired;
-        return;
+void card(Ui& ui, const RECT& rect) {
+    draw_card(ui.c, rect);
+}
+
+int card_header(Ui& ui, const RECT& card_rect, const wchar_t* title, const wchar_t* description) {
+    const int pad = ui.px(space::xl);
+    int y = card_rect.top + pad;
+    const int width = rw(card_rect) - pad * 2;
+    ui.c.text(ui.f.title, ui.t.text, rect_of(card_rect.left + pad, y, width, ui.px(28)), title,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    y += ui.px(30);
+    if (description != nullptr && *description != L'\0') {
+        y += paragraph(ui, rect_of(card_rect.left + pad, y, width, 0), ui.f.small, ui.t.text_dim,
+                       description);
     }
-    const int min_sum = minimum[0] + minimum[1] + minimum[2];
-    if (available - gap * 2 <= min_sum) {
-        const int each = std::max(0, (available - gap * 2) / 3);
-        out[0] = out[1] = out[2] = each;
-        return;
+    return y + ui.px(space::lg);
+}
+
+int paragraph(Ui& ui, const RECT& area, HFONT font, COLORREF color, const std::wstring& text) {
+    const int width = rw(area);
+    const int height = wrapped_text_height(ui.c.dc(), font, width, text);
+    RECT r = rect_of(area.left, area.top, width, height);
+    ui.c.text(font, color, r, text, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    return height;
+}
+
+void button(Ui& ui, int id, const RECT& rect, const std::wstring& label, ButtonStyle style,
+            bool enabled, const wchar_t* icon) {
+    draw_button(ui.c, rect, label, style, ui.ws(id, enabled), ui.f.body_strong, icon, ui.f.icon);
+    ui.hot(id, 0, rect, enabled);
+}
+
+int switch_row(Ui& ui, int id, int left, int top, int width, const wchar_t* title,
+               const std::wstring& description, bool value, bool enabled, int help_panel,
+               int help_row, HelpTopic topic) {
+    const int help_w = help_mark_width(ui.dpi);
+    const int switch_w = ui.px(size::switch_w);
+    const int switch_h = ui.px(size::switch_h);
+    const int text_w = width - switch_w - help_w - ui.px(space::lg) * 2;
+    const int title_h = ui.px(22);
+    const int desc_h = description.empty()
+                           ? 0
+                           : wrapped_text_height(ui.c.dc(), ui.f.small, text_w, description);
+    const int row_h = std::max(ui.px(44), title_h + (desc_h > 0 ? desc_h + ui.px(2) : 0));
+    ui.c.text(ui.f.body_strong, enabled ? ui.t.text : ui.t.disabled_text,
+              rect_of(left, top, text_w, title_h), title,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (desc_h > 0) {
+        ui.c.text(ui.f.small, enabled ? ui.t.text_dim : ui.t.disabled_text,
+                  rect_of(left, top + title_h + ui.px(2), text_w, desc_h), description,
+                  DT_LEFT | DT_TOP | DT_WORDBREAK);
     }
-    int weights = 0;
-    for (int i = 0; i < 3; ++i) {
-        weights += std::max(0, desired[i] - minimum[i]);
+    const int switch_left = left + width - help_w - ui.px(space::lg) - switch_w;
+    const int switch_top = top + (std::min(row_h, ui.px(44)) - switch_h) / 2;
+    RECT track_rect = rect_of(switch_left, switch_top, switch_w, switch_h);
+    const float on = ui.track(anim::kToggle, id, value ? 1.0f : 0.0f, anim::kTauToggle);
+    const WidgetState state = ui.ws(id, enabled);
+    draw_switch(ui.c, track_rect, on, state);
+    // The whole row is the hit target; the switch is just the indicator.
+    ui.hot(id, 0, rect_of(left, top, switch_left + switch_w - left, row_h), enabled);
+    ui.help(help_panel, help_row, topic,
+            rect_of(left + width - help_w, switch_top + (switch_h - help_w) / 2, help_w, help_w));
+    return row_h;
+}
+
+void segmented(Ui& ui, int base_id, const RECT& rect, const wchar_t* const* labels, int count,
+               int selected, bool enabled) {
+    const float pos = ui.track(anim::kSegment, base_id, static_cast<float>(selected), anim::kTauSlide);
+    int hover = -1;
+    int focus = -1;
+    for (int i = 0; i < count; ++i) {
+        if (ui.s.hover_id == base_id + i) {
+            hover = i;
+        }
+        if (ui.s.focus_visible && ui.s.focus_id == base_id + i) {
+            focus = i;
+        }
     }
-    const int extra_total = available - gap * 2 - min_sum;
-    for (int i = 0; i < 3; ++i) {
-        const int slack = std::max(0, desired[i] - minimum[i]);
-        out[i] = minimum[i] + (weights > 0 ? extra_total * slack / weights : 0);
+    draw_segmented(ui.c, rect, labels, count, selected >= 0 ? pos : -1.0f, hover, focus, enabled,
+                   ui.f.body_strong);
+    for (int i = 0; i < count; ++i) {
+        ui.hot(base_id + i, i, segment_rect(rect, count, i), enabled);
     }
 }
 
-// User splitter fractions override the built-in desired heights (normalized,
-// so sums stay 1 even for hand-edited files). distribute_heights still
-// enforces the minimums, so a dragged layout degrades gracefully when the
-// window shrinks.
-void apply_split_fractions(int desired[3], const float fracs[3], int available, int gap) {
-    if (fracs[0] < 0.0f || fracs[1] < 0.0f || fracs[2] < 0.0f) {
-        return;
-    }
-    const float sum = fracs[0] + fracs[1] + fracs[2];
-    if (!(sum > 0.0f)) {
-        return;
-    }
-    const int panels = std::max(0, available - gap * 2);
-    for (int i = 0; i < 3; ++i) {
-        desired[i] = static_cast<int>(std::lround(fracs[i] / sum * panels));
-    }
-}
-
-// Paints one splitter grip, registers its hotspot, and caches the drag track.
-// Boundary motion is pre-clamped so neither neighbour drops below its minimum.
-void paint_splitter(Canvas& canvas, AppState& state, SplitterTrack& track, int id,
-                    const RECT& zone, int origin_px, int first_px, int second_px, int first_min,
-                    int second_min, int span_px, int span_start_px, int column, int index,
-                    bool vertical) {
-    track.zone = zone;
-    track.origin_px = origin_px;
-    track.min_px = origin_px + (first_min - first_px);
-    track.max_px = origin_px + (second_px - second_min);
-    if (track.max_px < track.min_px) {
-        // Window shrunk below the neighbours' minimums: pin the boundary.
-        track.min_px = track.max_px = origin_px;
-    }
-    track.span_px = std::max(1, span_px);
-    track.first_px = first_px;
-    track.second_px = second_px;
-    track.span_start_px = span_start_px;
-    track.column = column;
-    track.index = index;
-    track.valid = true;
-    const bool active = state.hover_id == id || state.drag_splitter == id - kUiSplitBase;
-    const COLORREF color = active ? palette::accent : palette::border_strong;
-    if (vertical) {
-        const int cx = (zone.left + zone.right) / 2;
-        RECT line{cx - 1, zone.top, cx + 2, zone.bottom};
-        canvas.fill(line, color);
+void slider(Ui& ui, int id, int arg, const RECT& rect, const std::wstring& label,
+            const std::wstring& value_text, float fraction, bool enabled, bool dragging) {
+    float shown = fraction;
+    if (dragging) {
+        ui.s.anim.snap(anim::key(anim::kSlider, id), fraction);
     } else {
-        const int cy = (zone.top + zone.bottom) / 2;
-        RECT line{zone.left, cy - 1, zone.right, cy + 2};
-        canvas.fill(line, color);
+        shown = ui.track(anim::kSlider, id, fraction, anim::kTauSlide);
     }
+    WidgetState state = ui.ws(id, enabled);
+    if (dragging) {
+        state.press = 1.0f;
+    }
+    draw_slider(ui.c, rect, label, value_text, shown, state, ui.f.small, ui.f.body_strong);
+    ui.hot(id, arg, rect, enabled);
 }
 
-void draw_panel_frame(Canvas& canvas, const RECT& rect, const FontSet& fonts, UINT dpi,
-                      const wchar_t* title) {
-    canvas.fill_round(rect, scale_px(8, dpi), palette::panel);
-    canvas.outline_round(rect, scale_px(8, dpi), 1, palette::border);
-    if (title != nullptr) {
-        RECT title_rect = rect;
-        title_rect.left += scale_px(14, dpi);
-        title_rect.top += scale_px(6, dpi);
-        title_rect.right -= scale_px(14, dpi);
-        title_rect.bottom = title_rect.top + scale_px(20, dpi);
-        canvas.text(fonts.heading, palette::text, title_rect, title,
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    }
-}
-
-std::wstring state_chip_text(const AppState& state) {
-    switch (state.engine.snapshot().state) {
-        case EngineProcessState::Starting:
-            return L"Starting";
-        case EngineProcessState::Running:
-            return L"Running";
-        case EngineProcessState::Stopping:
-            return L"Stopping";
-        case EngineProcessState::Exited:
-            return L"Exited";
-        case EngineProcessState::Failed:
-            return L"Failed";
-        case EngineProcessState::Stopped:
+COLORREF severity_colour(const Theme& theme, Severity severity) {
+    switch (severity) {
+        case Severity::Ok:
+            return theme.ok;
+        case Severity::Warning:
+            return theme.warning;
+        case Severity::Error:
+            return theme.error;
+        case Severity::Neutral:
         default:
-            return L"Stopped";
+            return theme.text_faint;
     }
 }
 
-COLORREF state_chip_color(const AppState& state) {
-    switch (state.engine.snapshot().state) {
-        case EngineProcessState::Running:
-            return palette::ok;
-        case EngineProcessState::Starting:
-        case EngineProcessState::Stopping:
-            return palette::warning;
-        case EngineProcessState::Failed:
-            return palette::error;
-        case EngineProcessState::Exited:
-            return palette::text_dim;
-        case EngineProcessState::Stopped:
+const wchar_t* severity_glyph(Severity severity) {
+    switch (severity) {
+        case Severity::Ok:
+            return glyph::check;
+        case Severity::Warning:
+            return glyph::warning;
+        case Severity::Error:
+            return glyph::error;
+        case Severity::Neutral:
         default:
-            return palette::text_faint;
+            return glyph::info;
     }
 }
 
-std::wstring mode_chip_text(const AppState& state) {
-    if (state.engine.busy()) {
-        if (state.engine.snapshot().mode == LaunchMode::Workspace) {
-            return L"Full workspace";
-        }
-        if (state.engine.snapshot().mode == LaunchMode::Preview) {
-            return L"Renderer-only preview";
-        }
-        return L"Engine running";
+float pulse_phase(Ui& ui, bool active) {
+    if (!active || ui.s.anim.reduce_motion()) {
+        return -1.0f;
     }
-    switch (state.config.last_mode) {
-        case LaunchMode::Workspace:
-            return L"Last: full workspace";
-        case LaunchMode::Preview:
-            return L"Last: preview";
-        case LaunchMode::None:
-        default:
-            return L"No engine running";
-    }
+    ui.s.anim.request_frames();
+    const double period = 1.6;
+    return static_cast<float>(std::fmod(ui.s.now_s, period) / period);
 }
 
-void paint_header(Canvas& canvas, const PaintContext& context, const Metrics& metrics,
-                  std::vector<Hotspot>& hotspots) {
-    const AppState& state = *context.state;
-    const FontSet& fonts = *context.fonts;
-    const UINT dpi = context.dpi;
-    RECT header{context.client.left, context.client.top, context.client.right,
-                context.client.top + metrics.header};
-    canvas.fill(header, palette::background);
-
-    RECT title_rect = header;
-    title_rect.left += metrics.margin;
-    title_rect.right = title_rect.left + scale_px(360, dpi);
-    title_rect.top += scale_px(8, dpi);
-    title_rect.bottom = title_rect.top + scale_px(24, dpi);
-    canvas.text(fonts.title, palette::text, title_rect, L"RayNeo Spatial",
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    RECT subtitle_rect = title_rect;
-    subtitle_rect.top = title_rect.bottom;
-    subtitle_rect.bottom = subtitle_rect.top + scale_px(18, dpi);
-    canvas.text(fonts.small, palette::text_faint, subtitle_rect,
-                L"controller for the RayNeo GT spatial workspace engine",
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    const int chip_height = scale_px(26, dpi);
-    const int refresh_width = scale_px(86, dpi);
-    RECT refresh = rect_of(header.right - metrics.margin - refresh_width,
-                           header.top + (metrics.header - chip_height) / 2, refresh_width,
-                           chip_height);
-    draw_button(canvas, refresh, L"Refresh", ButtonStyle::Secondary,
-                state.focus_id == kUiRefresh, state.hover_id == kUiRefresh, true, fonts.body);
-    add_hotspot(hotspots, kUiRefresh, 0, refresh);
-    RECT help_refresh = rect_of(refresh.left - metrics.gap - help_mark_width(dpi), refresh.top,
-                                help_mark_width(dpi), chip_height);
-    draw_help_mark(canvas, help_refresh, state.focus_id == ui_help_id(6, 0), state.hover_id == ui_help_id(6, 0), fonts.body);
-    add_hotspot(hotspots, ui_help_id(6, 0), static_cast<int>(HelpTopic::HeaderRefresh),
-                help_refresh);
-
-    const int mode_width = scale_px(190, dpi);
-    RECT mode_chip = rect_of(refresh.left - metrics.gap - mode_width, refresh.top, mode_width,
-                             chip_height);
-    const COLORREF mode_color = state.engine.busy() ? palette::accent : palette::text_faint;
-    canvas.fill_round(mode_chip, chip_height / 2, palette::panel_alt);
-    canvas.outline_round(mode_chip, chip_height / 2, 1, palette::border);
-    draw_dot(canvas, mode_chip.left + scale_px(12, dpi),
-             (mode_chip.top + mode_chip.bottom) / 2, scale_px(4, dpi), mode_color);
-    RECT mode_text = mode_chip;
-    mode_text.left += scale_px(22, dpi);
-    canvas.text(fonts.small, palette::text_dim, mode_text, mode_chip_text(state),
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    const int state_width = scale_px(120, dpi);
-    RECT state_chip = rect_of(mode_chip.left - metrics.gap - state_width, refresh.top, state_width,
-                              chip_height);
-    const COLORREF chip_color = state_chip_color(state);
-    canvas.fill_round(state_chip, chip_height / 2, palette::panel_alt);
-    canvas.outline_round(state_chip, chip_height / 2, 1, palette::border);
-    draw_dot(canvas, state_chip.left + scale_px(12, dpi),
-             (state_chip.top + state_chip.bottom) / 2, scale_px(4, dpi), chip_color);
-    RECT state_text = state_chip;
-    state_text.left += scale_px(22, dpi);
-    canvas.text(fonts.small, palette::text, state_text, state_chip_text(state),
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    RECT separator{header.left + metrics.margin, header.bottom - 1,
-                   header.right - metrics.margin, header.bottom};
-    canvas.separator(separator, palette::border);
-}
-
-void paint_banner(Canvas& canvas, const PaintContext& context, const Metrics& metrics, int& y) {
-    const AppState& state = *context.state;
-    if (state.banner.empty()) {
-        return;
-    }
-    const FontSet& fonts = *context.fonts;
-    const UINT dpi = context.dpi;
-    const int height = scale_px(38, dpi);
-    RECT banner{context.client.left + metrics.margin, y, context.client.right - metrics.margin,
-                y + height};
-    const COLORREF accent = severity_color(state.banner_severity);
-    canvas.fill_round(banner, scale_px(6, dpi), mix_colors(palette::panel_alt, accent, 18));
-    canvas.outline_round(banner, scale_px(6, dpi), 1, mix_colors(palette::border, accent, 60));
-    RECT text_rect = banner;
-    text_rect.left += scale_px(12, dpi);
-    text_rect.right -= scale_px(12, dpi);
-    canvas.text(fonts.body, palette::text, text_rect, ellipsize(state.banner, 220),
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    y += height + scale_px(10, dpi);
-}
-
-void paint_status_panel(Canvas& canvas, const PaintContext& context, const Metrics& metrics,
-                        const RECT& rect, std::vector<Hotspot>& hotspots) {
-    const AppState& state = *context.state;
-    const FontSet& fonts = *context.fonts;
-    const UINT dpi = context.dpi;
-    draw_panel_frame(canvas, rect, fonts, dpi, L"Status");
-
-    const int label_width = scale_px(150, dpi);
-    const int gutter = scale_px(12, dpi);
-    RECT view{rect.left + metrics.pad, rect.top + metrics.pad + scale_px(20, dpi),
-              rect.right - metrics.pad - gutter, rect.bottom - scale_px(6, dpi)};
-    const int text_left = view.left;
-    const int value_left = text_left + label_width;
-
-    struct Row {
-        std::wstring label;
-        std::wstring value;
-        std::wstring detail;
-        COLORREF dot;
-    };
-    std::vector<Row> rows;
-    const DiagnosticsReport& report = state.diagnostics;
-
+EngineView engine_view(const AppState& state, const Theme& theme) {
+    EngineView view;
     const EngineSnapshot& engine = state.engine.snapshot();
+    view.busy = state.engine.busy();
+    switch (engine.state) {
+        case EngineProcessState::Running:
+            view.color = theme.ok;
+            view.label = engine.mode == LaunchMode::Preview ? L"Preview running"
+                                                            : L"Workspace running";
+            view.headline = engine.mode == LaunchMode::Preview ? L"Preview is running"
+                            : engine.mode == LaunchMode::Workspace
+                                ? L"Your workspace is running"
+                                : L"The engine is running";
+            if (state.engine_status.parsed) {
+                view.detail = wide_from_utf8(engine_status_summary(state.engine_status));
+            } else {
+                view.detail = L"Put the glasses on and look around. Recenter whenever the centre "
+                              L"screen drifts.";
+            }
+            break;
+        case EngineProcessState::Starting:
+            view.color = theme.warning;
+            view.transitional = true;
+            view.label = L"Starting";
+            view.headline = L"Starting the engine";
+            view.detail = L"Preparing the screens and head tracking. This takes a few seconds.";
+            break;
+        case EngineProcessState::Stopping:
+            view.color = theme.warning;
+            view.transitional = true;
+            view.label = L"Stopping";
+            view.headline = L"Restoring your displays";
+            view.detail = L"The engine removes its virtual screens and restores your display "
+                          L"layout. This can take up to a minute.";
+            break;
+        case EngineProcessState::Failed:
+            view.color = theme.error;
+            view.label = L"Failed";
+            view.headline = L"The engine stopped with an error";
+            view.detail = engine.last_error.empty()
+                              ? std::wstring(L"Open the engine log on the Diagnostics page.")
+                              : wide_from_utf8(engine.last_error);
+            break;
+        case EngineProcessState::Exited:
+        case EngineProcessState::Stopped:
+        default: {
+            view.color = theme.text_faint;
+            view.label = L"Stopped";
+            const std::wstring workspace_block = start_block_reason(state, LaunchMode::Workspace);
+            const std::wstring preview_block = start_block_reason(state, LaunchMode::Preview);
+            if (workspace_block.empty()) {
+                view.headline = L"Ready to start";
+                view.detail = L"Your glasses are connected and calibrated. Start the workspace "
+                              L"to see your screens around you.";
+                view.color = theme.accent;
+            } else if (preview_block.empty()) {
+                view.headline = L"Preview is ready";
+                view.detail = L"The full workspace is not available yet: " + workspace_block;
+                view.color = theme.warning;
+            } else {
+                view.headline = L"Setup needed";
+                view.detail = workspace_block;
+                view.color = theme.warning;
+            }
+            break;
+        }
+    }
+    if (view.busy && engine.state == EngineProcessState::Stopped) {
+        view.label = L"Running";
+    }
+    return view;
+}
+
+std::vector<HealthItem> health_items(const AppState& state) {
+    const DiagnosticsReport& report = state.diagnostics;
+    std::vector<HealthItem> items;
     {
-        std::wstring value = engine_process_state_label(engine.state);
+        HealthItem item;
+        item.title = L"Engine";
+        const EngineSnapshot& engine = state.engine.snapshot();
+        item.value = engine_process_state_label(engine.state);
         if (engine.process_alive) {
-            value += L"  pid " + std::to_wstring(engine.process_id);
+            item.value += L"  (pid " + std::to_wstring(engine.process_id) + L")";
         }
-        std::wstring detail;
         if (!engine.last_error.empty()) {
-            detail = wide_from_utf8(engine.last_error);
+            item.detail = wide_from_utf8(engine.last_error);
+            item.severity = Severity::Error;
         } else if (state.engine_status.parsed) {
-            detail = wide_from_utf8(engine_status_summary(state.engine_status));
+            item.detail = wide_from_utf8(engine_status_summary(state.engine_status));
+            item.severity = Severity::Ok;
         } else if (state.engine.busy()) {
-            detail = L"engine window found, waiting for its status file";
+            item.detail = L"Engine window found; waiting for its status file.";
+            item.severity = Severity::Warning;
         } else {
-            detail = L"no engine running; choose Start workspace or Start preview";
+            item.detail = L"Not running. Start the workspace or a preview from Home.";
         }
-        rows.push_back({L"Engine", value, detail, state_chip_color(state)});
-    }
-    rows.push_back({L"RayNeo display",
-                    report.glasses_found ? L"present" : L"not found",
-                    report.glasses_detail,
-                    report.glasses_found ? palette::ok : palette::error});
-    rows.push_back({L"Orientation calibration",
-                    report.calibration_valid ? L"valid" : L"not usable",
-                    report.calibration_detail,
-                    report.calibration_valid ? palette::ok : palette::warning});
-    rows.push_back({L"RayNeo HID",
-                    report.hid_device_count > 0 ? L"found" : L"not found",
-                    report.hid_detail,
-                    report.hid_device_count > 0 ? palette::ok : palette::error});
-    rows.push_back({L"Parsec VDD",
-                    report.vdd_ready ? L"ready" : L"not ready",
-                    report.vdd_status_text,
-                    report.vdd_ready ? palette::ok : palette::warning});
-    rows.push_back({L"Layout file",
-                    report.layout_ok ? L"valid" : L"problem",
-                    report.layout_detail,
-                    report.layout_ok ? palette::ok : palette::error});
-    {
-        std::wstring value = report.telemetry_present ? L"latest row" : L"no data";
-        rows.push_back({L"Telemetry CSV", value, report.telemetry_detail,
-                        report.telemetry_present ? palette::ok : palette::text_faint});
+        item.topic = HelpTopic::StatusEngine;
+        item.status_row = 0;
+        items.push_back(item);
     }
     {
+        HealthItem item;
+        item.title = L"Glasses display";
+        item.value = report.glasses_found ? L"Connected" : L"Not detected";
+        item.detail = report.glasses_found
+                          ? report.glasses_detail
+                          : L"Connect the glasses, press Win+P and choose Extend.";
+        item.severity = report.glasses_found ? Severity::Ok : Severity::Error;
+        item.topic = HelpTopic::StatusDisplay;
+        item.status_row = 1;
+        items.push_back(item);
+    }
+    {
+        HealthItem item;
+        item.title = L"Head calibration";
+        item.value = report.calibration_valid ? L"Valid" : L"Needed";
+        item.detail = report.calibration_valid
+                          ? report.calibration_detail
+                          : std::wstring(L"Run the head calibration once on the Tracking page.");
+        item.raw = report.calibration_detail;
+        item.severity = report.calibration_valid ? Severity::Ok : Severity::Warning;
+        item.topic = HelpTopic::StatusCalibration;
+        item.status_row = 2;
+        items.push_back(item);
+    }
+    {
+        HealthItem item;
+        item.title = L"Head-tracking sensor";
+        item.value = report.hid_device_count > 0 ? L"Found" : L"Not found";
+        item.detail = report.hid_device_count > 0
+                          ? report.hid_detail
+                          : std::wstring(L"Check the USB-C cable and that the glasses are switched on.");
+        item.raw = report.hid_detail;
+        item.severity = report.hid_device_count > 0 ? Severity::Ok : Severity::Error;
+        item.topic = HelpTopic::StatusHid;
+        item.status_row = 3;
+        items.push_back(item);
+    }
+    {
+        HealthItem item;
+        item.title = L"Virtual display driver";
+        item.value = report.vdd_ready ? L"Ready" : L"Not ready";
+        item.detail = report.vdd_ready
+                          ? report.vdd_status_text
+                          : std::wstring(L"Needed only for the full workspace; preview works without it.");
+        item.raw = L"Parsec VDD: " + report.vdd_status_text + (report.vdd_ready ? L"" : L". " + item.detail);
+        item.severity = report.vdd_ready ? Severity::Ok : Severity::Warning;
+        item.topic = HelpTopic::StatusVdd;
+        item.status_row = 4;
+        items.push_back(item);
+    }
+    {
+        HealthItem item;
+        item.title = L"Layout file";
+        item.value = report.layout_ok ? L"Valid" : L"Problem";
+        item.detail = report.layout_detail;
+        item.severity = report.layout_ok ? Severity::Ok : Severity::Error;
+        item.topic = HelpTopic::StatusLayoutFile;
+        item.status_row = 5;
+        items.push_back(item);
+    }
+    {
+        HealthItem item;
+        item.title = L"Telemetry";
+        item.value = report.telemetry_present ? L"Recording" : L"No data yet";
+        item.detail = report.telemetry_detail.empty()
+                          ? std::wstring(L"Written while the engine runs.")
+                          : report.telemetry_detail;
+        item.severity = report.telemetry_present ? Severity::Ok : Severity::Neutral;
+        item.topic = HelpTopic::StatusTelemetry;
+        item.status_row = 6;
+        items.push_back(item);
+    }
+    {
+        HealthItem item;
+        item.title = L"Engine log";
         std::error_code size_error;
         const uint64_t bytes = std::filesystem::file_size(state.paths.engine_log, size_error);
-        std::wstring value = size_error ? L"not written yet" : format_bytes_wide(bytes);
-        std::wstring detail = state.paths.engine_log.wstring();
-        rows.push_back({L"Engine log", value, detail, palette::text_faint});
-    }
-
-    const int content_h = static_cast<int>(rows.size()) * metrics.row;
-    const int offset =
-        paint_scrollbar(canvas, context, kScrollStatus, rect, view, content_h, false, hotspots);
-    canvas.push_clip(view);
-    int y = view.top - offset;
-    const int help_w = help_mark_width(dpi);
-    for (size_t row_index = 0; row_index < rows.size(); ++row_index) {
-        const Row& row = rows[row_index];
-        const int dot_x = text_left + scale_px(5, dpi);
-        draw_dot(canvas, dot_x, y + scale_px(10, dpi), scale_px(4, dpi), row.dot);
-        RECT label_rect = rect_of(text_left + scale_px(16, dpi), y, label_width, scale_px(20, dpi));
-        canvas.text(fonts.small, palette::text_dim, label_rect, row.label,
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        RECT value_rect = rect_of(value_left, y, view.right - value_left - help_w - metrics.gap,
-                                  scale_px(20, dpi));
-        canvas.text(fonts.body, palette::text, value_rect, row.value,
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        RECT help_rect = rect_of(view.right - help_w, y, help_w, scale_px(20, dpi));
-        const int help_id = ui_help_id(0, static_cast<int>(row_index));
-        const int help_topic =
-            static_cast<int>(HelpTopic::StatusEngine) + static_cast<int>(row_index);
-        draw_help_mark(canvas, help_rect, state.focus_id == help_id, state.hover_id == help_id, fonts.small);
-        add_clipped_hotspot(hotspots, help_id, help_topic, help_rect, view, kScrollStatus);
-        RECT detail_rect = rect_of(text_left + scale_px(16, dpi), y + scale_px(19, dpi),
-                                   view.right - text_left - scale_px(16, dpi), scale_px(15, dpi));
-        canvas.text(fonts.small, palette::text_faint, detail_rect, ellipsize(row.detail, 84),
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        y += metrics.row;
-    }
-    canvas.pop_clip();
-}
-
-// "View comfort" block of the engine panel: reading stabilisation, screen
-// dimming, night tint and the cursor-to-centre action. Returns the height it
-// occupies. With draw == false it only measures (the scroll content height
-// must be known before the portal paints).
-int paint_comfort_section(Canvas& canvas, const PaintContext& context, const Metrics& metrics,
-                          int left, int width, int top, const RECT& view,
-                          std::vector<Hotspot>& hotspots, bool draw) {
-    const AppState& state = *context.state;
-    const FontSet& fonts = *context.fonts;
-    const UINT dpi = context.dpi;
-    const ViewComfort& comfort = state.config.comfort;
-    const int help_w = help_mark_width(dpi);
-    const int label_h = scale_px(20, dpi);
-    const int chip_h = scale_px(28, dpi);
-    const int row_gap = scale_px(10, dpi);
-    const int content_w = width - help_w - metrics.gap;
-    int y = top;
-    int help_row = 8;  // rows 0..7 of panel 1 are the engine controls above
-
-    auto label = [&](const wchar_t* text) {
-        if (draw) {
-            canvas.text(fonts.small, palette::text_faint, rect_of(left, y, width, label_h), text);
-        }
-        y += label_h;
-    };
-    auto help = [&](int row_top, int row_h, HelpTopic topic) {
-        if (draw) {
-            RECT mark = rect_of(left + content_w + metrics.gap, row_top, help_w, row_h);
-            const int id = ui_help_id(1, help_row);
-            draw_help_mark(canvas, mark, state.focus_id == id, state.hover_id == id, fonts.small);
-            add_clipped_hotspot(hotspots, id, static_cast<int>(topic), mark, view, kScrollEngine);
-        }
-        ++help_row;
-    };
-    auto chips = [&](int base, int count, int selected, auto name_of, HelpTopic topic) {
-        const int chip_w = (content_w - metrics.gap / 2 * (count - 1)) / count;
-        if (draw) {
-            for (int i = 0; i < count; ++i) {
-                RECT chip = rect_of(left + i * (chip_w + metrics.gap / 2), y, chip_w, chip_h);
-                draw_chip(canvas, chip, name_of(i),
-                          i == selected ? palette::accent : palette::text_faint,
-                          state.focus_id == base + i, state.hover_id == base + i || i == selected,
-                          fonts.small);
-                add_clipped_hotspot(hotspots, base + i, i, chip, view, kScrollEngine);
-            }
-        }
-        help(y, chip_h, topic);
-        y += chip_h + row_gap;
-    };
-    auto slider = [&](int id, const std::wstring& text, int value, int minimum, bool enabled,
-                      HelpTopic topic) {
-        if (draw) {
-            RECT rc = rect_of(left, y, content_w, metrics.slider);
-            const float fraction =
-                static_cast<float>(value - minimum) / static_cast<float>(100 - minimum);
-            draw_slider(canvas, rc, text, format_wide(L"%d%%", value), fraction,
-                        state.focus_id == id, state.hover_id == id, enabled, fonts.small,
-                        fonts.body);
-            add_clipped_hotspot(hotspots, id, 0, rc, view, kScrollEngine, enabled);
-        }
-        help(y, metrics.slider, topic);
-        y += metrics.slider + row_gap / 2;
-    };
-
-    if (draw) {
-        canvas.text(fonts.body, palette::text, rect_of(left, y, width, scale_px(24, dpi)),
-                    L"View comfort");
-    }
-    y += scale_px(28, dpi);
-
-    label(L"Reading stabilisation (Ctrl+Alt+S)");
-    chips(kUiStabiliseBase, kComfortStabiliseLevels, comfort.stabilise_level,
-          [](int i) {
-              static const wchar_t* const kNames[] = {L"Off", L"Low", L"Medium", L"High",
-                                                      L"Ultra"};
-              return std::wstring(kNames[i]);
-          },
-          HelpTopic::ComfortStabilise);
-
-    label(L"Screen dimming");
-    chips(kUiDimModeBase, kDimModeCount, static_cast<int>(comfort.dim_mode),
-          [](int i) {
-              static const wchar_t* const kNames[] = {L"Off", L"Manual", L"Focus"};
-              return std::wstring(kNames[i]);
-          },
-          HelpTopic::ComfortDimMode);
-    if (comfort.dim_mode == DimMode::Manual) {
-        const size_t screens =
-            std::min(state.layout.screens.size(), static_cast<size_t>(kComfortMaxScreens));
-        for (size_t i = 0; i < screens; ++i) {
-            slider(kUiBrightnessBase + static_cast<int>(i),
-                   L"Screen '" + wide_from_utf8(state.layout.screens[i].id) + L"' brightness",
-                   comfort.screen_brightness_pct[i], kComfortMinBrightnessPct, true,
-                   HelpTopic::ComfortBrightness);
-        }
-    } else if (comfort.dim_mode == DimMode::Focus) {
-        slider(kUiFocusDim, L"Screens you are not looking at", comfort.focus_dim_pct,
-               kComfortMinBrightnessPct, true, HelpTopic::ComfortFocusDim);
-    }
-
-    if (draw) {
-        RECT toggle = rect_of(left, y, content_w, scale_px(24, dpi));
-        draw_toggle(canvas, toggle, L"Night tint (warm screens)", comfort.night_tint,
-                    state.focus_id == kUiNightTint, state.hover_id == kUiNightTint, fonts.small);
-        add_clipped_hotspot(hotspots, kUiNightTint, 0, toggle, view, kScrollEngine);
-    }
-    help(y, scale_px(24, dpi), HelpTopic::ComfortNightTint);
-    y += scale_px(24, dpi) + row_gap;
-    slider(kUiNightTintStrength, L"Night tint warmth", comfort.night_tint_pct, 0,
-           comfort.night_tint, HelpTopic::ComfortNightStrength);
-
-    if (draw) {
-        RECT button = rect_of(left, y, content_w, metrics.button);
-        const bool running = state.engine.busy();
-        draw_button(canvas, button, L"Cursor to centre screen (Ctrl+Alt+F)", ButtonStyle::Ghost,
-                    state.focus_id == kUiCursorToCenter, state.hover_id == kUiCursorToCenter,
-                    running, fonts.small);
-        add_clipped_hotspot(hotspots, kUiCursorToCenter, 0, button, view, kScrollEngine, running);
-    }
-    help(y, metrics.button, HelpTopic::ComfortCursorCenter);
-    y += metrics.button + row_gap;
-    return y - top;
-}
-
-void paint_engine_panel(Canvas& canvas, const PaintContext& context, const Metrics& metrics,
-                        const RECT& rect, std::vector<Hotspot>& hotspots) {
-    const AppState& state = *context.state;
-    const FontSet& fonts = *context.fonts;
-    const UINT dpi = context.dpi;
-    draw_panel_frame(canvas, rect, fonts, dpi, L"Engine control");
-
-    const int gutter = scale_px(12, dpi);
-    const int left = rect.left + metrics.pad;
-    const int width = rect.right - rect.left - metrics.pad * 2 - gutter;
-    RECT view{left, rect.top + metrics.pad + scale_px(22, dpi), left + width,
-              rect.bottom - metrics.pad};
-    const bool busy = state.engine.busy();
-    const std::wstring workspace_block = start_block_reason(state, LaunchMode::Workspace);
-    const std::wstring preview_block = start_block_reason(state, LaunchMode::Preview);
-
-    std::wstring note;
-    COLORREF note_color = palette::text_faint;
-    if (busy) {
-        note = L"Engine runs in its own process; this window stays responsive. "
-               L"Stop asks it to quit gracefully (virtual desktops are removed). "
-               L"Ctrl+Shift+\\ exits the engine.";
-    } else if (!workspace_block.empty()) {
-        note = L"Start workspace blocked: " + workspace_block;
-        note_color = palette::warning;
-    } else if (!preview_block.empty()) {
-        note = L"Start preview blocked: " + preview_block;
-        note_color = palette::warning;
-    } else {
-        note = L"Start workspace creates real Parsec virtual desktops and switches the "
-               L"laptop panel off until exit; Start preview renders labelled test screens only.";
-    }
-    const std::wstring note_text = ellipsize(note, 150);
-    const int row_gap = scale_px(12, dpi);
-    const int help_w = help_mark_width(dpi);
-    const int controls_h =
-        (metrics.button + row_gap) * 2 + scale_px(32, dpi) + scale_px(34, dpi);
-    const int note_h =
-        wrapped_text_height(canvas.dc(), fonts.small, width, note_text) + scale_px(6, dpi);
-    const int comfort_h =
-        paint_comfort_section(canvas, context, metrics, left, width, 0, view, hotspots, false);
-    const int offset = paint_scrollbar(canvas, context, kScrollEngine, rect, view,
-                                       controls_h + comfort_h + note_h, false, hotspots);
-    canvas.push_clip(view);
-    int y = view.top - offset;
-
-    const int half = (width - metrics.gap) / 2;
-    RECT start_workspace = rect_of(left, y, half - help_w - metrics.gap, metrics.button);
-    draw_button(canvas, start_workspace, L"Start workspace", ButtonStyle::Primary,
-                state.focus_id == kUiStartWorkspace,
-                state.hover_id == kUiStartWorkspace && !busy && workspace_block.empty(),
-                !busy && workspace_block.empty(), fonts.body);
-    add_clipped_hotspot(hotspots, kUiStartWorkspace, 0, start_workspace, view, kScrollEngine,
-                        !busy && workspace_block.empty());
-    RECT help_workspace =
-        rect_of(start_workspace.right + metrics.gap, y, help_w, metrics.button);
-    draw_help_mark(canvas, help_workspace, state.focus_id == ui_help_id(1, 0), state.hover_id == ui_help_id(1, 0), fonts.small);
-    add_clipped_hotspot(hotspots, ui_help_id(1, 0),
-                        static_cast<int>(HelpTopic::EngineStartWorkspace), help_workspace, view,
-                        kScrollEngine);
-
-    RECT start_preview =
-        rect_of(left + half + metrics.gap, y, half - help_w - metrics.gap, metrics.button);
-    draw_button(canvas, start_preview, L"Start preview", ButtonStyle::Secondary,
-                state.focus_id == kUiStartPreview,
-                state.hover_id == kUiStartPreview && !busy && preview_block.empty(),
-                !busy && preview_block.empty(), fonts.body);
-    add_clipped_hotspot(hotspots, kUiStartPreview, 0, start_preview, view, kScrollEngine,
-                        !busy && preview_block.empty());
-    RECT help_preview = rect_of(start_preview.right + metrics.gap, y, help_w, metrics.button);
-    draw_help_mark(canvas, help_preview, state.focus_id == ui_help_id(1, 1), state.hover_id == ui_help_id(1, 1), fonts.small);
-    add_clipped_hotspot(hotspots, ui_help_id(1, 1),
-                        static_cast<int>(HelpTopic::EngineStartPreview), help_preview, view,
-                        kScrollEngine);
-    y += metrics.button + scale_px(12, dpi);
-
-    const int third = (width - metrics.gap * 2) / 3;
-    RECT stop = rect_of(left, y, third - help_w - metrics.gap, metrics.button);
-    draw_button(canvas, stop, L"Stop", ButtonStyle::Danger, state.focus_id == kUiStopEngine,
-                state.hover_id == kUiStopEngine, busy, fonts.body);
-    add_clipped_hotspot(hotspots, kUiStopEngine, 0, stop, view, kScrollEngine, busy);
-    RECT help_stop = rect_of(stop.right + metrics.gap, y, help_w, metrics.button);
-    draw_help_mark(canvas, help_stop, state.focus_id == ui_help_id(1, 2), state.hover_id == ui_help_id(1, 2), fonts.small);
-    add_clipped_hotspot(hotspots, ui_help_id(1, 2), static_cast<int>(HelpTopic::EngineStop),
-                        help_stop, view, kScrollEngine);
-
-    RECT recenter =
-        rect_of(left + third + metrics.gap, y, third - help_w - metrics.gap, metrics.button);
-    draw_button(canvas, recenter, L"Recenter", ButtonStyle::Secondary,
-                state.focus_id == kUiRecenter, state.hover_id == kUiRecenter, busy, fonts.body);
-    add_clipped_hotspot(hotspots, kUiRecenter, 0, recenter, view, kScrollEngine, busy);
-    RECT help_recenter = rect_of(recenter.right + metrics.gap, y, help_w, metrics.button);
-    draw_help_mark(canvas, help_recenter, state.focus_id == ui_help_id(1, 3), state.hover_id == ui_help_id(1, 3), fonts.small);
-    add_clipped_hotspot(hotspots, ui_help_id(1, 3), static_cast<int>(HelpTopic::EngineRecenter),
-                        help_recenter, view, kScrollEngine);
-
-    RECT reload = rect_of(left + (third + metrics.gap) * 2, y, third - help_w - metrics.gap,
-                          metrics.button);
-    draw_button(canvas, reload, L"Reload layout", ButtonStyle::Ghost,
-                state.focus_id == kUiReloadLayout, state.hover_id == kUiReloadLayout, busy,
-                fonts.body);
-    add_clipped_hotspot(hotspots, kUiReloadLayout, 0, reload, view, kScrollEngine, busy);
-    RECT help_reload = rect_of(reload.right + metrics.gap, y, help_w, metrics.button);
-    draw_help_mark(canvas, help_reload, state.focus_id == ui_help_id(1, 4), state.hover_id == ui_help_id(1, 4), fonts.small);
-    add_clipped_hotspot(hotspots, ui_help_id(1, 4),
-                        static_cast<int>(HelpTopic::EngineReloadLayout), help_reload, view,
-                        kScrollEngine);
-    y += metrics.button + scale_px(12, dpi);
-
-    const int toggle_width = (width - metrics.gap) / 2;
-    RECT yaw_toggle = rect_of(left, y, toggle_width - help_w - metrics.gap, scale_px(24, dpi));
-    const bool yaw_on = state.engine.snapshot().query_answered
-                            ? (state.engine.snapshot().query_flags & kEngineFlagYawTracking) != 0
-                            : true;
-    draw_toggle(canvas, yaw_toggle, L"Yaw tracking (Ctrl+Alt+Y)", yaw_on,
-                state.focus_id == kUiToggleYaw, state.hover_id == kUiToggleYaw, fonts.small);
-    add_clipped_hotspot(hotspots, kUiToggleYaw, 0, yaw_toggle, view, kScrollEngine, busy);
-    RECT help_yaw = rect_of(yaw_toggle.right + metrics.gap, y, help_w, scale_px(24, dpi));
-    draw_help_mark(canvas, help_yaw, state.focus_id == ui_help_id(1, 5), state.hover_id == ui_help_id(1, 5), fonts.small);
-    add_clipped_hotspot(hotspots, ui_help_id(1, 5), static_cast<int>(HelpTopic::EngineYawToggle),
-                        help_yaw, view, kScrollEngine);
-
-    RECT pitch_toggle = rect_of(left + toggle_width + metrics.gap, y,
-                                  toggle_width - help_w - metrics.gap, scale_px(24, dpi));
-    const bool pitch_on =
-        state.engine.snapshot().query_answered
-            ? (state.engine.snapshot().query_flags & kEngineFlagPitchTracking) != 0
-            : true;
-    draw_toggle(canvas, pitch_toggle, L"Pitch tracking (Ctrl+Alt+P)", pitch_on,
-                state.focus_id == kUiTogglePitch, state.hover_id == kUiTogglePitch, fonts.small);
-    add_clipped_hotspot(hotspots, kUiTogglePitch, 0, pitch_toggle, view, kScrollEngine, busy);
-    RECT help_pitch = rect_of(pitch_toggle.right + metrics.gap, y, help_w, scale_px(24, dpi));
-    draw_help_mark(canvas, help_pitch, state.focus_id == ui_help_id(1, 6), state.hover_id == ui_help_id(1, 6), fonts.small);
-    add_clipped_hotspot(hotspots, ui_help_id(1, 6),
-                        static_cast<int>(HelpTopic::EnginePitchToggle), help_pitch, view,
-                        kScrollEngine);
-    y += scale_px(32, dpi);
-
-    RECT no_imu = rect_of(left, y, width - help_w - metrics.gap, scale_px(24, dpi));
-    draw_toggle(canvas, no_imu, L"Preview without head tracking (--no-imu)",
-                state.config.preview_without_head_tracking,
-                state.focus_id == kUiPreviewWithoutHeadTracking,
-                state.hover_id == kUiPreviewWithoutHeadTracking, fonts.small);
-    add_clipped_hotspot(hotspots, kUiPreviewWithoutHeadTracking, 0, no_imu, view, kScrollEngine,
-                        !busy);
-    RECT help_no_imu = rect_of(no_imu.right + metrics.gap, y, help_w, scale_px(24, dpi));
-    draw_help_mark(canvas, help_no_imu, state.focus_id == ui_help_id(1, 7), state.hover_id == ui_help_id(1, 7), fonts.small);
-    add_clipped_hotspot(hotspots, ui_help_id(1, 7), static_cast<int>(HelpTopic::EngineNoImu),
-                        help_no_imu, view, kScrollEngine);
-    y += scale_px(34, dpi);
-    y += paint_comfort_section(canvas, context, metrics, left, width, y, view, hotspots, true);
-
-    RECT note_rect = rect_of(left, y, width, note_h);
-    canvas.text(fonts.small, note_color, note_rect, note_text,
-                DT_LEFT | DT_TOP | DT_WORDBREAK);
-    canvas.pop_clip();
-}
-
-void paint_diagnostics_panel(Canvas& canvas, const PaintContext& context, const Metrics& metrics,
-                             const RECT& rect, std::vector<Hotspot>& hotspots) {
-    const AppState& state = *context.state;
-    const FontSet& fonts = *context.fonts;
-    const UINT dpi = context.dpi;
-    draw_panel_frame(canvas, rect, fonts, dpi, L"Diagnostics and recovery");
-
-    const int gutter = scale_px(12, dpi);
-    const int left = rect.left + metrics.pad;
-    const int width = rect.right - rect.left - metrics.pad * 2 - gutter;
-    RECT view{left, rect.top + metrics.pad + scale_px(22, dpi), left + width,
-              rect.bottom - metrics.pad};
-    const int half = (width - metrics.gap) / 2;
-    const int small_button = scale_px(30, dpi);
-    const int help_w = help_mark_width(dpi);
-    const int line_h = scale_px(15, dpi);
-    const int buttons_h = (small_button + scale_px(12, dpi)) * 3;
-    const int events_h =
-        static_cast<int>(std::max<size_t>(state.events.size(), 1)) * line_h + scale_px(4, dpi);
-    const int offset = paint_scrollbar(canvas, context, kScrollDiagnostics, rect, view,
-                                       buttons_h + events_h, true, hotspots);
-    canvas.push_clip(view);
-    int y = view.top - offset;
-
-    RECT calibration = rect_of(left, y, half - help_w - metrics.gap, small_button);
-    draw_button(canvas, calibration, L"Run calibration", ButtonStyle::Secondary,
-                state.focus_id == kUiLaunchCalibration, state.hover_id == kUiLaunchCalibration,
-                state.paths.calibration_tool_found, fonts.small);
-    add_clipped_hotspot(hotspots, kUiLaunchCalibration, 0, calibration, view, kScrollDiagnostics,
-                        state.paths.calibration_tool_found);
-    RECT help_cal = rect_of(calibration.right + metrics.gap, y, help_w, small_button);
-    draw_help_mark(canvas, help_cal, state.focus_id == ui_help_id(2, 0), state.hover_id == ui_help_id(2, 0), fonts.small);
-    add_clipped_hotspot(hotspots, ui_help_id(2, 0), static_cast<int>(HelpTopic::DiagCalibration),
-                        help_cal, view, kScrollDiagnostics);
-
-    RECT engine_log =
-        rect_of(left + half + metrics.gap, y, half - help_w - metrics.gap, small_button);
-    draw_button(canvas, engine_log, L"Open engine log", ButtonStyle::Ghost,
-                state.focus_id == kUiOpenEngineLog, state.hover_id == kUiOpenEngineLog, true,
-                fonts.small);
-    add_clipped_hotspot(hotspots, kUiOpenEngineLog, 0, engine_log, view, kScrollDiagnostics);
-    RECT help_log = rect_of(engine_log.right + metrics.gap, y, help_w, small_button);
-    draw_help_mark(canvas, help_log, state.focus_id == ui_help_id(2, 1), state.hover_id == ui_help_id(2, 1), fonts.small);
-    add_clipped_hotspot(hotspots, ui_help_id(2, 1), static_cast<int>(HelpTopic::DiagEngineLog),
-                        help_log, view, kScrollDiagnostics);
-    y += small_button + scale_px(12, dpi);
-
-    RECT logs_folder = rect_of(left, y, half - help_w - metrics.gap, small_button);
-    draw_button(canvas, logs_folder, L"Open logs folder", ButtonStyle::Ghost,
-                state.focus_id == kUiOpenLogs, state.hover_id == kUiOpenLogs, true, fonts.small);
-    add_clipped_hotspot(hotspots, kUiOpenLogs, 0, logs_folder, view, kScrollDiagnostics);
-    RECT help_folder = rect_of(logs_folder.right + metrics.gap, y, help_w, small_button);
-    draw_help_mark(canvas, help_folder, state.focus_id == ui_help_id(2, 2), state.hover_id == ui_help_id(2, 2), fonts.small);
-    add_clipped_hotspot(hotspots, ui_help_id(2, 2), static_cast<int>(HelpTopic::DiagLogsFolder),
-                        help_folder, view, kScrollDiagnostics);
-
-    RECT tray_toggle =
-        rect_of(left + half + metrics.gap, y, half - help_w - metrics.gap, small_button);
-    draw_toggle(canvas, tray_toggle, L"Close to tray", state.config.close_to_tray,
-                state.focus_id == kUiCloseToTray, state.hover_id == kUiCloseToTray, fonts.small);
-    add_clipped_hotspot(hotspots, kUiCloseToTray, 0, tray_toggle, view, kScrollDiagnostics);
-    RECT help_tray = rect_of(tray_toggle.right + metrics.gap, y, help_w, small_button);
-    draw_help_mark(canvas, help_tray, state.focus_id == ui_help_id(2, 3), state.hover_id == ui_help_id(2, 3), fonts.small);
-    add_clipped_hotspot(hotspots, ui_help_id(2, 3), static_cast<int>(HelpTopic::DiagCloseToTray),
-                        help_tray, view, kScrollDiagnostics);
-    y += small_button + scale_px(12, dpi);
-
-    RECT recover = rect_of(left, y, half - help_w - metrics.gap, small_button);
-    draw_button(canvas, recover, L"Recover displays", ButtonStyle::Ghost,
-                state.focus_id == kUiRecoverDisplays, state.hover_id == kUiRecoverDisplays, true,
-                fonts.small);
-    add_clipped_hotspot(hotspots, kUiRecoverDisplays, 0, recover, view, kScrollDiagnostics);
-    RECT help_recover = rect_of(recover.right + metrics.gap, y, help_w, small_button);
-    draw_help_mark(canvas, help_recover, state.focus_id == ui_help_id(2, 4), state.hover_id == ui_help_id(2, 4), fonts.small);
-    add_clipped_hotspot(hotspots, ui_help_id(2, 4),
-                        static_cast<int>(HelpTopic::DiagRecoverDisplays), help_recover, view,
-                        kScrollDiagnostics);
-    y += small_button + scale_px(12, dpi);
-
-    if (state.events.empty()) {
-        RECT line = rect_of(left, y, width, line_h);
-        canvas.text(fonts.small, palette::text_faint, line, L"no controller events yet",
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    }
-    for (size_t index = 0; index < state.events.size(); ++index) {
-        RECT line = rect_of(left, y, width, line_h);
-        canvas.text(fonts.small, palette::text_faint, line, ellipsize(state.events[index], 96),
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        y += line_h;
-    }
-    canvas.pop_clip();
-}
-
-void paint_layout_panel(Canvas& canvas, const PaintContext& context, const Metrics& metrics,
-                        const RECT& rect, std::vector<Hotspot>& hotspots) {
-    const AppState& state = *context.state;
-    const FontSet& fonts = *context.fonts;
-    const UINT dpi = context.dpi;
-    draw_panel_frame(canvas, rect, fonts, dpi, L"Layout");
-
-    const int gutter = scale_px(12, dpi);
-    const int left = rect.left + metrics.pad;
-    const int width = rect.right - rect.left - metrics.pad * 2 - gutter;
-    RECT view{left, rect.top + metrics.pad + scale_px(22, dpi), left + width,
-              rect.bottom - metrics.pad};
-    const int chip_height = scale_px(26, dpi);
-    const int chip_gap = scale_px(6, dpi);
-
-    // Pass 1: flow the chips and buttons into content rows (wrapping instead
-    // of dropping overflow), so the content height is known before painting.
-    struct FlowItem {
-        RECT rc{};
-        int id = 0;
-        int arg = 0;
-        int kind = 0;  // 0 = preset, 1 = screen, 2 = button, 3 = user preset, 6 = help, 7 = hint
-    };
-    std::vector<FlowItem> items;
-    int content_y = 0;
-    int flow_x = 0;
-    int flow_row_h = 0;
-    const auto place = [&](int item_width, int item_height, int id, int arg, int kind) {
-        if (flow_x > 0 && flow_x + item_width > width) {
-            flow_x = 0;
-            content_y += flow_row_h + chip_gap;
-            flow_row_h = 0;
-        }
-        FlowItem item;
-        item.rc = rect_of(left + flow_x, content_y, item_width, item_height);
-        item.id = id;
-        item.arg = arg;
-        item.kind = kind;
+        item.value = size_error ? L"Not written yet" : format_bytes_wide(bytes);
+        item.detail = state.paths.engine_log.wstring();
+        item.severity = Severity::Neutral;
+        item.topic = HelpTopic::StatusEngineLog;
+        item.status_row = 7;
         items.push_back(item);
-        flow_x += item_width + chip_gap;
-        flow_row_h = std::max(flow_row_h, item_height);
-    };
-    const auto end_block = [&](int block_gap) {
-        if (flow_row_h > 0) {
-            content_y += flow_row_h + block_gap;
-        }
-        flow_x = 0;
-        flow_row_h = 0;
-    };
-    for (const LayoutPreset preset : layout_presets()) {
-        const std::wstring label = wide_from_utf8(layout_preset_name(preset));
-        place(scale_px(static_cast<int>(label.size()) * 7 + 22, dpi), chip_height,
-              ui_preset_id(preset), 0, 0);
     }
-    place(help_mark_width(dpi), chip_height, ui_help_id(3, 0),
-          static_cast<int>(HelpTopic::LayoutFactory), 6);
-    end_block(scale_px(8, dpi));
-    if (state.preset_names.empty()) {
-        place(width, scale_px(16, dpi), 0, 0, 7);
-        end_block(scale_px(2, dpi));
-    }
-    for (size_t index = 0; index < state.preset_names.size() && index < 32; ++index) {
-        std::wstring label = wide_from_utf8(state.preset_names[index]);
-        if (state.preset_names[index] == state.loaded_preset) {
-            label += L" *";
-        }
-        place(scale_px(static_cast<int>(label.size()) * 7 + 22, dpi), chip_height,
-              ui_user_preset_id(index), static_cast<int>(index), 3);
-    }
-    place(help_mark_width(dpi), chip_height, ui_help_id(3, 1),
-          static_cast<int>(HelpTopic::LayoutUserPresets), 6);
-    end_block(scale_px(8, dpi));
-    for (size_t index = 0; index < state.layout.screens.size(); ++index) {
-        place(scale_px(96, dpi), chip_height, ui_screen_id(index), static_cast<int>(index), 1);
-    }
-    end_block(scale_px(8, dpi));
-    const int button_h = scale_px(30, dpi);
-    place(scale_px(96, dpi), button_h, kUiAddScreen, 0, 2);
-    place(help_mark_width(dpi), button_h, ui_help_id(3, 2), static_cast<int>(HelpTopic::LayoutAddScreen), 6);
-    place(scale_px(96, dpi), button_h, kUiRemoveScreen, 0, 2);
-    place(help_mark_width(dpi), button_h, ui_help_id(3, 3), static_cast<int>(HelpTopic::LayoutRemoveScreen), 6);
-    place(scale_px(126, dpi), button_h, kUiSaveLayout, 0, 2);
-    place(help_mark_width(dpi), button_h, ui_help_id(3, 4), static_cast<int>(HelpTopic::LayoutSave), 6);
-    place(scale_px(96, dpi), button_h, kUiRevertLayout, 0, 2);
-    place(help_mark_width(dpi), button_h, ui_help_id(3, 5), static_cast<int>(HelpTopic::LayoutRevert), 6);
-    place(scale_px(150, dpi), button_h, kUiPresetSave, 0, 2);
-    place(help_mark_width(dpi), button_h, ui_help_id(3, 6), static_cast<int>(HelpTopic::LayoutPresetSave), 6);
-    place(scale_px(130, dpi), button_h, kUiPresetDelete, 0, 2);
-    place(help_mark_width(dpi), button_h, ui_help_id(3, 7), static_cast<int>(HelpTopic::LayoutPresetDelete), 6);
-    end_block(scale_px(6, dpi));
-    const int summary_h = scale_px(16, dpi);
+    return items;
+}
 
-    const int offset = paint_scrollbar(canvas, context, kScrollLayout, rect, view,
-                                       content_y + summary_h, false, hotspots);
-    canvas.push_clip(view);
-    const bool can_add = state.layout.screens.size() < 8;
-    const bool can_remove = state.layout.screens.size() > 1;
-    for (const FlowItem& item : items) {
-        RECT rc = item.rc;
-        rc.top += view.top - offset;
-        rc.bottom += view.top - offset;
-        if (item.kind == 0) {
-            const LayoutPreset preset = static_cast<LayoutPreset>(item.id - kUiPresetBase);
-            draw_chip(canvas, rc, wide_from_utf8(layout_preset_name(preset)), palette::accent,
-                      state.focus_id == item.id, state.hover_id == item.id, fonts.small);
-            add_clipped_hotspot(hotspots, item.id, 0, rc, view, kScrollLayout);
-        } else if (item.kind == 3) {
-            const std::string& name = state.preset_names[static_cast<size_t>(item.arg)];
-            std::wstring label = wide_from_utf8(name);
-            if (name == state.loaded_preset) {
-                label += L" *";
-            }
-            draw_chip(canvas, rc, label, palette::accent, state.focus_id == item.id,
-                      state.hover_id == item.id, fonts.small);
-            add_clipped_hotspot(hotspots, item.id, item.arg, rc, view, kScrollLayout);
-        } else if (item.kind == 6) {
-            draw_help_mark(canvas, rc, state.focus_id == item.id, state.hover_id == item.id, fonts.small);
-            add_clipped_hotspot(hotspots, item.id, item.arg, rc, view, kScrollLayout);
-        } else if (item.kind == 7) {
-            canvas.text(fonts.small, palette::text_faint, rc,
-                        L"No saved presets yet -- arrange screens, then Save as preset.",
-                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        } else if (item.kind == 1) {
-            const ScreenLayout& screen = state.layout.screens[static_cast<size_t>(item.arg)];
-            const bool selected = static_cast<size_t>(item.arg) == state.selected_screen;
-            const COLORREF tint = RGB(static_cast<int>(screen.color[0] * 255.0f),
-                                      static_cast<int>(screen.color[1] * 255.0f),
-                                      static_cast<int>(screen.color[2] * 255.0f));
-            canvas.fill_round(rc, chip_height / 2,
-                              selected ? palette::accent_soft : palette::panel_alt);
-            canvas.outline_round(rc, chip_height / 2, selected ? 2 : 1,
-                                 selected ? palette::accent : palette::border);
-            draw_dot(canvas, rc.left + scale_px(11, dpi), (rc.top + rc.bottom) / 2,
-                     scale_px(4, dpi), tint);
-            RECT chip_text = rc;
-            chip_text.left += scale_px(20, dpi);
-            chip_text.right -= scale_px(8, dpi);
-            canvas.text(fonts.small, selected ? palette::text : palette::text_dim, chip_text,
-                        ellipsize(wide_from_utf8(screen.id), 12),
-                        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            add_clipped_hotspot(hotspots, item.id, item.arg, rc, view, kScrollLayout);
-        } else if (item.id == kUiAddScreen) {
-            draw_button(canvas, rc, L"Add screen", ButtonStyle::Secondary,
-                        state.focus_id == item.id, state.hover_id == item.id, can_add, fonts.small);
-            add_clipped_hotspot(hotspots, item.id, 0, rc, view, kScrollLayout, can_add);
-        } else if (item.id == kUiRemoveScreen) {
-            draw_button(canvas, rc, L"Remove", ButtonStyle::Danger, state.focus_id == item.id,
-                        state.hover_id == item.id, can_remove, fonts.small);
-            add_clipped_hotspot(hotspots, item.id, 0, rc, view, kScrollLayout, can_remove);
-        } else if (item.id == kUiSaveLayout) {
-            draw_button(canvas, rc, L"Save and reload", ButtonStyle::Primary,
-                        state.focus_id == item.id, state.hover_id == item.id, true, fonts.small);
-            add_clipped_hotspot(hotspots, item.id, 0, rc, view, kScrollLayout);
-        } else if (item.id == kUiPresetSave) {
-            draw_button(canvas, rc, L"Save as preset", ButtonStyle::Secondary,
-                        state.focus_id == item.id, state.hover_id == item.id, true, fonts.small);
-            add_clipped_hotspot(hotspots, item.id, 0, rc, view, kScrollLayout);
-        } else if (item.id == kUiPresetDelete) {
-            const bool can_delete = !state.loaded_preset.empty();
-            draw_button(canvas, rc, L"Delete preset", ButtonStyle::Danger,
-                        state.focus_id == item.id, state.hover_id == item.id, can_delete,
-                        fonts.small);
-            add_clipped_hotspot(hotspots, item.id, 0, rc, view, kScrollLayout, can_delete);
+}  // namespace detail
+
+namespace {
+
+using namespace detail;
+
+// Logo mark: rounded accent plate with an arc and three screen ticks.
+void paint_logo(Ui& ui, int left, int top, int size_px) {
+    // Three screens on an arc around the wearer, seen from above: the same
+    // picture as the arrangement editor.
+    RECT plate = rect_of(left, top, size_px, size_px);
+    ui.c.fill_round(plate, size_px * 28 / 100, ui.t.accent);
+    const float s = static_cast<float>(size_px);
+    const float cx = static_cast<float>(left) + s * 0.5f;
+    const float cy = static_cast<float>(top) + s * 0.72f;
+    const float r = s * 0.36f;
+    const float thickness = std::max(2.0f, s * 0.1f);
+    const float half = s * 0.13f;
+    const float angles[3] = {-0.95f, 0.0f, 0.95f};
+    for (const float angle : angles) {
+        const float x = cx + std::sin(angle) * r;
+        const float y = cy - std::cos(angle) * r;
+        ui.c.line(x - half * std::cos(angle), y - half * std::sin(angle), x + half * std::cos(angle),
+                  y + half * std::sin(angle), thickness, ui.t.accent_text);
+    }
+    ui.c.fill_circle(static_cast<int>(cx), static_cast<int>(cy), thickness * 0.75f, ui.t.accent_text);
+}
+
+const wchar_t* page_glyph(AppPage page) {
+    switch (page) {
+        case AppPage::Home:
+            return glyph::home;
+        case AppPage::Layout:
+            return glyph::layout;
+        case AppPage::Comfort:
+            return glyph::comfort;
+        case AppPage::Tracking:
+            return glyph::tracking;
+        case AppPage::Diagnostics:
+            return glyph::diagnostics;
+        case AppPage::Settings:
+        case AppPage::Count:
+        default:
+            return glyph::settings;
+    }
+}
+
+void paint_sidebar(Ui& ui, const RECT& side) {
+    const Theme& t = ui.t;
+    ui.c.fill(side, t.sidebar);
+    ui.c.fill(RECT{side.right - 1, side.top, side.right, side.bottom}, t.border);
+    const bool compact = rw(side) < ui.px(150);
+    const int inset = ui.px(space::md);
+
+    // Brand.
+    const int logo = ui.px(34);
+    const int logo_left = compact ? side.left + (rw(side) - logo) / 2 : side.left + ui.px(22);
+    paint_logo(ui, logo_left, side.top + ui.px(24), logo);
+    if (!compact) {
+        const int text_left = logo_left + logo + ui.px(12);
+        ui.c.text(ui.f.heading, t.text, rect_of(text_left, side.top + ui.px(22), rw(side) - text_left, ui.px(20)),
+                  L"RayNeo Spatial");
+        ui.c.text(ui.f.caption, t.text_faint,
+                  rect_of(text_left, side.top + ui.px(42), rw(side) - text_left, ui.px(18)),
+                  L"Workspace controller");
+    }
+
+    // Navigation with a sliding selection highlight.
+    const int item_h = ui.px(size::nav_item);
+    const int item_gap = ui.px(space::xs);
+    const int items_top = side.top + ui.px(92);
+    const int selected = static_cast<int>(ui.s.page);
+    const float pos = ui.track(anim::kNav, 0, static_cast<float>(selected), anim::kTauSlide);
+    const int highlight_top =
+        items_top + static_cast<int>(std::lround(pos * static_cast<float>(item_h + item_gap)));
+    RECT highlight = rect_of(side.left + inset, highlight_top, rw(side) - inset * 2, item_h);
+    ui.c.fill_round(highlight, ui.px(radius::md), t.accent_soft);
+    ui.c.fill_round(rect_of(highlight.left, highlight.top + ui.px(12), ui.px(3), item_h - ui.px(24)),
+                    ui.px(2), t.accent);
+    for (int i = 0; i < kAppPageCount; ++i) {
+        const auto page = static_cast<AppPage>(i);
+        const int id = kUiNavBase + i;
+        RECT item = rect_of(side.left + inset, items_top + i * (item_h + item_gap), rw(side) - inset * 2,
+                            item_h);
+        const WidgetState state = ui.ws(id);
+        const bool active = i == selected;
+        if (!active) {
+            ui.c.fill_round(item, ui.px(radius::md), t.surface_hover,
+                            static_cast<int>(state.hover * 200.0f));
+        }
+        const COLORREF fg = active ? t.text : mix(t.text_dim, t.text, state.hover);
+        if (compact) {
+            draw_icon(ui.c, item, page_glyph(page), ui.f.icon, active ? t.accent : fg);
         } else {
-            draw_button(canvas, rc, L"Revert", ButtonStyle::Ghost, state.focus_id == item.id,
-                        state.hover_id == item.id, true, fonts.small);
-            add_clipped_hotspot(hotspots, item.id, 0, rc, view, kScrollLayout);
+            draw_icon(ui.c, rect_of(item.left + ui.px(12), item.top, ui.px(24), item_h), page_glyph(page),
+                      ui.f.icon, active ? t.accent : fg);
+            ui.c.text(active ? ui.f.body_strong : ui.f.body, fg,
+                      rect_of(item.left + ui.px(48), item.top, rw(item) - ui.px(56), item_h),
+                      app_page_label(page));
         }
+        if (state.focused) {
+            draw_focus_ring(ui.c, item, ui.px(radius::md));
+        }
+        ui.hot(id, i, item);
     }
 
-    RECT summary = rect_of(left, content_y + view.top - offset, width, summary_h);
-    std::wstring summary_text = wide_from_utf8(layout_summary(state.layout));
-    if (state.layout_dirty) {
-        summary_text += L"  |  unsaved changes";
+    // Engine status, always visible: answers "what state am I in" anywhere.
+    const EngineView view = engine_view(ui.s, t);
+    const int card_h = compact ? ui.px(52) : ui.px(68);
+    RECT status = rect_of(side.left + inset, side.bottom - card_h - ui.px(space::lg), rw(side) - inset * 2,
+                          card_h);
+    const WidgetState state = ui.ws(kUiStatusCard);
+    ui.c.fill_round(status, ui.px(radius::md), mix(t.surface_alt, t.surface_hover, state.hover));
+    ui.c.outline_round(status, ui.px(radius::md), 1.0f, t.border);
+    const COLORREF dot = view.busy ? (view.transitional ? t.warning : t.ok) : t.text_faint;
+    const float phase = pulse_phase(ui, view.transitional);
+    if (compact) {
+        draw_status_dot(ui.c, (status.left + status.right) / 2, (status.top + status.bottom) / 2,
+                        ui.px(6), dot, phase);
+    } else {
+        draw_status_dot(ui.c, status.left + ui.px(20), status.top + card_h / 2, ui.px(5), dot, phase);
+        ui.c.text(ui.f.caption, t.text_faint,
+                  rect_of(status.left + ui.px(36), status.top + ui.px(12), rw(status) - ui.px(44), ui.px(18)),
+                  L"Engine");
+        ui.c.text(ui.f.body_strong, t.text,
+                  rect_of(status.left + ui.px(36), status.top + ui.px(30), rw(status) - ui.px(44), ui.px(22)),
+                  view.busy ? view.label : std::wstring(L"Stopped"),
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
-    canvas.text(fonts.small, state.layout_dirty ? palette::warning : palette::text_faint, summary,
-                ellipsize(summary_text, 120),
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    canvas.pop_clip();
+    if (state.focused) {
+        draw_focus_ring(ui.c, status, ui.px(radius::md));
+    }
+    ui.hot(kUiStatusCard, 0, status);
 }
 
-void paint_editor_3d(Canvas& canvas, const PaintContext& context, const Metrics& metrics,
-                       const RECT& canvas_rect) {
-    const AppState& state = *context.state;
-    const FontSet& fonts = *context.fonts;
-    const UINT dpi = context.dpi;
-    (void)metrics;
-    OrbitView view;
-    view.yaw_deg = state.orbit_yaw_deg;
-    view.pitch_deg = state.orbit_pitch_deg;
-    view.distance_m = state.orbit_distance_m;
-    const OrbitCamera camera = orbit_camera(view);
-    canvas.push_clip(canvas_rect);
-    const COLORREF grid_color = RGB(32, 40, 54);
-    for (int step = -4; step <= 6; ++step) {
-        const OrbitVec3 xa{static_cast<float>(step), -2.0f, -1.0f};
-        const OrbitVec3 xb{static_cast<float>(step), 6.0f, -1.0f};
-        const OrbitVec3 ya{-4.0f, static_cast<float>(step) - 1.0f, -1.0f};
-        const OrbitVec3 yb{6.0f, static_cast<float>(step) - 1.0f, -1.0f};
-        const OrbitPoint pa = orbit_project(view, camera, xa, canvas_rect);
-        const OrbitPoint pb = orbit_project(view, camera, xb, canvas_rect);
-        const OrbitPoint pc = orbit_project(view, camera, ya, canvas_rect);
-        const OrbitPoint pd = orbit_project(view, camera, yb, canvas_rect);
-        HPEN pen = CreatePen(PS_SOLID, 1, grid_color);
-        const HGDIOBJ saved = SelectObject(canvas.dc(), pen);
-        if (!pa.behind && !pb.behind) {
-            MoveToEx(canvas.dc(), pa.pixel.x, pa.pixel.y, nullptr);
-            LineTo(canvas.dc(), pb.pixel.x, pb.pixel.y);
-        }
-        if (!pc.behind && !pd.behind) {
-            MoveToEx(canvas.dc(), pc.pixel.x, pc.pixel.y, nullptr);
-            LineTo(canvas.dc(), pd.pixel.x, pd.pixel.y);
-        }
-        SelectObject(canvas.dc(), saved);
-        DeleteObject(pen);
+int paint_banner(Ui& ui, int left, int top, int width) {
+    if (ui.s.banner.empty()) {
+        return 0;
     }
-    const OrbitPoint head = orbit_project(view, camera, OrbitVec3{0.0f, 0.0f, 0.0f}, canvas_rect);
-    if (!head.behind) {
-        draw_dot(canvas, head.pixel.x, head.pixel.y, scale_px(5, dpi), palette::accent);
-        RECT head_label =
-            rect_of(head.pixel.x - scale_px(40, dpi), head.pixel.y + scale_px(6, dpi),
-                    scale_px(80, dpi), scale_px(14, dpi));
-        canvas.text(fonts.small, palette::text_faint, head_label, L"head",
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
-    struct DepthItem {
-        size_t index;
-        float depth;
-    };
-    std::vector<DepthItem> order;
-    for (size_t i = 0; i < state.layout.screens.size(); ++i) {
-        const OrbitQuad quad = orbit_screen_quad(state.layout.screens[i]);
-        const OrbitPoint centre = orbit_project(view, camera, quad.center, canvas_rect);
-        if (!centre.behind) {
-            order.push_back(DepthItem{i, centre.depth_m});
-        }
-    }
-    std::sort(order.begin(), order.end(),
-              [](const DepthItem& a, const DepthItem& b) { return a.depth > b.depth; });
-    for (const DepthItem& item : order) {
-        const ScreenLayout& screen = state.layout.screens[item.index];
-        const OrbitQuad quad = orbit_screen_quad(screen);
-        POINT points[4];
-        bool visible = true;
-        for (int corner = 0; corner < 4; ++corner) {
-            const OrbitPoint projected = orbit_project(view, camera, quad.corners[corner],
-                                                       canvas_rect);
-            if (projected.behind) {
-                visible = false;
-                break;
-            }
-            points[corner] = projected.pixel;
-        }
-        if (!visible) {
-            continue;
-        }
-        const int red = static_cast<int>(screen.color[0] * 255.0f);
-        const int green = static_cast<int>(screen.color[1] * 255.0f);
-        const int blue = static_cast<int>(screen.color[2] * 255.0f);
-        const COLORREF tint = RGB(red, green, blue);
-        const COLORREF fill =
-            RGB(red / 3, green / 3, blue / 3);
-        const bool selected = item.index == state.selected_screen;
-        HBRUSH brush = CreateSolidBrush(fill);
-        HGDIOBJ saved_brush = SelectObject(canvas.dc(), brush);
-        Polygon(canvas.dc(), points, 4);
-        SelectObject(canvas.dc(), saved_brush);
-        DeleteObject(brush);
-        POINT outline[5] = {points[0], points[1], points[2], points[3], points[0]};
-        HPEN pen = CreatePen(PS_SOLID, selected ? scale_px(3, dpi) : scale_px(2, dpi),
-                             selected ? palette::accent : tint);
-        const HGDIOBJ saved_pen = SelectObject(canvas.dc(), pen);
-        Polyline(canvas.dc(), outline, 5);
-        SelectObject(canvas.dc(), saved_pen);
-        DeleteObject(pen);
-        const OrbitPoint centre = orbit_project(view, camera, quad.center, canvas_rect);
-        wchar_t label[64];
-        const std::wstring id_text = wide_from_utf8(screen.id);
-        std::swprintf(label, std::size(label), L"%s  %.0f deg", id_text.c_str(),
-                      static_cast<double>(screen.yaw_deg));
-        RECT label_rect = rect_of(centre.pixel.x - scale_px(70, dpi),
-                                  centre.pixel.y - scale_px(28, dpi), scale_px(140, dpi),
-                                  scale_px(15, dpi));
-        canvas.text(fonts.small, selected ? palette::text : palette::text_dim, label_rect, label,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
-    canvas.pop_clip();
+    const Theme& t = ui.t;
+    const COLORREF color = severity_colour(t, ui.s.banner_severity);
+    const int pad = ui.px(space::lg);
+    const int icon_w = ui.px(24);
+    const int close_w = ui.px(32);
+    const int text_w = width - pad * 2 - icon_w - close_w - ui.px(space::md) * 2;
+    const int text_h = wrapped_text_height(ui.c.dc(), ui.f.body, text_w, ui.s.banner);
+    const int height = std::max(ui.px(52), text_h + pad * 2);
+    RECT box = rect_of(left, top, width, height);
+    ui.c.fill_round(box, ui.px(radius::lg), mix(t.surface, color, t.dark ? 0.13f : 0.09f));
+    ui.c.outline_round(box, ui.px(radius::lg), 1.0f, mix(t.border, color, 0.45f));
+    draw_icon(ui.c, rect_of(left + pad, top, icon_w, height), severity_glyph(ui.s.banner_severity),
+              ui.f.icon, color);
+    ui.c.text(ui.f.body, t.text,
+              rect_of(left + pad + icon_w + ui.px(space::md), top + (height - text_h) / 2, text_w, text_h),
+              ui.s.banner, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    RECT close = rect_of(box.right - pad / 2 - close_w, top + (height - close_w) / 2, close_w, close_w);
+    draw_icon_button(ui.c, close, glyph::close, ui.f.icon_small, ui.ws(kUiBannerDismiss));
+    ui.hot(kUiBannerDismiss, 0, close);
+    return height;
 }
 
-void paint_editor_panel(Canvas& canvas, const PaintContext& context, const Metrics& metrics,
-                        const RECT& rect, std::vector<Hotspot>& hotspots) {
-    const AppState& state = *context.state;
-    const FontSet& fonts = *context.fonts;
-    const UINT dpi = context.dpi;
-    draw_panel_frame(canvas, rect, fonts, dpi, L"Screen arc editor");
-
-    RECT canvas_rect = rect;
-    canvas_rect.left += metrics.pad;
-    canvas_rect.right -= metrics.pad;
-    canvas_rect.top += metrics.pad + scale_px(22, dpi);
-    const int quick_controls_height = state.editor_fullscreen
-                                          ? metrics.slider * 2 + metrics.button + scale_px(16, dpi)
-                                          : 0;
-    canvas_rect.bottom -= scale_px(34, dpi) + quick_controls_height;
-    if (canvas_rect.bottom <= canvas_rect.top + scale_px(40, dpi)) {
+void paint_page_actions(Ui& ui, int right, int top, int height) {
+    if (ui.s.page == AppPage::Layout) {
+        paint_layout_header_actions(ui, right, top, height);
         return;
     }
-    canvas.fill_round(canvas_rect, scale_px(8, dpi), palette::canvas);
-    canvas.outline_round(canvas_rect, scale_px(8, dpi), 1, palette::border);
+    if (ui.s.page == AppPage::Diagnostics || ui.s.page == AppPage::Home) {
+        const int help_w = help_mark_width(ui.dpi);
+        RECT help_rect = rect_of(right - help_w, top + (height - help_w) / 2, help_w, help_w);
+        ui.help(kHelpHeader, 0, HelpTopic::HeaderRefresh, help_rect);
+        const int button_w = ui.px(124);
+        RECT refresh = rect_of(help_rect.left - ui.px(space::sm) - button_w, top, button_w, height);
+        button(ui, kUiRefresh, refresh, L"Refresh", ButtonStyle::Secondary, true, glyph::refresh);
+    }
+}
 
-    if (state.editor_3d) {
-        paint_editor_3d(canvas, context, metrics, canvas_rect);
-    } else {
-    const EditorGeometry geometry = editor_geometry(state.layout, canvas_rect, dpi);
-    canvas.push_clip(canvas_rect);
-
-    // Distance rings every metre, drawn as arcs in front of the head.
-    const COLORREF ring_color = RGB(32, 40, 54);
-    for (int metres = 1; metres <= 4; ++metres) {
-        const int radius = static_cast<int>(metres * geometry.scale);
-        if (radius > (canvas_rect.bottom - geometry.head.y) + scale_px(30, dpi)) {
+void paint_content(Ui& ui, const RECT& content) {
+    AppState& s = ui.s;
+    if (s.page == AppPage::Layout && s.editor_fullscreen) {
+        RECT area = content;
+        InflateRect(&area, -ui.px(space::xl), -ui.px(space::xl));
+        hide_scroll(ui, kScrollPage);
+        paint_layout_page(ui, area);
+        return;
+    }
+    const bool narrow = rw(content) < ui.px(760);
+    const int pad = narrow ? ui.px(space::xl) : ui.px(40);
+    int left = content.left + pad;
+    int right = content.right - pad;
+    if (s.page != AppPage::Layout) {
+        const int max_w = ui.px(1180);
+        if (right - left > max_w) {
+            left += (right - left - max_w) / 2;
+            right = left + max_w;
+        }
+    }
+    // Page entrance: the new page eases up a few pixels while the old frame
+    // fades out over it (see AppWindow::on_paint).
+    const float progress = s.page_transition.progress(s.now_s);
+    if (progress < 1.0f) {
+        s.anim.request_frames();
+    }
+    const int dy = s.anim.reduce_motion()
+                       ? 0
+                       : static_cast<int>(std::lround((1.0f - anim::ease_out_cubic(progress)) *
+                                                      static_cast<float>(ui.px(14))));
+    int y = content.top + ui.px(30) + dy;
+    const int actions_h = ui.px(size::control);
+    const int actions_w = std::min(ui.px(420), (right - left) / 2);
+    ui.c.text(ui.f.display, ui.t.text, rect_of(left, y, right - left - actions_w, ui.px(38)),
+              app_page_title(s.page), DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    paint_page_actions(ui, right, y, actions_h);
+    y += ui.px(40);
+    ui.c.text(ui.f.body, ui.t.text_dim, rect_of(left, y, right - left, ui.px(22)),
+              app_page_subtitle(s.page), DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    y += ui.px(22) + ui.px(space::xl);
+    const int banner_h = paint_banner(ui, left, y, right - left);
+    if (banner_h > 0) {
+        y += banner_h + ui.px(space::lg);
+    }
+    RECT body{left, y, right, content.bottom};
+    switch (s.page) {
+        case AppPage::Home:
+            paint_home(ui, body);
             break;
-        }
-        POINT previous{0, 0};
-        for (int step = -90; step <= 90; step += 6) {
-            const float angle = static_cast<float>(step) * kPi / 180.0f;
-            POINT point{geometry.head.x + static_cast<int>(std::sin(angle) * radius),
-                        geometry.head.y - static_cast<int>(std::cos(angle) * radius)};
-            if (step > -90) {
-                HPEN pen = CreatePen(PS_SOLID, 1, ring_color);
-                const HGDIOBJ saved = SelectObject(canvas.dc(), pen);
-                MoveToEx(canvas.dc(), previous.x, previous.y, nullptr);
-                LineTo(canvas.dc(), point.x, point.y);
-                SelectObject(canvas.dc(), saved);
-                DeleteObject(pen);
-            }
-            previous = point;
-        }
+        case AppPage::Layout:
+            hide_scroll(ui, kScrollPage);
+            body.bottom -= ui.px(space::xl);
+            paint_layout_page(ui, body);
+            break;
+        case AppPage::Comfort:
+            paint_comfort(ui, body);
+            break;
+        case AppPage::Tracking:
+            paint_tracking(ui, body);
+            break;
+        case AppPage::Diagnostics:
+            paint_diagnostics(ui, body);
+            break;
+        case AppPage::Settings:
+        case AppPage::Count:
+        default:
+            paint_settings(ui, body);
+            break;
     }
-    // Placed label boxes; screen labels nudge down until they clear these.
-    std::vector<RECT> label_blockers;
-    // Yaw ticks.
-    for (int angle_deg = -90; angle_deg <= 90; angle_deg += 15) {
-        const float angle = static_cast<float>(angle_deg) * kPi / 180.0f;
-        const int radius = scale_px(10, dpi);
-        const int x = geometry.head.x + static_cast<int>(std::sin(angle) * radius);
-        const int y = geometry.head.y - static_cast<int>(std::cos(angle) * radius);
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(44, 54, 72));
-        const HGDIOBJ saved = SelectObject(canvas.dc(), pen);
-        MoveToEx(canvas.dc(), geometry.head.x, geometry.head.y, nullptr);
-        LineTo(canvas.dc(), x, y);
-        SelectObject(canvas.dc(), saved);
-        DeleteObject(pen);
-        if (angle_deg == -90 || angle_deg == 0 || angle_deg == 90) {
-            // Only the cardinal ticks are labelled, at a radius where the
-            // three boxes cannot touch each other.
-            const int label_radius = scale_px(52, dpi);
-            wchar_t label[8];
-            std::swprintf(label, std::size(label), L"%d", angle_deg);
-            RECT text_rect{geometry.head.x +
-                               static_cast<int>(std::sin(angle) * label_radius) -
-                               scale_px(18, dpi),
-                           geometry.head.y -
-                               static_cast<int>(std::cos(angle) * label_radius) -
-                               scale_px(18, dpi),
-                           0, 0};
-            text_rect.right = text_rect.left + scale_px(36, dpi);
-            text_rect.bottom = text_rect.top + scale_px(14, dpi);
-            canvas.text(fonts.small, palette::text_faint, text_rect, label,
-                        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            label_blockers.push_back(text_rect);
-        }
-    }
-
-    // The wearer.
-    draw_dot(canvas, geometry.head.x, geometry.head.y, scale_px(5, dpi), palette::accent);
-    RECT head_label = rect_of(geometry.head.x - scale_px(40, dpi), geometry.head.y + scale_px(6, dpi),
-                              scale_px(80, dpi), scale_px(14, dpi));
-    canvas.text(fonts.small, palette::text_faint, head_label, L"head", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    label_blockers.push_back(head_label);
-
-    for (size_t index = 0; index < state.layout.screens.size(); ++index) {
-        const ScreenLayout& screen = state.layout.screens[index];
-        const float yaw = screen.yaw_deg * kPi / 180.0f;
-        const POINT center = editor_screen_center(screen, geometry);
-        const float half_width = std::max(static_cast<float>(scale_px(9, dpi)),
-                                          screen.width_m * 0.5f * geometry.scale);
-        const float dx = std::cos(yaw) * half_width;
-        const float dy = std::sin(yaw) * half_width;
-        const COLORREF tint = RGB(static_cast<int>(screen.color[0] * 255.0f),
-                                  static_cast<int>(screen.color[1] * 255.0f),
-                                  static_cast<int>(screen.color[2] * 255.0f));
-        const bool selected = index == state.selected_screen;
-        const int thickness = selected ? scale_px(6, dpi) : scale_px(4, dpi);
-        HPEN pen = CreatePen(PS_SOLID, thickness, selected ? palette::accent : tint);
-        const HGDIOBJ saved = SelectObject(canvas.dc(), pen);
-        MoveToEx(canvas.dc(), center.x - static_cast<int>(dx), center.y - static_cast<int>(dy),
-                 nullptr);
-        LineTo(canvas.dc(), center.x + static_cast<int>(dx), center.y + static_cast<int>(dy));
-        SelectObject(canvas.dc(), saved);
-        DeleteObject(pen);
-        draw_dot(canvas, center.x - static_cast<int>(dx), center.y - static_cast<int>(dy),
-                 thickness / 2 + 1, selected ? palette::accent : tint);
-        draw_dot(canvas, center.x + static_cast<int>(dx), center.y + static_cast<int>(dy),
-                 thickness / 2 + 1, selected ? palette::accent : tint);
-
-        wchar_t label[64];
-        const std::wstring id_text = wide_from_utf8(screen.id);
-        std::swprintf(label, std::size(label), L"%s  %.0f deg", id_text.c_str(),
-                      static_cast<double>(screen.yaw_deg));
-        RECT label_rect = rect_of(center.x - scale_px(70, dpi), center.y - scale_px(28, dpi),
-                                  scale_px(140, dpi), scale_px(15, dpi));
-        // Greedy de-collision: nudge the label down until it clears every
-        // placed label (bounded; the canvas clip contains the rest).
-        const int label_step = scale_px(15, dpi);
-        for (int attempt = 0; attempt < 8; ++attempt) {
-            bool overlaps = false;
-            for (const RECT& placed : label_blockers) {
-                RECT intersection{};
-                RECT inflated = label_rect;
-                InflateRect(&inflated, scale_px(2, dpi), scale_px(1, dpi));
-                if (IntersectRect(&intersection, &inflated, &placed) != 0) {
-                    overlaps = true;
-                    break;
-                }
-            }
-            if (!overlaps) {
-                break;
-            }
-            label_rect.top += label_step;
-            label_rect.bottom += label_step;
-        }
-        label_blockers.push_back(label_rect);
-        canvas.text(fonts.small, selected ? palette::text : palette::text_dim, label_rect, label,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
-    canvas.pop_clip();
-    }
-
-    RECT hint = rect_of(rect.left + metrics.pad, canvas_rect.bottom + scale_px(4, dpi),
-                        rect.right - rect.left - metrics.pad * 2, scale_px(26, dpi));
-    std::wstring hint_text;
-    if (state.editor_fullscreen && !state.layout.screens.empty() &&
-        state.selected_screen < state.layout.screens.size()) {
-        hint_text = L"Selected: " + wide_from_utf8(state.layout.screens[state.selected_screen].id) +
-                    L". Click any screen to select; drag it to move; drag empty space to orbit. "
-                    L"Scroll to zoom the view.";
-    } else if (state.editor_3d) {
-        hint_text = L"Click any screen to select; drag to move; drag empty space to orbit. "
-                    L"Scroll to zoom the view.";
-    } else {
-        hint_text = L"Drag a screen left/right for yaw, up/down for pitch. "
-                    L"Tab to the arc and use the arrow keys for keyboard control.";
-    }
-    canvas.text(fonts.small, palette::text_faint, hint, ellipsize(hint_text, 150),
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-    if (state.editor_fullscreen && !state.layout.screens.empty() &&
-        state.selected_screen < state.layout.screens.size()) {
-        const ScreenLayout& screen = state.layout.screens[state.selected_screen];
-        const LayoutField quick_fields[] = {
-            LayoutField::Yaw, LayoutField::Pitch, LayoutField::Distance,
-            LayoutField::Roll, LayoutField::Width, LayoutField::Height,
-        };
-        const int quick_left = rect.left + metrics.pad;
-        const int quick_width = rect.right - rect.left - metrics.pad * 2;
-        const int column_width = (quick_width - metrics.gap * 2) / 3;
-        const int quick_top = hint.bottom + scale_px(3, dpi);
-        for (int index = 0; index < 6; ++index) {
-            const LayoutField field = quick_fields[index];
-            const float value = layout_field_value(state.layout, screen, field);
-            const float fraction = layout_slider_fraction(field, value);
-            RECT slider = rect_of(quick_left + (index % 3) * (column_width + metrics.gap),
-                                  quick_top + (index / 3) * metrics.slider, column_width,
-                                  metrics.slider);
-            const std::wstring label = field == LayoutField::Distance
-                                           ? L"Depth from eyes"
-                                           : layout_field_label(field);
-            draw_slider(canvas, slider, label,
-                        wide_from_utf8(format_layout_field_value(field, value)), fraction,
-                        state.focus_id == ui_field_id(field),
-                        state.hover_id == ui_field_id(field), true, fonts.small, fonts.body);
-            add_hotspot(hotspots, ui_field_id(field), static_cast<int>(field), slider);
-        }
-        const int actions_y = quick_top + metrics.slider * 2 + scale_px(5, dpi);
-        RECT save = rect_of(quick_left, actions_y, scale_px(148, dpi), metrics.button);
-        draw_button(canvas, save, L"Save layout", ButtonStyle::Primary,
-                    state.focus_id == kUiSaveLayout, state.hover_id == kUiSaveLayout,
-                    state.layout_dirty, fonts.small);
-        add_hotspot(hotspots, kUiSaveLayout, 0, save, state.layout_dirty);
-        RECT revert = rect_of(save.right + metrics.gap, actions_y, scale_px(148, dpi),
-                              metrics.button);
-        draw_button(canvas, revert, L"Revert changes", ButtonStyle::Ghost,
-                    state.focus_id == kUiRevertLayout, state.hover_id == kUiRevertLayout,
-                    state.layout_dirty, fonts.small);
-        add_hotspot(hotspots, kUiRevertLayout, 0, revert, state.layout_dirty);
-        RECT note = rect_of(revert.right + metrics.gap, actions_y,
-                            std::max(0L, rect.right - metrics.pad - revert.right - metrics.gap),
-                            metrics.button);
-        canvas.text(fonts.small, state.layout_dirty ? palette::warning : palette::text_faint,
-                    note, state.layout_dirty ? L"Unsaved changes" : L"Layout saved",
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    }
-
-    const int title_y = rect.top + metrics.pad + scale_px(1, dpi);
-    const int title_chip_h = scale_px(20, dpi);
-    const int title_help_w = help_mark_width(dpi);
-    RECT help_canvas =
-        rect_of(rect.right - metrics.pad - title_help_w, title_y, title_help_w, title_chip_h);
-    draw_help_mark(canvas, help_canvas, state.focus_id == ui_help_id(5, 0), state.hover_id == ui_help_id(5, 0), fonts.small);
-    add_hotspot(hotspots, ui_help_id(5, 0), static_cast<int>(HelpTopic::EditorCanvas), help_canvas);
-    const int fs_w = state.editor_fullscreen ? scale_px(112, dpi) : scale_px(92, dpi);
-    RECT fs_chip = rect_of(help_canvas.left - metrics.gap - fs_w, title_y, fs_w, title_chip_h);
-    draw_chip(canvas, fs_chip, state.editor_fullscreen ? L"Exit fullscreen" : L"Fullscreen",
-              palette::accent, state.focus_id == kUiEditorFullscreen,
-              state.hover_id == kUiEditorFullscreen, fonts.small);
-    add_hotspot(hotspots, kUiEditorFullscreen, 0, fs_chip);
-    RECT help_fs = rect_of(fs_chip.left - metrics.gap - title_help_w, title_y, title_help_w,
-                           title_chip_h);
-    draw_help_mark(canvas, help_fs, state.focus_id == ui_help_id(5, 2), state.hover_id == ui_help_id(5, 2), fonts.small);
-    add_hotspot(hotspots, ui_help_id(5, 2), static_cast<int>(HelpTopic::EditorFullscreen),
-                help_fs);
-    const int dim_w = scale_px(44, dpi);
-    RECT dim_chip = rect_of(help_fs.left - metrics.gap - dim_w, title_y, dim_w, title_chip_h);
-    draw_chip(canvas, dim_chip, state.editor_3d ? L"3D" : L"2D",
-              state.editor_3d ? palette::accent : palette::text_faint,
-              state.focus_id == kUiEditorDimToggle, state.hover_id == kUiEditorDimToggle,
-              fonts.small);
-    add_hotspot(hotspots, kUiEditorDimToggle, 0, dim_chip);
-    RECT help_dim = rect_of(dim_chip.left - metrics.gap - title_help_w, title_y, title_help_w,
-                            title_chip_h);
-    draw_help_mark(canvas, help_dim, state.focus_id == ui_help_id(5, 1), state.hover_id == ui_help_id(5, 1), fonts.small);
-    add_hotspot(hotspots, ui_help_id(5, 1), static_cast<int>(HelpTopic::EditorDimToggle),
-                help_dim);
-
-    Hotspot editor;
-    editor.id = kUiEditorCanvas;
-    editor.arg = 0;
-    editor.rect = canvas_rect;
-    editor.enabled = true;
-    hotspots.push_back(editor);
 }
 
-void paint_fields_panel(Canvas& canvas, const PaintContext& context, const Metrics& metrics,
-                        const RECT& rect, std::vector<Hotspot>& hotspots) {
-    const AppState& state = *context.state;
-    const FontSet& fonts = *context.fonts;
-    const UINT dpi = context.dpi;
-    draw_panel_frame(canvas, rect, fonts, dpi, L"Selected screen, view and capture");
-
-    const bool has_screen = !state.layout.screens.empty() &&
-                            state.selected_screen < state.layout.screens.size();
-    if (!has_screen) {
-        RECT empty = rect_of(rect.left + metrics.pad, rect.top + metrics.pad + scale_px(22, dpi),
-                             rect.right - rect.left - metrics.pad * 2, scale_px(24, dpi));
-        canvas.text(fonts.body, palette::warning, empty,
-                    L"No screens in the layout; add a screen to edit it.",
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        hide_portal(context, kScrollFields);
+void paint_toast(Ui& ui, const RECT& client) {
+    const AppState& s = ui.s;
+    const bool visible = !s.toast.empty() && s.now_s < s.toast_expiry_s;
+    const float v = ui.track(anim::kMisc, 1, visible ? 1.0f : 0.0f, 0.09f);
+    if (v <= 0.01f || s.toast.empty()) {
         return;
     }
-    const ScreenLayout& screen = state.layout.screens[state.selected_screen];
-
-    const LayoutField fields[] = {
-        LayoutField::Yaw,       LayoutField::Pitch,     LayoutField::Roll,
-        LayoutField::Distance,  LayoutField::Width,     LayoutField::Height,
-        LayoutField::Fov,       LayoutField::ActiveFps, LayoutField::MidFps,
-        LayoutField::IdleFps,   LayoutField::EnterDeg,  LayoutField::LeaveDeg,
-    };
-    const int columns = 2;
-    const int rows = static_cast<int>(std::size(fields)) / columns;
-    const int gutter = scale_px(12, dpi);
-    const int left = rect.left + metrics.pad;
-    const int width = rect.right - rect.left - metrics.pad * 2 - gutter;
-    RECT view{left, rect.top + metrics.pad + scale_px(22, dpi), left + width,
-              rect.bottom - scale_px(6, dpi)};
-    const int column_width = (width - metrics.gap) / columns;
-    const int content_h = rows * metrics.slider;
-    const int offset =
-        paint_scrollbar(canvas, context, kScrollFields, rect, view, content_h, false, hotspots);
-    canvas.push_clip(view);
-    int y = view.top - offset;
-
-    for (int row = 0; row < rows; ++row) {
-        for (int column = 0; column < columns; ++column) {
-            const LayoutField field = fields[row * columns + column];
-            const float value = layout_field_value(state.layout, screen, field);
-            const float fraction = layout_slider_fraction(field, value);
-            const int help_w = scale_px(26, dpi);
-            RECT slider = rect_of(left + column * (column_width + metrics.gap), y,
-                                  column_width - help_w - metrics.gap, metrics.slider);
-            draw_slider(canvas, slider, layout_field_label(field),
-                        wide_from_utf8(format_layout_field_value(field, value)), fraction,
-                        state.focus_id == ui_field_id(field), state.hover_id == ui_field_id(field),
-                        true, fonts.small, fonts.body);
-            add_clipped_hotspot(hotspots, ui_field_id(field), static_cast<int>(field), slider,
-                                view, kScrollFields);
-            RECT help_rect = rect_of(slider.right + metrics.gap, y, help_w, metrics.slider);
-            const int help_id = ui_help_id(4, static_cast<int>(field));
-            draw_help_mark(canvas, help_rect, state.focus_id == help_id, state.hover_id == help_id, fonts.small);
-            add_clipped_hotspot(hotspots, help_id, static_cast<int>(help_for_field(field)),
-                                help_rect, view, kScrollFields);
-        }
-        y += metrics.slider;
-    }
-    canvas.pop_clip();
+    const Theme& t = ui.t;
+    const int text_w = std::min(text_width(ui.c.dc(), ui.f.body, s.toast), rw(client) - ui.px(160));
+    const int width = text_w + ui.px(72);
+    const int height = ui.px(46);
+    const int side = sidebar_width(rw(client), ui.dpi);
+    const int center = side + (rw(client) - side) / 2;
+    const int bottom = client.bottom - ui.px(space::xl) +
+                       static_cast<int>(std::lround((1.0f - v) * static_cast<float>(ui.px(16))));
+    RECT pill = rect_of(center - width / 2, bottom - height, width, height);
+    const COLORREF bg = t.dark ? rgb(48, 54, 67) : rgb(30, 35, 46);
+    const COLORREF fg = rgb(240, 243, 248);
+    ui.c.shadow(pill, height / 2, ui.px(4));
+    ui.c.fill_round(pill, height / 2, bg, static_cast<int>(v * 255.0f));
+    draw_icon(ui.c, rect_of(pill.left + ui.px(16), pill.top, ui.px(22), height), glyph::check,
+              ui.f.icon_small, mix(bg, t.ok, v));
+    ui.c.text(ui.f.body, mix(bg, fg, v), rect_of(pill.left + ui.px(46), pill.top, text_w + ui.px(8), height),
+              s.toast, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
-void paint_footer(Canvas& canvas, const PaintContext& context, const Metrics& metrics) {
-    const AppState& state = *context.state;
-    const FontSet& fonts = *context.fonts;
-    const UINT dpi = context.dpi;
-    RECT footer{context.client.left + metrics.margin, context.client.bottom - metrics.footer,
-                context.client.right - metrics.margin, context.client.bottom};
-    canvas.fill(footer, palette::background);
-    RECT line{footer.left, footer.top, footer.right, footer.top + 1};
-    canvas.separator(line, palette::border);
-
-    std::wstring text = L"Tab: move focus  |  arrows: adjust  |  wheel: scroll  |  "
-                        L"Space: activate  |  Ctrl+Shift+R: recenter  |  Ctrl+Alt+Y/P/Q: hotkeys  |  "
-                        L"Ctrl+Shift+\\: exit workspace";
-    COLORREF color = palette::text_faint;
-    if (!state.toast.empty() && state.now_s < state.toast_expiry_s) {
-        text = state.toast;
-        color = palette::accent;
+void paint_help_bubble(Ui& ui, const RECT& client) {
+    const AppState& s = ui.s;
+    int id = s.hover_id;
+    const int help_end = kUiHelpBase + 7 * 64;
+    if (id < kUiHelpBase || id >= help_end) {
+        id = s.focus_visible ? s.focus_id : kUiNone;
     }
-    RECT text_rect = footer;
-    text_rect.top += scale_px(2, dpi);
-    canvas.text(fonts.small, color, text_rect, ellipsize(text, 170),
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    RECT hint_rect = footer;
-    hint_rect.top += scale_px(2, dpi);
-    canvas.text(fonts.small, palette::text_faint, hint_rect,
-                state.engine.busy() ? L"engine running" : L"engine stopped",
-                DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-}
-
-}  // namespace
-
-EditorGeometry editor_geometry(const Layout& layout, const RECT& rect, UINT dpi) {
-    EditorGeometry geometry;
-    geometry.head.x = (rect.left + rect.right) / 2;
-    geometry.head.y = rect.bottom - scale_px(30, dpi);
-    float max_depth = 0.5f;
-    float max_lateral = 0.5f;
-    for (const ScreenLayout& screen : layout.screens) {
-        const float yaw = screen.yaw_deg * kPi / 180.0f;
-        const float pitch = screen.pitch_deg * kPi / 180.0f;
-        const float x = screen.distance_m * std::sin(yaw) * std::cos(pitch);
-        const float z = screen.distance_m * std::cos(yaw) * std::cos(pitch);
-        max_depth = std::max(max_depth, z + screen.height_m * 0.5f);
-        max_lateral = std::max(max_lateral, std::fabs(x) + screen.width_m * 0.5f);
-    }
-    const float usable_width = static_cast<float>(rect.right - rect.left) * 0.5f -
-                               static_cast<float>(scale_px(14, dpi));
-    const float usable_height = static_cast<float>(geometry.head.y - rect.top) -
-                                static_cast<float>(scale_px(8, dpi));
-    const float scale_x = usable_width / max_lateral;
-    const float scale_y = usable_height / max_depth;
-    geometry.scale = std::max(6.0f, std::min(scale_x, scale_y));
-    return geometry;
-}
-
-POINT editor_screen_center(const ScreenLayout& screen, const EditorGeometry& geometry) {
-    const float yaw = screen.yaw_deg * kPi / 180.0f;
-    const float pitch = screen.pitch_deg * kPi / 180.0f;
-    const float x = screen.distance_m * std::sin(yaw) * std::cos(pitch);
-    const float z = screen.distance_m * std::cos(yaw) * std::cos(pitch);
-    POINT point{};
-    point.x = geometry.head.x + static_cast<int>(x * geometry.scale);
-    point.y = geometry.head.y - static_cast<int>(z * geometry.scale);
-    return point;
-}
-
-int editor_screen_hit_test(const Layout& layout, const EditorGeometry& geometry, POINT point,
-                           int threshold_px) {
-    int best = -1;
-    double best_distance = static_cast<double>(threshold_px) * threshold_px;
-    for (size_t index = 0; index < layout.screens.size(); ++index) {
-        const ScreenLayout& screen = layout.screens[index];
-        const POINT center = editor_screen_center(screen, geometry);
-        const float yaw = screen.yaw_deg * kPi / 180.0f;
-        const float half_width =
-            std::max(static_cast<float>(threshold_px), screen.width_m * 0.5f * geometry.scale);
-        const double dx = std::cos(yaw) * half_width;
-        const double dy = std::sin(yaw) * half_width;
-        const double px = static_cast<double>(point.x - center.x);
-        const double py = static_cast<double>(point.y - center.y);
-        const double length_squared = dx * dx + dy * dy;
-        double t = length_squared > 0.0 ? (px * dx + py * dy) / length_squared : 0.0;
-        t = std::clamp(t, -1.0, 1.0);
-        const double cx = px - dx * t;
-        const double cy = py - dy * t;
-        const double distance = cx * cx + cy * cy;
-        if (distance <= best_distance) {
-            best_distance = distance;
-            best = static_cast<int>(index);
-        }
-    }
-    return best;
-}
-
-float editor_yaw_from_point(const EditorGeometry& geometry, POINT point) {
-    const double dx = static_cast<double>(point.x - geometry.head.x);
-    const double dz = static_cast<double>(geometry.head.y - point.y);
-    if (dx == 0.0 && dz == 0.0) {
-        return 0.0f;
-    }
-    const double yaw = std::atan2(dx, dz) * 180.0 / static_cast<double>(kPi);
-    return static_cast<float>(yaw);
-}
-
-void paint_help_bubble(Canvas& canvas, const PaintContext& context, const Metrics& metrics,
-                         const std::vector<Hotspot>& hotspots) {
-    const AppState& state = *context.state;
-    const FontSet& fonts = *context.fonts;
-    const UINT dpi = context.dpi;
-    int id = state.hover_id;
-    if (id < kUiHelpBase || id >= kUiHelpBase + 7 * 64) {
-        id = state.focus_id;
-    }
-    if (id < kUiHelpBase || id >= kUiHelpBase + 7 * 64) {
+    if (id < kUiHelpBase || id >= help_end) {
         return;
     }
-    int topic = -1;
-    RECT anchor{};
-    bool found = false;
-    for (const Hotspot& spot : hotspots) {
+    const Hotspot* anchor = nullptr;
+    for (const Hotspot& spot : ui.hs) {
         if (spot.id == id) {
-            topic = spot.arg;
-            anchor = spot.rect;
-            found = true;
+            anchor = &spot;
             break;
         }
     }
-    if (!found || topic < 0 || topic >= static_cast<int>(HelpTopic::Count)) {
+    if (anchor == nullptr || anchor->arg < 0 || anchor->arg >= static_cast<int>(HelpTopic::Count)) {
         return;
     }
-    const wchar_t* text = help_text(static_cast<HelpTopic>(topic));
+    const wchar_t* text = help_text(static_cast<HelpTopic>(anchor->arg));
     if (text == nullptr || *text == L'\0') {
         return;
     }
-    const int margin = metrics.margin;
-    const int max_width =
-        std::min(scale_px(380, dpi), static_cast<int>(context.client.right - context.client.left) -
-                                            margin * 2);
-    if (max_width < scale_px(160, dpi)) {
+    const int margin = ui.px(space::lg);
+    const int max_w = std::min(ui.px(360), rw(client) - margin * 2);
+    if (max_w < ui.px(160)) {
         return;
     }
-    const int pad = scale_px(8, dpi);
-    const int height =
-        wrapped_text_height(canvas.dc(), fonts.small, max_width - pad * 2, text) + pad * 2;
-    int x = anchor.left;
-    int y = anchor.bottom + scale_px(4, dpi);
-    if (x + max_width > context.client.right - margin) {
-        x = context.client.right - margin - max_width;
+    const int pad = ui.px(space::md);
+    const int height = wrapped_text_height(ui.c.dc(), ui.f.small, max_w - pad * 2, text) + pad * 2;
+    int x = anchor->rect.left - max_w / 2 + rw(anchor->rect) / 2;
+    int y = anchor->rect.bottom + ui.px(space::sm);
+    x = std::clamp(x, static_cast<int>(client.left) + margin, static_cast<int>(client.right) - margin - max_w);
+    if (y + height > client.bottom - margin) {
+        y = anchor->rect.top - height - ui.px(space::sm);
     }
-    if (x < context.client.left + margin) {
-        x = context.client.left + margin;
-    }
-    if (y + height > context.client.bottom - metrics.footer) {
-        y = anchor.top - height - scale_px(4, dpi);
-    }
-    const RECT box{x, y, x + max_width, y + height};
-    canvas.fill_round(box, scale_px(6, dpi), palette::panel_alt);
-    canvas.outline_round(box, scale_px(6, dpi), 1, palette::border);
-    const RECT text_rect{box.left + pad, box.top + pad, box.right - pad, box.bottom - pad};
-    canvas.text(fonts.small, palette::text, text_rect, text, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    const RECT box{x, y, x + max_w, y + height};
+    ui.c.shadow(box, ui.px(radius::md), ui.px(5));
+    ui.c.fill_round(box, ui.px(radius::md), ui.t.dark ? rgb(44, 50, 62) : ui.t.surface);
+    ui.c.outline_round(box, ui.px(radius::md), 1.0f, ui.t.border_strong);
+    ui.c.text(ui.f.small, ui.t.text, RECT{box.left + pad, box.top + pad, box.right - pad, box.bottom - pad},
+              text, DT_LEFT | DT_TOP | DT_WORDBREAK);
 }
+
+}  // namespace
 
 void paint_window(Canvas& canvas, const PaintContext& context, std::vector<Hotspot>& hotspots) {
     hotspots.clear();
     if (context.state == nullptr || context.fonts == nullptr) {
         return;
     }
-    const Metrics metrics = metrics_for(context.dpi, canvas.width());
+    AppState& state = *context.state;
+    state.anim.begin_frame();
+    state.repaint_requested = false;
+    const Theme& theme = canvas.theme();
+    canvas.fill(context.client, theme.window);
 
-    canvas.fill(context.client, palette::background);
-    paint_header(canvas, context, metrics, hotspots);
+    // The setup guide is modal: the shell still paints underneath, but its
+    // hotspots go to a sink so only the guide is interactive.
+    std::vector<Hotspot> shell_sink;
+    const bool modal = state.onboarding.active;
+    Ui shell{canvas, state, *context.fonts, theme, context.dpi, modal ? shell_sink : hotspots};
+    const int side_w = sidebar_width(rw(context.client), context.dpi);
+    RECT side{context.client.left, context.client.top, context.client.left + side_w,
+              context.client.bottom};
+    paint_sidebar(shell, side);
+    RECT content{side.right, context.client.top, context.client.right, context.client.bottom};
+    paint_content(shell, content);
 
-    int y = context.client.top + metrics.header + scale_px(10, context.dpi);
-    paint_banner(canvas, context, metrics, y);
-
-    const int content_top = y;
-    const int content_bottom =
-        context.client.bottom - metrics.footer - scale_px(8, context.dpi);
-    const int left = context.client.left + metrics.margin;
-    const int right = context.client.right - metrics.margin;
-    if (context.state->editor_fullscreen) {
-        RECT editor_rect = rect_of(left, content_top, right - left, content_bottom - content_top);
-        paint_editor_panel(canvas, context, metrics, editor_rect, hotspots);
-        hide_portal(context, kScrollStatus);
-        hide_portal(context, kScrollEngine);
-        hide_portal(context, kScrollDiagnostics);
-        hide_portal(context, kScrollLayout);
-        hide_portal(context, kScrollFields);
-        paint_footer(canvas, context, metrics);
-        paint_help_bubble(canvas, context, metrics, hotspots);
-        return;
-    }
-    const int content_w = right - left;
-    int left_width = metrics.left_width;
-    if (context.state->config.splits.column >= 0.0f) {
-        left_width = std::clamp(
-            static_cast<int>(std::lround(context.state->config.splits.column * content_w)),
-            scale_px(300, context.dpi), std::max(scale_px(300, context.dpi), content_w - scale_px(360, context.dpi)));
-    }
-    const int right_left = left + left_width + metrics.gap;
-    const int right_width = right - right_left;
-    const int available_height = content_bottom - content_top;
-    const int min_panel = scale_px(60, context.dpi);
-
-    int desired_left[3] = {scale_px(348, context.dpi), scale_px(264, context.dpi),
-                             scale_px(248, context.dpi)};
-    apply_split_fractions(desired_left, context.state->config.splits.left, available_height,
-                          metrics.gap);
-    const int minimum_left[3] = {scale_px(150, context.dpi), scale_px(170, context.dpi),
-                                 scale_px(110, context.dpi)};
-    int left_h[3] = {0, 0, 0};
-    distribute_heights(available_height, metrics.gap, desired_left, minimum_left, 2, left_h);
-    RECT status_rect = rect_of(left, content_top, left_width, left_h[0]);
-    RECT engine_rect = rect_of(left, status_rect.bottom + metrics.gap, left_width, left_h[1]);
-    RECT diagnostics_rect =
-        rect_of(left, engine_rect.bottom + metrics.gap, left_width, left_h[2]);
-    if (left_h[0] >= min_panel) {
-        paint_status_panel(canvas, context, metrics, status_rect, hotspots);
+    Ui top{canvas, state, *context.fonts, theme, context.dpi, hotspots};
+    if (modal) {
+        paint_wizard(top, context.client);
     } else {
-        hide_portal(context, kScrollStatus);
+        hide_scroll(top, kScrollWizard);
     }
-    if (left_h[1] >= min_panel) {
-        paint_engine_panel(canvas, context, metrics, engine_rect, hotspots);
-    } else {
-        hide_portal(context, kScrollEngine);
-    }
-    if (left_h[2] >= min_panel) {
-        paint_diagnostics_panel(canvas, context, metrics, diagnostics_rect, hotspots);
-    } else {
-        hide_portal(context, kScrollDiagnostics);
-    }
-
-    int desired_right[3] = {scale_px(184, context.dpi), scale_px(328, context.dpi),
-                              scale_px(320, context.dpi)};
-    apply_split_fractions(desired_right, context.state->config.splits.right, available_height,
-                          metrics.gap);
-    const int minimum_right[3] = {scale_px(120, context.dpi), scale_px(100, context.dpi),
-                                  scale_px(140, context.dpi)};
-    int right_h[3] = {0, 0, 0};
-    distribute_heights(available_height, metrics.gap, desired_right, minimum_right, 1, right_h);
-    RECT layout_rect = rect_of(right_left, content_top, right_width, right_h[0]);
-    RECT editor_rect =
-        rect_of(right_left, layout_rect.bottom + metrics.gap, right_width, right_h[1]);
-    RECT fields_rect =
-        rect_of(right_left, editor_rect.bottom + metrics.gap, right_width, right_h[2]);
-    if (right_h[0] >= min_panel) {
-        paint_layout_panel(canvas, context, metrics, layout_rect, hotspots);
-    } else {
-        hide_portal(context, kScrollLayout);
-    }
-    if (right_h[1] >= min_panel) {
-        paint_editor_panel(canvas, context, metrics, editor_rect, hotspots);
-    }
-    if (right_h[2] >= min_panel) {
-        paint_fields_panel(canvas, context, metrics, fields_rect, hotspots);
-    } else {
-        hide_portal(context, kScrollFields);
-    }
-
-    {
-        AppState& state = *context.state;
-        const int panels_px = std::max(1, available_height - metrics.gap * 2);
-        const int grip = scale_px(9, context.dpi);
-        for (int i = 0; i < kUiSplitCount; ++i) {
-            state.split_track[i].valid = false;
-        }
-        const RECT left_rects[3] = {status_rect, engine_rect, diagnostics_rect};
-        for (int k = 0; k < 2; ++k) {
-            if (left_h[k] < min_panel || left_h[k + 1] < min_panel) {
-                continue;
-            }
-            const int cy = left_rects[k].bottom + metrics.gap / 2;
-            RECT zone{left, cy - grip / 2, left + left_width, cy + grip / 2 + grip % 2};
-            paint_splitter(canvas, state, state.split_track[k], kUiSplitBase + k, zone, cy,
-                           left_h[k], left_h[k + 1], minimum_left[k], minimum_left[k + 1],
-                           panels_px, content_top, 0, k, false);
-            add_hotspot(hotspots, kUiSplitBase + k, 0, zone);
-        }
-        const RECT right_rects[3] = {layout_rect, editor_rect, fields_rect};
-        for (int k = 0; k < 2; ++k) {
-            if (right_h[k] < min_panel || right_h[k + 1] < min_panel) {
-                continue;
-            }
-            const int cy = right_rects[k].bottom + metrics.gap / 2;
-            RECT zone{right_left, cy - grip / 2, right_left + right_width, cy + grip / 2 + grip % 2};
-            paint_splitter(canvas, state, state.split_track[2 + k], kUiSplitBase + 2 + k, zone, cy,
-                           right_h[k], right_h[k + 1], minimum_right[k], minimum_right[k + 1],
-                           panels_px, content_top, 1, k, false);
-            add_hotspot(hotspots, kUiSplitBase + 2 + k, 0, zone);
-        }
-        {
-            const int cx = left + left_width + metrics.gap / 2;
-            RECT zone{cx - grip / 2, content_top, cx + grip / 2 + grip % 2, content_bottom};
-            SplitterTrack& track = state.split_track[4];
-            track.zone = zone;
-            track.origin_px = cx;
-            track.min_px = left + scale_px(300, context.dpi) + metrics.gap / 2;
-            track.max_px = right - scale_px(360, context.dpi) + metrics.gap / 2;
-            if (track.max_px < track.min_px) {
-                track.min_px = track.max_px = track.origin_px;
-            }
-            track.span_px = std::max(1, content_w);
-            track.span_start_px = left + metrics.gap / 2;
-            track.column = 2;
-            track.index = 0;
-            track.valid = true;
-            const bool active =
-                state.hover_id == kUiSplitBase + 4 || state.drag_splitter == 4;
-            const int lx = (zone.left + zone.right) / 2;
-            RECT line{lx - 1, zone.top, lx + 2, zone.bottom};
-            canvas.fill(line, active ? palette::accent : palette::border_strong);
-            add_hotspot(hotspots, kUiSplitBase + 4, 0, zone);
-        }
-    }
-
-    paint_footer(canvas, context, metrics);
-    paint_help_bubble(canvas, context, metrics, hotspots);
+    paint_toast(top, context.client);
+    paint_help_bubble(top, context.client);
+    state.anim.end_frame();
 }
 
 }  // namespace gt::ui

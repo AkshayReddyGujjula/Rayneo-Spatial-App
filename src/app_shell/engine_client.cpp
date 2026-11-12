@@ -148,7 +148,7 @@ bool EngineClient::query_consume() {
 }
 
 bool EngineClient::busy() const {
-    return process_ != nullptr || window_ != nullptr;
+    return process_ != nullptr || window_ != nullptr || preview_busy_;
 }
 
 void EngineClient::close_process() {

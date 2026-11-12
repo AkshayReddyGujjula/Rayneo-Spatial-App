@@ -61,6 +61,12 @@ enum class HelpTopic {
     ComfortNightTint,
     ComfortNightStrength,
     ComfortCursorCenter,
+    CalibrationHeadInApp,
+    CalibrationMag,
+    EngineMotionPrediction,
+    HeadingLockStatus,
+    SettingsTheme,
+    SettingsSetupGuide,
     Count,
 };
 
@@ -77,7 +83,7 @@ inline const wchar_t* help_text(HelpTopic topic) {
         case HelpTopic::StatusCalibration:
             return L"Whether config/orientation.json holds a usable sensor-to-head "
                    L"calibration. Without it the app refuses head tracking; run "
-                   L"calibration from Diagnostics and recovery.";
+                   L"calibration from the Tracking page.";
         case HelpTopic::StatusHid:
             return L"Whether the glasses IMU answered over USB HID. 'Not found' means the "
                    L"cable, the HID driver or the glasses' USB mode needs attention "
@@ -88,14 +94,14 @@ inline const wchar_t* help_text(HelpTopic topic) {
                    L"without it use Start preview.";
         case HelpTopic::StatusLayoutFile:
             return L"Whether the active layout file parsed and validated. A problem here "
-                   L"blocks Start; Revert in the layout panel restores the last saved file.";
+                   L"blocks Start; Revert on the Layout page restores the last saved file.";
         case HelpTopic::StatusTelemetry:
             return L"Whether the engine is recording its per-frame diagnostics CSV. It "
                    L"lands in the logs folder and is the first thing to attach when "
                    L"reporting a tracking bug.";
         case HelpTopic::StatusEngineLog:
-            return L"Size and path of the engine's own log file. Open it from Diagnostics "
-                   L"and recovery when the engine misbehaves or exits unexpectedly.";
+            return L"Size and path of the engine's own log file. Open it from the "
+                   L"Diagnostics page when the engine misbehaves or exits unexpectedly.";
         case HelpTopic::EngineStartWorkspace:
             return L"Creates real Windows virtual monitors and renders them as "
                    L"world-locked screens on the glasses. Switches the laptop panel off "
@@ -113,8 +119,8 @@ inline const wchar_t* help_text(HelpTopic topic) {
                    L"Ctrl+Shift+R). Press it whenever the centre drifts or after putting "
                    L"the glasses on.";
         case HelpTopic::EngineReloadLayout:
-            return L"Tells the running engine to re-read the layout file right now. The "
-                   L"Save button in the layout panel already does this; use it after "
+            return L"Tells the running engine to re-read the layout file right now. Save "
+                   L"and apply on the Layout page already does this; use it after "
                    L"hand-editing JSON.";
         case HelpTopic::EngineYawToggle:
             return L"Enables panning: looking left/right moves the view. Turn it off to "
@@ -126,9 +132,9 @@ inline const wchar_t* help_text(HelpTopic topic) {
             return L"Preview ignores the glasses IMU and pins the camera still. Only for "
                    L"arranging screens at your desk without wearing the glasses.";
         case HelpTopic::DiagCalibration:
-            return L"Launches the guided sensor-to-head calibration (nod, tilt and yaw on "
-                   L"request). Redo it when nodding visibly tilts the screens: that means "
-                   L"a stale file.";
+            return L"Opens the guided sensor-to-head calibration in its own console window "
+                   L"(nod, tilt and yaw on request). Redo it when nodding visibly tilts the "
+                   L"screens: that means a stale file.";
         case HelpTopic::DiagEngineLog:
             return L"Opens the engine log in your text editor. It records per-second pose, "
                    L"display topology changes and shutdown restore steps.";
@@ -143,10 +149,10 @@ inline const wchar_t* help_text(HelpTopic topic) {
                    L"restores the taskbar. Try it before rebooting when the glasses vanish.";
         case HelpTopic::LayoutFactory:
             return L"One-click starter arcs: Single, Triple (default), Quad, Five and Wide. "
-                   L"Clicking loads one into the editor unsaved; Save and reload writes it.";
+                   L"Clicking loads one into the editor unsaved; Save and apply writes it.";
         case HelpTopic::LayoutUserPresets:
             return L"Your saved presets from config/layouts/presets; a star marks the "
-                   L"loaded one. Click a preset to load it, then Save and reload to push "
+                   L"loaded one. Click a preset to load it, then Save and apply to push "
                    L"it live.";
         case HelpTopic::LayoutPresetSave:
             return L"Saves the current editor arrangement under a name you choose. Triple "
@@ -156,7 +162,7 @@ inline const wchar_t* help_text(HelpTopic topic) {
                    L"untouched; this cannot be undone, but the file is tiny JSON.";
         case HelpTopic::LayoutAddScreen:
             return L"Adds a screen (lowest free id and virtual-display slot) at the "
-                   L"centre. Move it with the arc editor or the sliders below.";
+                   L"centre. Move it in the arrangement view or with the sliders.";
         case HelpTopic::LayoutRemoveScreen:
             return L"Removes the selected screen from the editor, unsaved. Its "
                    L"virtual-display slot becomes free for the next added screen.";
@@ -239,6 +245,28 @@ inline const wchar_t* help_text(HelpTopic topic) {
         case HelpTopic::ComfortCursorCenter:
             return L"Moves the mouse pointer to the middle of the centre screen. The global "
                    L"hotkey Ctrl+Alt+F does the same while the workspace runs.";
+        case HelpTopic::CalibrationHeadInApp:
+            return L"Runs the guided head calibration inside this window: wear the glasses, "
+                   L"sit upright and follow each prompt. It replaces the saved calibration "
+                   L"only when it succeeds. Stop the engine first.";
+        case HelpTopic::CalibrationMag:
+            return L"Teaches the glasses the local magnetic field so heading cannot slowly "
+                   L"drift sideways. Needs a head calibration first; do it wearing what you "
+                   L"normally wear (earbuds included), away from magnets.";
+        case HelpTopic::EngineMotionPrediction:
+            return L"Predicts head motion a few milliseconds ahead so the screens lag less "
+                   L"behind fast turns. Turn it off if the view overshoots when you stop. "
+                   L"Takes effect the next time the engine starts.";
+        case HelpTopic::HeadingLockStatus:
+            return L"Live state of the magnetic heading lock: Locked holds the centre steady, "
+                   L"Disturbed means a nearby magnet or metal is changing the field, "
+                   L"Re-learning means it is adapting to a new place.";
+        case HelpTopic::SettingsTheme:
+            return L"Dark suits the glasses best at night; Light is easier on a bright desk. "
+                   L"Match Windows follows your Windows app colour setting.";
+        case HelpTopic::SettingsSetupGuide:
+            return L"Walks through the glasses check, both calibrations and a starting layout "
+                   L"again. It never starts the workspace or changes your displays by itself.";
         case HelpTopic::Count:
             break;
     }
