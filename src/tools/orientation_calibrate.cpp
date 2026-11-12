@@ -6,8 +6,11 @@
 #include <windows.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -19,10 +22,61 @@ namespace {
 
 using SteadyClock = std::chrono::steady_clock;
 
+// Set by Ctrl+C / Ctrl+Break / console close so the recording loops stop and
+// the stream-off guard still runs.
+std::atomic<bool> g_cancel{false};
+
+BOOL WINAPI console_handler(DWORD type) {
+    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT) {
+        g_cancel.store(true);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 struct Options {
     std::string output_path;
     std::string log_path;
     bool mag_only = false;
+    // Front-end mode: machine-readable progress lines on stdout.
+    bool progress_json = false;
+    // No keyboard: each step starts by itself after auto_delay_s.
+    bool auto_advance = false;
+    double auto_delay_s = 4.0;
+    // Recorded with the earbuds (or other head-worn magnets) in place.
+    bool earbuds = false;
+};
+
+// Front-end reporting for one calibration flow.
+class Progress {
+public:
+    Progress(const Options& options, const char* flow, int steps)
+        : options_(options), flow_(flow), steps_(steps) {}
+
+    void emit(int step, const char* state, const std::string& prompt, const std::string& detail = {},
+              float quality = -1.0f) const {
+        if (!options_.progress_json) {
+            return;
+        }
+        gt::CalibrationProgress p;
+        p.flow = flow_;
+        p.step = step < 1 ? 1 : (step > steps_ ? steps_ : step);
+        p.steps = steps_;
+        p.state = state;
+        p.prompt = prompt;
+        p.detail = detail;
+        p.quality = quality;
+        const std::string line = gt::format_calibration_progress(p);
+        std::printf("%s\n", line.c_str());
+        std::fflush(stdout);
+    }
+
+    int steps() const { return steps_; }
+
+private:
+    const Options& options_;
+    const char* flow_;
+    int steps_;
 };
 
 const char* phase_name(gt::CalibrationPhase phase) {
@@ -42,10 +96,16 @@ const char* phase_name(gt::CalibrationPhase phase) {
 void print_usage() {
     std::printf(
         "orientation_calibrate - measure RayNeo GT sensor-to-head alignment\n"
-        "  --output FILE  calibration output (default config/orientation.json)\n"
-        "  --log FILE     optional raw calibration CSV for diagnosis\n"
-        "  --mag          only calibrate the magnetometer (needs an existing orientation\n"
-        "                 calibration); enables the drift-free heading lock\n");
+        "  --output FILE      calibration output (default config/orientation.json)\n"
+        "  --log FILE         optional raw calibration CSV for diagnosis\n"
+        "  --mag              only calibrate the magnetometer (needs an existing orientation\n"
+        "                     calibration); enables the drift-free heading lock\n"
+        "  --earbuds          (with --mag) record that in-ear earbuds were worn; calibrate\n"
+        "                     the way you normally work so their magnets are absorbed\n"
+        "  --progress-json    also print one '@@progress {json}' line per state change\n"
+        "  --auto             no keyboard: each step starts after --auto-delay seconds\n"
+        "  --auto-delay S     seconds to read each instruction in --auto mode (default 4)\n"
+        "Exit code 0 = calibration saved, 1 = failed or cancelled, 2 = bad arguments.\n");
 }
 
 bool parse_args(int argc, char** argv, Options& options) {
@@ -56,6 +116,18 @@ bool parse_args(int argc, char** argv, Options& options) {
             options.log_path = argv[++i];
         } else if (std::strcmp(argv[i], "--mag") == 0) {
             options.mag_only = true;
+        } else if (std::strcmp(argv[i], "--earbuds") == 0) {
+            options.earbuds = true;
+        } else if (std::strcmp(argv[i], "--progress-json") == 0) {
+            options.progress_json = true;
+        } else if (std::strcmp(argv[i], "--auto") == 0) {
+            options.auto_advance = true;
+        } else if (std::strcmp(argv[i], "--auto-delay") == 0 && i + 1 < argc) {
+            options.auto_delay_s = std::atof(argv[++i]);
+            if (!(options.auto_delay_s >= 0.0 && options.auto_delay_s <= 60.0)) {
+                std::printf("--auto-delay must be between 0 and 60 seconds\n");
+                return false;
+            }
         } else if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
             print_usage();
             return false;
@@ -130,17 +202,34 @@ private:
     bool started_ = false;
 };
 
-bool wait_for_enter(const char* prompt) {
-    std::printf("\n%s\nPress ENTER when ready, or type Q then ENTER to cancel: ", prompt);
+// Shows one instruction and waits until the wearer is ready: ENTER on the
+// console, or (--auto) a fixed reading delay. Emits "waiting" either way.
+// Returns false when the wearer cancelled.
+bool wait_ready(const Options& options, const Progress& progress, int step, const std::string& prompt) {
+    progress.emit(step, "waiting", prompt);
+    if (options.auto_advance) {
+        std::printf("\n%s\nStarting in %.0f s...\n", prompt.c_str(), options.auto_delay_s);
+        std::fflush(stdout);
+        const auto end = SteadyClock::now() + std::chrono::duration<double>(options.auto_delay_s);
+        while (SteadyClock::now() < end) {
+            if (g_cancel.load()) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        return !g_cancel.load();
+    }
+    std::printf("\n%s\nPress ENTER when ready, or type Q then ENTER to cancel: ", prompt.c_str());
     std::fflush(stdout);
     std::string response;
-    if (!std::getline(std::cin, response)) {
+    if (!std::getline(std::cin, response) || g_cancel.load()) {
         return false;
     }
-    return response != "q" && response != "Q";
-}
-
-void ready_countdown() {
+    if (response == "q" || response == "Q") {
+        return false;
+    }
+    // Interactive mode keeps the short "Ready... GO" so the wearer can settle
+    // after reaching for the keyboard.
     std::printf("Ready");
     std::fflush(stdout);
     for (int i = 0; i < 3; ++i) {
@@ -149,6 +238,7 @@ void ready_countdown() {
         std::fflush(stdout);
     }
     std::printf(" GO\n");
+    return !g_cancel.load();
 }
 
 bool capture_phase(gt::GtHidDevice& device, gt::CalibrationPhase phase, double seconds,
@@ -157,6 +247,10 @@ bool capture_phase(gt::GtHidDevice& device, gt::CalibrationPhase phase, double s
     output.samples.clear();
     const auto end = SteadyClock::now() + std::chrono::duration<double>(seconds);
     while (SteadyClock::now() < end) {
+        if (g_cancel.load()) {
+            error = "cancelled";
+            return false;
+        }
         uint8_t buffer[64]{};
         const int bytes = device.read_report(buffer, sizeof(buffer), 100);
         if (bytes < 0) {
@@ -198,12 +292,17 @@ void print_axis(const char* name, const gt::CalibrationAxisDiagnostics& axis) {
                 axis.axis_body.y, axis.axis_body.z);
 }
 
-bool capture_still(gt::GtHidDevice& device, gt::CalibrationPhaseData& still, gt::Vec3& bias_body,
-                   std::ofstream& csv, std::string& error) {
+constexpr const char* kStillPrompt = "Look straight ahead and hold completely still for 4 seconds.";
+
+bool capture_still(gt::GtHidDevice& device, const Options& options, const Progress& progress, int step,
+                   gt::CalibrationPhaseData& still, gt::Vec3& bias_body, std::ofstream& csv,
+                   std::string& error) {
     for (int attempt = 1; attempt <= 3; ++attempt) {
-        if (!wait_for_enter("Look straight ahead and hold completely still for 4 seconds.")) {
+        if (!wait_ready(options, progress, step, kStillPrompt)) {
+            error = "cancelled";
             return false;
         }
+        progress.emit(step, "recording", kStillPrompt);
         std::printf("Recording stillness now...\n");
         if (!capture_phase(device, gt::CalibrationPhase::Still, 4.0, still, csv, error)) {
             return false;
@@ -212,24 +311,38 @@ bool capture_still(gt::GtHidDevice& device, gt::CalibrationPhaseData& still, gt:
         bias_body = gt::estimate_still_bias(still, rms);
         std::printf("[cal] phase=still n=%zu gyro_rms=%.3fdeg/s\n", still.samples.size(), rms);
         if (rms <= 1.5f) {
+            char detail[96];
+            std::snprintf(detail, sizeof(detail), "head movement %.2f deg/s (limit 1.5)", rms);
+            progress.emit(step, "ok", kStillPrompt, detail, gt::still_quality(rms));
             return true;
         }
         std::printf("stillness check failed (%.2f deg/s of movement, limit 1.5).\n"
                     "Rest the back of your head against something and try again.\n",
                     rms);
+        char detail[160];
+        std::snprintf(detail, sizeof(detail),
+                      "HOLD_STILL: %.2f deg/s of movement (limit 1.5) - rest the back of your head "
+                      "against something",
+                      rms < 1e6f ? rms : 99.0f);
+        if (attempt < 3) {
+            progress.emit(step, "retry", kStillPrompt, detail, 0.0f);
+        } else {
+            error = std::string("stillness could not be measured after three attempts (") + detail + ")";
+        }
     }
-    error = "stillness could not be measured after three attempts";
     return false;
 }
 
-bool capture_motion(gt::GtHidDevice& device, gt::CalibrationPhase phase, float command_sign,
-                    const char* prompt, double seconds, const gt::Vec3& bias_body,
-                    gt::CalibrationPhaseData& data, std::ofstream& csv, std::string& error) {
+bool capture_motion(gt::GtHidDevice& device, const Options& options, const Progress& progress, int step,
+                    gt::CalibrationPhase phase, float command_sign, const char* prompt, double seconds,
+                    const gt::Vec3& bias_body, gt::CalibrationPhaseData& data, std::ofstream& csv,
+                    std::string& error) {
     for (int attempt = 1; attempt <= 3; ++attempt) {
-        if (!wait_for_enter(prompt)) {
+        if (!wait_ready(options, progress, step, prompt)) {
+            error = "cancelled";
             return false;
         }
-        ready_countdown();
+        progress.emit(step, "recording", prompt);
         if (!capture_phase(device, phase, seconds, data, csv, error)) {
             return false;
         }
@@ -240,18 +353,47 @@ bool capture_motion(gt::GtHidDevice& device, gt::CalibrationPhase phase, float c
             std::printf("[cal] phase=%s ok: active=%.2fs excursion=%.1fdeg dominance=%.1f\n",
                         phase_name(phase), diagnostics.active_seconds, diagnostics.excursion_deg,
                         diagnostics.dominance);
+            char detail[128];
+            std::snprintf(detail, sizeof(detail), "excursion %.1f deg, dominance %.1f",
+                          diagnostics.excursion_deg, diagnostics.dominance);
+            progress.emit(step, "ok", prompt, detail, gt::axis_quality(diagnostics));
             return true;
         }
         std::printf("[cal] phase=%s FAIL %s: %s\n", phase_name(phase), code.c_str(), message.c_str());
         std::printf("  measured: active=%.2fs excursion=%.1fdeg dominance=%.1f perp_rms=%.2fdeg/s\n",
                     diagnostics.active_seconds, diagnostics.excursion_deg, diagnostics.dominance,
                     diagnostics.perpendicular_rms_degs);
+        const std::string detail = code + ": " + message;
         if (attempt < 3) {
             std::printf("Let's repeat just this step.\n");
+            progress.emit(step, "retry", prompt, detail, 0.0f);
+        } else {
+            error = std::string("the ") + phase_name(phase) + " step did not pass after three attempts (" +
+                    detail + ")";
         }
     }
-    error = std::string("the ") + phase_name(phase) + " step did not pass after three attempts";
     return false;
+}
+
+int fail_run(const Progress& progress, int step, const std::string& prompt, const std::string& error) {
+    std::printf("calibration failed: %s\n", error.c_str());
+    progress.emit(step, "failed", prompt, error, -1.0f);
+    return 1;
+}
+
+// Which motion would pin down the weakest hard-iron direction, in head terms.
+std::string weak_axis_advice(const gt::Vec3& weak_package, const std::array<float, 9>& sensor_to_head) {
+    const gt::Vec3 head = gt::apply_sensor_to_head(sensor_to_head, weak_package);
+    const float ax = std::fabs(head.x);
+    const float ay = std::fabs(head.y);
+    const float az = std::fabs(head.z);
+    if (az >= ax && az >= ay) {
+        return "nod up and down and tilt ear to shoulder more";
+    }
+    if (ax >= ay) {
+        return "turn further left and right and tilt ear to shoulder more";
+    }
+    return "turn further left and right and nod up and down more";
 }
 
 // Guided magnetometer calibration: one contiguous recording of a full slow turn
@@ -259,140 +401,130 @@ bool capture_motion(gt::GtHidDevice& device, gt::CalibrationPhase phase, float c
 // perfect sphere of orientations - but it does need one uninterrupted
 // recording (a gap breaks the attitude integration).
 int calibrate_magnetometer(gt::GtHidDevice& device, const Options& options, std::ofstream& csv) {
+    const Progress progress(options, "mag", 2);
     std::array<float, 9> existing{};
     std::string error;
     if (!gt::load_orientation_calibration(options.output_path, existing, error)) {
         std::printf("magnetometer calibration needs the orientation calibration first (%s: %s)\n",
                     options.output_path.c_str(), error.c_str());
         std::printf("run orientation_calibrate.exe without --mag, then repeat with --mag\n");
-        return 1;
+        return fail_run(progress, 1, kStillPrompt,
+                        "NO_ORIENTATION: run the orientation calibration first (" + error + ")");
     }
-    std::printf("\nMagnetometer calibration. Keep phones, speakers and magnets away from your head.\n");
+    std::printf("\nMagnetometer calibration. Keep phones, speakers and loose magnets away from your head.\n"
+                "Wear the glasses exactly as you work: if you wear in-ear earbuds while working, put\n"
+                "them in now (their magnets move with your head and are calibrated out).\n");
     gt::CalibrationPhaseData still;
     gt::Vec3 bias_body;
-    if (!capture_still(device, still, bias_body, csv, error)) {
-        std::printf("calibration failed: %s\n", error.c_str());
-        return 1;
+    if (!capture_still(device, options, progress, 1, still, bias_body, csv, error)) {
+        return fail_run(progress, 1, kStillPrompt, error);
     }
+    const std::string motion_prompt =
+        "For 45 seconds, move slowly and smoothly: first turn ALL the way around once (swivel chair, "
+        "or stand and turn), about 15 s.";
+    const std::string second_prompt =
+        "Now nod up and down, tilt ear to shoulder both ways, and look far left, far right, up and "
+        "down until the timer ends.";
     for (int attempt = 1; attempt <= 3; ++attempt) {
-        if (!wait_for_enter(
-                "For 45 seconds, move slowly and smoothly:\n"
-                "  1. Turn ALL the way around once (swivel chair, or stand and turn) - about 15 s.\n"
-                "  2. Then nod up and down, tilt ear to shoulder both ways, and look far left,\n"
-                "     far right, up and down, until the timer ends.")) {
-            return 1;
+        if (!wait_ready(options, progress, 2,
+                        "For 45 seconds, move slowly and smoothly:\n"
+                        "  1. Turn ALL the way around once (swivel chair, or stand and turn) - about 15 s.\n"
+                        "  2. Then nod up and down, tilt ear to shoulder both ways, and look far left,\n"
+                        "     far right, up and down, until the timer ends.")) {
+            return fail_run(progress, 2, motion_prompt, "cancelled");
         }
-        ready_countdown();
+        progress.emit(2, "recording", motion_prompt, "0 of 45 s");
         gt::CalibrationPhaseData motion;
         const auto start = SteadyClock::now();
-        std::thread ticker([&start]() {
-            for (int s = 5; s <= 45; s += 5) {
-                std::this_thread::sleep_until(start + std::chrono::seconds(s));
+        std::atomic<bool> recording_done{false};
+        std::thread ticker([&]() {
+            for (int s = 5; s <= 45 && !recording_done.load(); s += 5) {
+                const auto target = start + std::chrono::seconds(s);
+                while (SteadyClock::now() < target && !recording_done.load()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                if (recording_done.load()) {
+                    break;
+                }
                 std::printf("  %d s%s\n", s, s == 15 ? " - now nod, tilt and look around" : "");
                 std::fflush(stdout);
+                if (s == 15) {
+                    progress.emit(2, "recording", second_prompt, "15 of 45 s");
+                }
             }
         });
         const bool captured = capture_phase(device, gt::CalibrationPhase::Yaw, 45.0, motion, csv, error);
+        recording_done.store(true);
         ticker.join();
         if (!captured) {
-            std::printf("calibration failed: %s\n", error.c_str());
-            return 1;
+            return fail_run(progress, 2, motion_prompt, error);
         }
         const gt::MagFitResult fit = gt::fit_mag_hard_iron(motion.samples, bias_body);
+        const float quality = gt::mag_fit_quality(fit);
         std::printf("[mag] fit %s: hard_iron=(%.2f, %.2f, %.2f) uT |B|=%.2f uT resid=%.3f uT "
-                    "rotation=%.0f deg tilt=%.0f deg\n",
+                    "rotation=%.0f deg tilt=%.0f deg observability=%.3f quality=%.2f\n",
                     fit.code, fit.hard_iron_ut.x, fit.hard_iron_ut.y, fit.hard_iron_ut.z, fit.field_ut,
-                    fit.residual_rms_ut, fit.rotation_coverage_deg, fit.tilt_coverage_deg);
+                    fit.residual_rms_ut, fit.rotation_coverage_deg, fit.tilt_coverage_deg, fit.observability,
+                    quality);
+        char measured[192];
+        std::snprintf(measured, sizeof(measured),
+                      "field %.1f uT, residual %.2f uT, turn %.0f deg, tilt %.0f deg, observability %.3f",
+                      fit.field_ut, fit.residual_rms_ut, fit.rotation_coverage_deg, fit.tilt_coverage_deg,
+                      fit.observability);
         if (fit.ok) {
             gt::MagCalibration mag;
             mag.valid = true;
             mag.hard_iron_ut = fit.hard_iron_ut;
             mag.field_ut = fit.field_ut;
+            mag.earbuds = options.earbuds;
+            mag.quality = quality;
             if (!gt::save_mag_calibration(options.output_path, mag, error)) {
                 std::printf("fit succeeded but could not be saved: %s\n", error.c_str());
-                return 1;
+                return fail_run(progress, 2, motion_prompt, "SAVE_FAILED: " + error);
             }
+            std::string advice;
+            if (quality < 0.6f) {
+                advice = "; for a better result repeat and " +
+                         weak_axis_advice(fit.weak_axis_package, existing);
+                std::printf("Accepted, but coverage was thin: next time %s.\n",
+                            weak_axis_advice(fit.weak_axis_package, existing).c_str());
+            }
+            progress.emit(2, "ok", motion_prompt, measured, quality);
             std::printf("[mag] result ok\nSaved %s - the heading lock is on at the next start.\n",
                         options.output_path.c_str());
+            progress.emit(2, "done", "Magnetometer calibration saved.",
+                          std::string(measured) + advice, quality);
             return 0;
         }
+        std::string reason = std::string(fit.code) + ": ";
         if (std::strcmp(fit.code, "SMALL_COVERAGE") == 0) {
+            reason += "not enough movement - turn fully around AND nod/tilt";
             std::printf("Not enough movement: turn fully around AND nod/tilt. ");
         } else if (std::strcmp(fit.code, "POOR_FIT") == 0 || std::strcmp(fit.code, "IMPLAUSIBLE_FIELD") == 0) {
+            reason += "the field was inconsistent (a magnet, speaker or metal nearby?) - move away from it";
             std::printf("The field was inconsistent (a magnet, speaker or metal nearby?). "
                         "Move away from it. ");
         } else if (std::strcmp(fit.code, "GAP") == 0) {
+            reason += "the IMU stream had a gap";
             std::printf("The IMU stream had a gap. ");
+        } else {
+            reason += "the recording could not be fitted";
         }
+        reason += std::string(" (") + measured + ")";
         if (attempt < 3) {
             std::printf("Let's repeat this step.\n");
+            progress.emit(2, "retry", motion_prompt, reason, quality);
+        } else {
+            std::printf("magnetometer calibration failed after three attempts; nothing was changed\n");
+            return fail_run(progress, 2, motion_prompt,
+                            "failed after three attempts; nothing was changed (" + reason + ")");
         }
     }
-    std::printf("magnetometer calibration failed after three attempts; nothing was changed\n");
     return 1;
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-    Options options;
-    if (!parse_args(argc, argv, options)) {
-        return 2;
-    }
-    if (options.output_path.empty()) {
-        options.output_path = default_output_path();
-    }
-
-    if (hid_init() != 0) {
-        std::printf("hidapi initialization failed\n");
-        return 1;
-    }
-    struct HidExitGuard {
-        ~HidExitGuard() { hid_exit(); }
-    } hid_exit_guard;
-
-    const auto devices = gt::GtHidDevice::enumerate();
-    if (devices.empty()) {
-        std::printf("no RayNeo GT HID device found; connect the glasses and retry\n");
-        return 1;
-    }
-    for (const auto& device : devices) {
-        std::printf("found: %s\n", gt::GtHidDevice::describe(device).c_str());
-    }
-
-    gt::GtHidDevice device;
-    if (!device.open_first()) {
-        std::printf("failed to open the RayNeo GT HID interface\n");
-        return 1;
-    }
-    StreamGuard stream_guard(device);
-    if (!send_command(device, gt::kCmdStreamOff)) {
-        std::printf("warning: the stream-off command was not acknowledged\n");
-    }
-    drain(device, 100);
-    std::string stream_error;
-    if (!device.send_command_verified(gt::kCmdStreamOn, 1000, &stream_error)) {
-        std::printf("failed to start the IMU stream: %s\n", stream_error.c_str());
-        std::printf("check that no other app is using the glasses, then retry\n");
-        return 1;
-    }
-    stream_guard.mark_started();
-    drain(device, 100);
-
-    std::ofstream csv;
-    if (!options.log_path.empty()) {
-        csv.open(options.log_path, std::ios::out | std::ios::trunc);
-        if (!csv) {
-            std::printf("could not open raw log: %s\n", options.log_path.c_str());
-            return 1;
-        }
-        csv << "phase,host_us,tick_100us,ax,ay,az,gx,gy,gz,mx,my,mz,temp_c\n";
-    }
-
-    if (options.mag_only) {
-        return calibrate_magnetometer(device, options, csv);
-    }
-
+int calibrate_orientation_flow(gt::GtHidDevice& device, const Options& options, std::ofstream& csv) {
+    const Progress progress(options, "orientation", 4);
     std::printf("\nWear the glasses normally and sit upright. Keep your torso facing forward.\n"
                 "Each motion goes away from centre first, then returns to centre.\n");
 
@@ -402,31 +534,31 @@ int main(int argc, char** argv) {
     gt::CalibrationPhaseData tilt;
     std::string error;
 
+    static constexpr const char* kYawPrompt =
+        "Slowly turn your head LEFT about 30 degrees, then return to centre. "
+        "Do not tilt or nod. Slow and smooth is fine.";
+    static constexpr const char* kNodPrompt =
+        "Slowly nod DOWN toward your chest, then return to centre. Do not tilt. "
+        "A small nod is enough.";
+    static constexpr const char* kTiltPrompt =
+        "Slowly tilt your head toward your RIGHT shoulder as far as is "
+        "comfortable, then return to centre. About 15-20 degrees is plenty.";
+
     gt::Vec3 bias_body;
-    if (!capture_still(device, still, bias_body, csv, error)) {
-        std::printf("calibration failed: %s\n", error.c_str());
-        return 1;
+    if (!capture_still(device, options, progress, 1, still, bias_body, csv, error)) {
+        return fail_run(progress, 1, kStillPrompt, error);
     }
-    if (!capture_motion(device, gt::CalibrationPhase::Yaw, +1.0f,
-                        "Slowly turn your head LEFT about 30 degrees, then return to centre. "
-                        "Do not tilt or nod. Slow and smooth is fine.",
-                        6.0, bias_body, yaw, csv, error)) {
-        std::printf("calibration failed: %s\n", error.c_str());
-        return 1;
+    if (!capture_motion(device, options, progress, 2, gt::CalibrationPhase::Yaw, +1.0f, kYawPrompt, 6.0,
+                        bias_body, yaw, csv, error)) {
+        return fail_run(progress, 2, kYawPrompt, error);
     }
-    if (!capture_motion(device, gt::CalibrationPhase::Nod, -1.0f,
-                        "Slowly nod DOWN toward your chest, then return to centre. Do not tilt. "
-                        "A small nod is enough.",
-                        6.0, bias_body, nod, csv, error)) {
-        std::printf("calibration failed: %s\n", error.c_str());
-        return 1;
+    if (!capture_motion(device, options, progress, 3, gt::CalibrationPhase::Nod, -1.0f, kNodPrompt, 6.0,
+                        bias_body, nod, csv, error)) {
+        return fail_run(progress, 3, kNodPrompt, error);
     }
-    if (!capture_motion(device, gt::CalibrationPhase::Tilt, +1.0f,
-                        "Slowly tilt your head toward your RIGHT shoulder as far as is "
-                        "comfortable, then return to centre. About 15-20 degrees is plenty.",
-                        6.0, bias_body, tilt, csv, error)) {
-        std::printf("calibration failed: %s\n", error.c_str());
-        return 1;
+    if (!capture_motion(device, options, progress, 4, gt::CalibrationPhase::Tilt, +1.0f, kTiltPrompt, 6.0,
+                        bias_body, tilt, csv, error)) {
+        return fail_run(progress, 4, kTiltPrompt, error);
     }
 
     const gt::OrientationCalibrationResult result =
@@ -441,10 +573,16 @@ int main(int argc, char** argv) {
                 "handedness=%.2fdeg (smaller is straighter; redo wobbly steps)\n",
                 result.up_vs_yaw_deg, result.nod_level_error_deg, result.nod_tilt_error_deg,
                 result.handedness_error_deg);
+    char consistency[192];
+    std::snprintf(consistency, sizeof(consistency),
+                  "up_vs_yaw %.2f deg, nod_level %.2f deg, nod_tilt %.2f deg, handedness %.2f deg",
+                  result.up_vs_yaw_deg, result.nod_level_error_deg, result.nod_tilt_error_deg,
+                  result.handedness_error_deg);
     if (!result.ok) {
         std::printf("[cal] FAIL %s: %s\n", result.code.c_str(), result.message.c_str());
         std::printf("No calibration file was changed. Repeat the tool and follow the named step carefully.\n");
-        return 1;
+        return fail_run(progress, 4, "Calibration was not saved; start again.",
+                        result.code + ": " + result.message + " (" + consistency + ")");
     }
 
     std::printf("[cal] head_basis_B right=(%+.5f %+.5f %+.5f) forward=(%+.5f %+.5f %+.5f) "
@@ -465,18 +603,91 @@ int main(int argc, char** argv) {
         if (directory_error) {
             std::printf("could not create calibration directory: %s\n",
                         directory_error.message().c_str());
-            return 1;
+            return fail_run(progress, 4, "Calibration was not saved.",
+                            "SAVE_FAILED: " + directory_error.message());
         }
     }
     if (!gt::save_orientation_calibration(options.output_path, result, error)) {
         std::printf("calibration succeeded but could not be saved: %s\n", error.c_str());
-        return 1;
+        return fail_run(progress, 4, "Calibration was not saved.", "SAVE_FAILED: " + error);
     }
     std::printf("[cal] result ok\nSaved %s\n", options.output_path.c_str());
     gt::MagCalibration mag;
     std::string mag_error;
+    std::string next;
     if (!gt::load_mag_calibration(options.output_path, mag, mag_error) || !mag.valid) {
         std::printf("Next: run orientation_calibrate.exe --mag once for drift-free heading.\n");
+        next = "; next: calibrate the magnetometer (--mag) for drift-free heading";
     }
+    progress.emit(4, "done", "Orientation calibration saved.", std::string(consistency) + next,
+                  gt::orientation_quality(result));
     return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    Options options;
+    if (!parse_args(argc, argv, options)) {
+        return 2;
+    }
+    if (options.output_path.empty()) {
+        options.output_path = default_output_path();
+    }
+    SetConsoleCtrlHandler(console_handler, TRUE);
+    const Progress setup(options, options.mag_only ? "mag" : "orientation", options.mag_only ? 2 : 4);
+    const char* const kConnectPrompt = "Connect the glasses and try again.";
+
+    if (hid_init() != 0) {
+        std::printf("hidapi initialization failed\n");
+        return fail_run(setup, 1, kConnectPrompt, "NO_HID: hidapi initialization failed");
+    }
+    struct HidExitGuard {
+        ~HidExitGuard() { hid_exit(); }
+    } hid_exit_guard;
+
+    const auto devices = gt::GtHidDevice::enumerate();
+    if (devices.empty()) {
+        std::printf("no RayNeo GT HID device found; connect the glasses and retry\n");
+        return fail_run(setup, 1, kConnectPrompt, "NO_DEVICE: no RayNeo GT HID device found");
+    }
+    for (const auto& device : devices) {
+        std::printf("found: %s\n", gt::GtHidDevice::describe(device).c_str());
+    }
+
+    gt::GtHidDevice device;
+    if (!device.open_first()) {
+        std::printf("failed to open the RayNeo GT HID interface\n");
+        return fail_run(setup, 1, kConnectPrompt,
+                        "OPEN_FAILED: could not open the glasses (is another app using them?)");
+    }
+    StreamGuard stream_guard(device);
+    if (!send_command(device, gt::kCmdStreamOff)) {
+        std::printf("warning: the stream-off command was not acknowledged\n");
+    }
+    drain(device, 100);
+    std::string stream_error;
+    if (!device.send_command_verified(gt::kCmdStreamOn, 1000, &stream_error)) {
+        std::printf("failed to start the IMU stream: %s\n", stream_error.c_str());
+        std::printf("check that no other app is using the glasses, then retry\n");
+        return fail_run(setup, 1, "Close other apps using the glasses and try again.",
+                        "STREAM_FAILED: " + stream_error);
+    }
+    stream_guard.mark_started();
+    drain(device, 100);
+
+    std::ofstream csv;
+    if (!options.log_path.empty()) {
+        csv.open(options.log_path, std::ios::out | std::ios::trunc);
+        if (!csv) {
+            std::printf("could not open raw log: %s\n", options.log_path.c_str());
+            return fail_run(setup, 1, kConnectPrompt, "LOG_FAILED: could not open " + options.log_path);
+        }
+        csv << "phase,host_us,tick_100us,ax,ay,az,gx,gy,gz,mx,my,mz,temp_c\n";
+    }
+
+    if (options.mag_only) {
+        return calibrate_magnetometer(device, options, csv);
+    }
+    return calibrate_orientation_flow(device, options, csv);
 }

@@ -56,6 +56,9 @@ public:
     void set_sensor_to_head(const std::array<float, 9>& matrix) { sensor_to_head_ = matrix; }
     // Call before start(). An invalid calibration leaves the heading lock off.
     void set_mag_calibration(const MagCalibration& calibration) { mag_calibration_ = calibration; }
+    // Call before start(). Opt-in online hard-iron tracking (earbuds); see
+    // MagHardIronTracker.
+    void set_mag_hard_iron_tracking(bool enabled) { mag_track_hard_iron_ = enabled; }
     // Optional full-rate raw sample log in the gt_imu_probe CSV format, so a
     // real session can be replayed offline with imu_replay. Truncated at start.
     void set_raw_log_path(const std::string& path) { raw_log_path_ = path; }
@@ -71,6 +74,8 @@ public:
     float mag_integral_degs() const { return mag_integral_degs_.load(std::memory_order_relaxed); }
     float mag_total_correction_deg() const { return mag_total_deg_.load(std::memory_order_relaxed); }
     uint32_t mag_reacquisitions() const { return mag_reacq_.load(std::memory_order_relaxed); }
+    // |tracked hard-iron offset - stored calibration| (uT); 0 when tracking is off.
+    float mag_hard_iron_offset_ut() const { return mag_hi_offset_ut_.load(std::memory_order_relaxed); }
     float temperature_c() const { return temp_c_.load(std::memory_order_relaxed); }
 
 private:
@@ -115,6 +120,8 @@ private:
     std::atomic<float> mag_integral_degs_{0.0f};
     std::atomic<float> mag_total_deg_{0.0f};
     std::atomic<uint32_t> mag_reacq_{0};
+    std::atomic<float> mag_hi_offset_ut_{0.0f};
+    bool mag_track_hard_iron_ = false;
     std::atomic<float> temp_c_{0.0f};
     MagCalibration mag_calibration_;
     std::string raw_log_path_;

@@ -1,5 +1,7 @@
 #include "imu/imu_source.h"
 
+#include <cmath>
+
 #include "imu/gt_hid.h"
 #include "imu/gt_protocol.h"
 #include "util/utf8_path.h"
@@ -116,6 +118,7 @@ void ImuSource::run() {
         PoseEstimator::Config estimator_config;
         estimator_config.sensor_to_head = sensor_to_head_;
         estimator_config.mag_calibration = mag_calibration_;
+        estimator_config.mag_lock.hard_iron.enabled = mag_track_hard_iron_;
         estimator.configure(estimator_config);
         has_pose_.store(false);
         sample_rate_hz_.store(0.0, std::memory_order_relaxed);
@@ -205,6 +208,9 @@ void ImuSource::run() {
                 mag_integral_degs_.store(lock.integral_degs(), std::memory_order_relaxed);
                 mag_total_deg_.store(lock.total_correction_deg(), std::memory_order_relaxed);
                 mag_reacq_.store(lock.reacquisitions(), std::memory_order_relaxed);
+                const Vec3 off = lock.hard_iron_tracker().offset_from_calibration_ut();
+                mag_hi_offset_ut_.store(std::sqrt(off.x * off.x + off.y * off.y + off.z * off.z),
+                                        std::memory_order_relaxed);
             }
             gx_.store(r.imu.gyro_degs.x, std::memory_order_relaxed);
             gy_.store(r.imu.gyro_degs.y, std::memory_order_relaxed);

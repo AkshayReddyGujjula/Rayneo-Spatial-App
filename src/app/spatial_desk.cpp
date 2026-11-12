@@ -70,6 +70,9 @@ struct StatusReport {
     bool imu = false;
     bool detached = false;
     double elapsed_s = 0.0;
+    std::string mag = "off";
+    float mag_error_deg = 0.0f;
+    float mag_offset_ut = 0.0f;
 };
 
 StatusReport g_status;
@@ -88,6 +91,7 @@ struct Options {
     float predict_ms = -1.0f;  // < 0: PoseSmoother::Config default
     gt::ViewComfort comfort;
     bool mag = true;
+    bool mag_track_hard_iron = false;
     double seconds = 0.0;
     std::string log_path;
     std::string calibration_path;
@@ -159,6 +163,12 @@ void publish_status(const StatusReport& report) {
     text += std::string(gt::kStatusKeyVdd) + "=" + (report.vdd ? "1" : "0") + "\n";
     text += std::string(gt::kStatusKeyImu) + "=" + (report.imu ? "1" : "0") + "\n";
     text += std::string(gt::kStatusKeyDetached) + "=" + (report.detached ? "1" : "0") + "\n";
+    text += std::string(gt::kStatusKeyMag) + "=" + report.mag + "\n";
+    char mag_numbers[64];
+    std::snprintf(mag_numbers, sizeof(mag_numbers), "%.2f", report.mag_error_deg);
+    text += std::string(gt::kStatusKeyMagError) + "=" + mag_numbers + "\n";
+    std::snprintf(mag_numbers, sizeof(mag_numbers), "%.2f", report.mag_offset_ut);
+    text += std::string(gt::kStatusKeyMagOffset) + "=" + mag_numbers + "\n";
     char elapsed[64];
     std::snprintf(elapsed, sizeof(elapsed), "%.2f", report.elapsed_s);
     text += std::string(gt::kStatusKeyElapsed) + "=" + elapsed + "\n";
@@ -420,6 +430,8 @@ void print_usage() {
         "  --focus-dim P   focus mode: brightness %% of screens you are not looking at\n"
         "  --night-tint P  warm night tint strength %% (0 = off)\n"
         "  --no-mag        disable the magnetometer heading lock even if calibrated\n"
+        "  --mag-track-hard-iron  (experimental) follow head-worn magnets such as earbuds\n"
+        "                  going in or out, instead of letting them rotate the workspace\n"
         "  --freeze-still / --no-freeze-still  obsolete, accepted and ignored (the pose path\n"
         "                is always live; the gyro bias owns steady error)\n"
         "  --log FILE     append a diagnostic CSV (elapsed, gyro, bias, view pose, rest,\n"
@@ -462,6 +474,8 @@ bool parse_args(int argc, char** argv, Options& opt, bool& show_help) {
             opt.predict_ms = std::max(0.0f, std::min(100.0f, static_cast<float>(std::atof(argv[++i]))));
         } else if (std::strcmp(a, "--no-mag") == 0) {
             opt.mag = false;
+        } else if (std::strcmp(a, "--mag-track-hard-iron") == 0) {
+            opt.mag_track_hard_iron = true;
         } else if (std::strcmp(a, "--freeze-still") == 0 ||
                    std::strcmp(a, "--no-freeze-still") == 0) {
             std::printf("note: %s is obsolete and ignored; the pose path is always live\n", a);
@@ -1242,6 +1256,7 @@ int wmain(int argc, wchar_t** argv) {
         std::printf("loaded orientation calibration: %s\n", opt.calibration_path.c_str());
         if (opt.mag && mag_calibration.valid) {
             imu.set_mag_calibration(mag_calibration);
+            imu.set_mag_hard_iron_tracking(opt.mag_track_hard_iron);
             std::printf("magnetometer heading lock: on (hard iron %.2f, %.2f, %.2f uT)\n",
                         mag_calibration.hard_iron_ut.x, mag_calibration.hard_iron_ut.y,
                         mag_calibration.hard_iron_ut.z);
@@ -1681,14 +1696,14 @@ int wmain(int argc, wchar_t** argv) {
                     logged_reverts = reverts;
                 }
                 if (imu.mag_lock_active()) {
-                    static const char* const kMagStates[] = {"off", "acquiring", "locked", "disturbed"};
                     const int ms = imu.mag_state();
                     std::printf("  mag_heading: state=%s err=%+.2fdeg int=%+.3fdeg/s |B|=%.1f/%.1fuT "
-                                "dip=%.1f/%.1fdeg corr_total=%+.2fdeg reacq=%u temp=%.1fC\n",
-                                (ms >= 0 && ms <= 3) ? kMagStates[ms] : "?", imu.mag_error_deg(),
+                                "dip=%.1f/%.1fdeg corr_total=%+.2fdeg reacq=%u hard_iron_moved=%.2fuT temp=%.1fC\n",
+                                gt::mag_state_name(static_cast<gt::MagHeadingLock::State>(ms)), imu.mag_error_deg(),
                                 imu.mag_integral_degs(), imu.mag_field_ut(), imu.mag_reference_field_ut(),
                                 imu.mag_dip_deg(), imu.mag_reference_dip_deg(), imu.mag_total_correction_deg(),
-                                static_cast<unsigned>(imu.mag_reacquisitions()), imu.temperature_c());
+                                static_cast<unsigned>(imu.mag_reacquisitions()), imu.mag_hard_iron_offset_ut(),
+                                imu.temperature_c());
                 }
                 if (late_samples > 0) {
                     std::printf("  view: stabilise=%s late-pose gain %.1f ms, %.3f deg/frame\n",
@@ -1702,6 +1717,15 @@ int wmain(int argc, wchar_t** argv) {
             frames_at_stat = frames;
             g_status.fps = fps;
             g_status.elapsed_s = elapsed;
+            if (!opt.no_imu && imu.mag_lock_active()) {
+                g_status.mag = gt::mag_state_name(static_cast<gt::MagHeadingLock::State>(imu.mag_state()));
+                g_status.mag_error_deg = imu.mag_error_deg();
+                g_status.mag_offset_ut = imu.mag_hard_iron_offset_ut();
+            } else {
+                g_status.mag = "off";
+                g_status.mag_error_deg = 0.0f;
+                g_status.mag_offset_ut = 0.0f;
+            }
             g_status.screens = state.screen_count;
             publish_status(g_status);
             next_stat += 1.0;

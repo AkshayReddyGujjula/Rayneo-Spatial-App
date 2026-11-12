@@ -1,6 +1,7 @@
 #include "imu/orientation_calibration.h"
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -219,6 +220,102 @@ int main() {
         gt::calibrate_orientation(still, false_start_yaw, nod, tilt);
     check(recovered.ok && recovered.up_vs_yaw_deg < 0.1f,
           "contiguous-window selection ignores the false start");
+
+    std::printf("orientation_calibration_selftest: --progress-json line contract\n");
+    {
+        gt::CalibrationProgress p;
+        p.flow = "orientation";
+        p.step = 2;
+        p.steps = 4;
+        p.state = "retry";
+        p.prompt = "Turn \"LEFT\"\nslowly";
+        p.detail = "C:\\path\ttab";
+        p.quality = 0.12345f;
+        const std::string line = gt::format_calibration_progress(p);
+        std::printf("  %s\n", line.c_str());
+        check(line ==
+                  "@@progress {\"flow\":\"orientation\",\"step\":2,\"steps\":4,\"state\":\"retry\","
+                  "\"prompt\":\"Turn \\\"LEFT\\\"\\nslowly\",\"detail\":\"C:\\\\path\\ttab\","
+                  "\"quality\":0.123}",
+              "exact line shape with JSON escaping");
+        check(line.find('\n') == std::string::npos, "one physical line");
+        p.quality = -1.0f;
+        p.flow = "mag";
+        p.state = "done";
+        p.prompt = "x";
+        p.detail.clear();
+        p.detail.push_back('\x01');
+        const std::string na = gt::format_calibration_progress(p);
+        std::printf("  %s\n", na.c_str());
+        check(na == "@@progress {\"flow\":\"mag\",\"step\":2,\"steps\":4,\"state\":\"done\",\"prompt\":\"x\","
+                    "\"detail\":\"\\u0001\",\"quality\":-1}",
+              "not-applicable quality is -1 and control bytes are escaped");
+        p.quality = 7.0f;
+        check(gt::format_calibration_progress(p).find("\"quality\":1.000}") != std::string::npos,
+              "quality is clamped to 1");
+        p.quality = std::numeric_limits<float>::quiet_NaN();
+        check(gt::format_calibration_progress(p).find("\"quality\":-1}") != std::string::npos,
+              "non-finite quality reports -1");
+    }
+
+    std::printf("orientation_calibration_selftest: guidance quality scores\n");
+    {
+        check(gt::still_quality(0.0f) == 1.0f && gt::still_quality(1.5f) == 0.0f &&
+                  gt::still_quality(0.75f) > 0.49f && gt::still_quality(0.75f) < 0.51f,
+              "still quality spans the 1.5 deg/s gate");
+        gt::CalibrationAxisDiagnostics clean;
+        clean.dominance = 400.0f;
+        clean.excursion_deg = 30.0f;
+        gt::CalibrationAxisDiagnostics marginal;
+        marginal.dominance = 4.0f;
+        marginal.excursion_deg = 12.0f;
+        check(gt::axis_quality(clean) > 0.95f, "clean motion scores high", gt::axis_quality(clean), 0.95f);
+        check(gt::axis_quality(marginal) < 0.05f, "motion at the gates scores near zero",
+              gt::axis_quality(marginal), 0.05f);
+        check(gt::orientation_quality(result) > 0.95f, "synthetic exact calibration scores high",
+              gt::orientation_quality(result), 0.95f);
+        check(gt::orientation_quality(rejected) == 0.0f, "a rejected calibration scores zero");
+    }
+
+    std::printf("orientation_calibration_selftest: mag metadata round-trips\n");
+    {
+        const std::filesystem::path path =
+            std::filesystem::temp_directory_path() /
+            ("rayneo-orientation-mag-meta-" +
+             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".json");
+        std::string error;
+        if (result.ok && gt::save_orientation_calibration(path.string(), result, error)) {
+            gt::MagCalibration stored;
+            stored.valid = true;
+            stored.hard_iron_ut = gt::Vec3{-16.8f, -17.4f, 3.0f};
+            stored.field_ut = 51.47f;
+            stored.earbuds = true;
+            stored.quality = 0.82f;
+            gt::MagCalibration loaded;
+            check(gt::save_mag_calibration(path.string(), stored, error) &&
+                      gt::load_mag_calibration(path.string(), loaded, error) && loaded.valid && loaded.earbuds &&
+                      std::fabs(loaded.quality - 0.82f) < 1e-3f,
+                  "earbuds flag and quality round-trip");
+            stored.earbuds = false;
+            stored.quality = -1.0f;
+            check(gt::save_mag_calibration(path.string(), stored, error) &&
+                      gt::load_mag_calibration(path.string(), loaded, error) && loaded.valid && !loaded.earbuds &&
+                      loaded.quality < 0.0f,
+                  "absent quality loads as unknown");
+            {
+                std::ofstream legacy(path);
+                legacy << "{\"version\":1,\"sensor_to_head\":[1,0,0,0,1,0,0,0,1],"
+                          "\"mag_hard_iron_ut\":[-16.81,-17.41,3.0],\"mag_field_ut\":51.47}\n";
+            }
+            check(gt::load_mag_calibration(path.string(), loaded, error) && loaded.valid && !loaded.earbuds &&
+                      loaded.quality < 0.0f && std::fabs(loaded.hard_iron_ut.z - 3.0f) < 1e-3f,
+                  "a pre-metadata file still loads");
+        } else {
+            check(false, "could not write the metadata test file");
+        }
+        std::error_code ignored_error;
+        std::filesystem::remove(path, ignored_error);
+    }
 
     std::printf("orientation_calibration_selftest: reject unsupported file versions\n");
     const std::filesystem::path bad_version_path =

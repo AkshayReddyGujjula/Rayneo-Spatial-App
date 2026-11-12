@@ -17,6 +17,14 @@
 // calibration in the orientation file). --confirm / --confirm-agree /
 // --cal-window override the startup confirmation period, its agreement
 // tolerance and the startup window length.
+//
+//              [--hard-iron-track] [--baseline-no-track] [--eval-until S] [--tracker-log]
+//              [--inject-hard-iron x,y,z --inject-from S [--inject-until S]]
+//
+// --inject-hard-iron adds a head-fixed field (e.g. an earbud's magnets) to the
+// raw magnetometer from --inject-from on, and runs an untouched baseline
+// estimator alongside: the summary reports how far the injected run's view
+// yaw departs from the baseline (the view motion the change would cause).
 
 #define _CRT_SECURE_NO_WARNINGS
 #include "imu/mag_heading.h"
@@ -352,6 +360,14 @@ int main(int argc, char** argv) {
     float cal_window = -1.0f;
     float confirm_s = -1.0f;
     float confirm_agree = -1.0f;
+    bool track_hard_iron = false;
+    bool tracker_log = false;
+    bool baseline_no_track = false;
+    float eval_until = 1e30f;
+    Vec3 inject{};
+    bool have_inject = false;
+    float inject_from = 0.0f;
+    float inject_until = 1e30f;
     for (int i = 2; i < argc; ++i) {
         const char* a = argv[i];
         if (!std::strcmp(a, "--startup-audit") && i + 1 < argc) {
@@ -413,6 +429,22 @@ int main(int argc, char** argv) {
                 smooth_cfg.hold_outer_deg = h.y;
                 smooth_cfg.hold_settle_tau_s = h.z;
             }
+        } else if (!std::strcmp(a, "--hard-iron-track")) {
+            track_hard_iron = true;
+        } else if (!std::strcmp(a, "--no-hard-iron-track")) {
+            track_hard_iron = false;
+        } else if (!std::strcmp(a, "--tracker-log")) {
+            tracker_log = true;
+        } else if (!std::strcmp(a, "--baseline-no-track")) {
+            baseline_no_track = true;
+        } else if (!std::strcmp(a, "--eval-until") && i + 1 < argc) {
+            eval_until = static_cast<float>(std::atof(argv[++i]));
+        } else if (!std::strcmp(a, "--inject-hard-iron") && i + 1 < argc) {
+            have_inject = parse_vec(argv[++i], inject);
+        } else if (!std::strcmp(a, "--inject-from") && i + 1 < argc) {
+            inject_from = static_cast<float>(std::atof(argv[++i]));
+        } else if (!std::strcmp(a, "--inject-until") && i + 1 < argc) {
+            inject_until = static_cast<float>(std::atof(argv[++i]));
         } else if (!std::strcmp(a, "--no-mag")) {
             use_mag = false;
         } else if (!std::strcmp(a, "--bias-error") && i + 1 < argc) {
@@ -482,6 +514,7 @@ int main(int argc, char** argv) {
     if (lock_ki >= 0.0f) {
         cfg.mag_lock.integral_gain_scale = lock_ki;
     }
+    cfg.mag_lock.hard_iron.enabled = track_hard_iron;
     if (confirm_s >= 0.0f) {
         cfg.startup_confirm_s = confirm_s;
     }
@@ -499,6 +532,18 @@ int main(int argc, char** argv) {
         return run_startup_audit(samples, cfg, audit_cal, audit_step, audit_horizon, audit_out);
     }
     PoseEstimator est(cfg);
+    PoseEstimator::Config baseline_cfg = cfg;
+    // The reference run: the same estimator on the untouched stream (with
+    // --baseline-no-track: the stored calibration without tracking).
+    baseline_cfg.mag_lock.hard_iron.enabled = track_hard_iron && !baseline_no_track;
+    PoseEstimator baseline(baseline_cfg);
+    uint32_t last_evaluated = 0;
+    double diff_sq = 0.0;
+    double diff_n = 0.0;
+    float diff_max = 0.0f;
+    std::vector<float> diffs;
+    float hold_s = 0.0f;
+    float last_t = 0.0f;
     eval.smoother.configure(smooth_cfg);
     constexpr float kFrameDt = 1.0f / 60.0f;
     float next_frame = -1.0f;
@@ -549,10 +594,59 @@ int main(int argc, char** argv) {
             s.gyro_degs.y += bias_error.y;
             s.gyro_degs.z += bias_error.z;
         }
-        const bool ready = est.add_sample(s);
+        bool ready = false;
+        if (have_inject) {
+            const bool base_ready = baseline.add_sample(s);
+            if (t >= inject_from && t < inject_until) {
+                s.mag_ut.x += inject.x;
+                s.mag_ut.y += inject.y;
+                s.mag_ut.z += inject.z;
+            }
+            const bool ready_inj = est.add_sample(s);
+            if (base_ready && ready_inj && t >= inject_from && t < eval_until) {
+                float d = est.euler().yaw_deg - baseline.euler().yaw_deg;
+                while (d > 180.0f) {
+                    d -= 360.0f;
+                }
+                while (d < -180.0f) {
+                    d += 360.0f;
+                }
+                diff_sq += static_cast<double>(d) * d;
+                diff_n += 1.0;
+                diff_max = std::max(diff_max, std::fabs(d));
+                if ((static_cast<long>(diff_n) % 48) == 0) {
+                    diffs.push_back(std::fabs(d));
+                }
+            }
+            ready = ready_inj;
+        } else {
+            ready = est.add_sample(s);
+        }
         if (!ready) {
             prev_t = -1.0f;
             continue;
+        }
+        {
+            const auto& tr = est.mag_lock().hard_iron_tracker();
+            if (tr.hypothesis_pending() && t > last_t) {
+                hold_s += t - last_t;
+            }
+            last_t = t;
+            const uint32_t events = tr.steps_detected() + tr.hypotheses_adopted() + tr.hypotheses_rejected();
+            if (tracker_log && events != last_evaluated) {
+                last_evaluated = events;
+                const Vec3 st = tr.last_step_ut();
+                const Vec3 hy = tr.hypothesis_ut();
+                const Vec3 off = tr.offset_from_calibration_ut();
+                std::printf("tracker t=%7.1f steps=%u adopted=%u rejected=%u last_step=(%+.2f,%+.2f,%+.2f) |%.2f| "
+                            "pending=%d hyp=(%+.2f,%+.2f,%+.2f) sep=%.2f scale=%.2f(last %.2f) windows=%u "
+                            "off=(%+.2f,%+.2f,%+.2f) |B|=%.1f\n",
+                            t, tr.steps_detected(), tr.hypotheses_adopted(), tr.hypotheses_rejected(), st.x,
+                            st.y, st.z, std::sqrt(st.x * st.x + st.y * st.y + st.z * st.z),
+                            tr.hypothesis_pending() ? 1 : 0, hy.x, hy.y, hy.z, tr.evidence_separation_ut2(),
+                            tr.hypothesis_scale(), tr.last_scale(), tr.windows_evaluated(), off.x, off.y, off.z,
+                            est.mag_lock().field_ut());
+            }
         }
         if (trace) {
             const Vec3 b = est.gyro_bias_degs();
@@ -592,6 +686,15 @@ int main(int argc, char** argv) {
         n_escape += est.adapt_state() == 2 ? 1 : 0;
         sum_dev += est.stillness_degs();
         if (t >= next_print) {
+            if (have_inject) {
+                const auto& tr = est.mag_lock().hard_iron_tracker();
+                std::printf("vs-baseline t=%7.1f dyaw=%+7.2f state=%s/%s pending=%d armed=%d J=%.2f "
+                            "foreign=%u transients=%u\n",
+                            t, e.yaw_deg - baseline.euler().yaw_deg, mag_state_name(est.mag_lock().state()),
+                            mag_state_name(baseline.mag_lock().state()), tr.hypothesis_pending() ? 1 : 0,
+                            tr.step_pending() ? 1 : 0, tr.step_signal_ut(), tr.foreign_steps(),
+                            tr.transients_rejected());
+            }
             const auto& lock = est.mag_lock();
             const Vec3 b = est.gyro_bias_degs();
             std::printf("bias=(%+.3f,%+.3f,%+.3f) adapt=%d still=%d rb=%u ", b.x, b.y, b.z, est.adapt_state(),
@@ -616,6 +719,22 @@ int main(int argc, char** argv) {
     }
     if (eval.enabled) {
         eval.report(kFrameDt);
+    }
+    {
+        const auto& tr = est.mag_lock().hard_iron_tracker();
+        const Vec3 hi = tr.hard_iron_ut();
+        std::printf("hard-iron tracker: %s steps=%u foreign=%u transients=%u adopted=%u rejected=%u lock_steps=%u "
+                    "pending=%.1f s final=(%.2f, %.2f, %.2f)\n",
+                    track_hard_iron ? "on" : "off", tr.steps_detected(), tr.foreign_steps(), tr.transients_rejected(),
+                    tr.hypotheses_adopted(), tr.hypotheses_rejected(), est.mag_lock().hard_iron_steps(), hold_s, hi.x,
+                    hi.y, hi.z);
+    }
+    if (have_inject && diff_n > 0.0) {
+        std::sort(diffs.begin(), diffs.end());
+        const float p95 = diffs.empty() ? 0.0f : diffs[diffs.size() * 95 / 100];
+        std::printf("hard-iron-eval: injected (%.2f, %.2f, %.2f) uT from %.0f s: view yaw vs baseline "
+                    "max %.3f deg, rms %.3f deg, p95 %.3f deg\n",
+                    inject.x, inject.y, inject.z, inject_from, diff_max, std::sqrt(diff_sq / diff_n), p95);
     }
     const Euler e = est.euler();
     std::printf("final yaw=%.3f pitch=%.3f roll=%.3f\n", e.yaw_deg, e.pitch_deg, e.roll_deg);

@@ -74,6 +74,38 @@ bool save_orientation_calibration(const std::string& path, const OrientationCali
                                   std::string& error);
 bool load_orientation_calibration(const std::string& path, std::array<float, 9>& matrix,
                                   std::string& error);
+// Machine-readable progress for a front end driving orientation_calibrate.exe
+// (--progress-json). One line per state change, exactly:
+//   @@progress {"flow":"orientation"|"mag","step":N,"steps":M,
+//               "state":"waiting"|"recording"|"ok"|"retry"|"failed"|"done",
+//               "prompt":"...","detail":"...","quality":Q}
+// with Q in [0, 1] or -1 when not applicable. The final line of a run has
+// state "done" (file written) or "failed". The shape is a contract with the
+// controller's onboarding wizard; extend it only by adding new state values
+// in agreement with that parser, never by changing the existing keys.
+struct CalibrationProgress {
+    std::string flow;   // "orientation" or "mag"
+    int step = 0;       // 1-based
+    int steps = 0;
+    std::string state;  // see above
+    std::string prompt;
+    std::string detail;
+    float quality = -1.0f;
+};
+constexpr const char* kProgressPrefix = "@@progress ";
+std::string format_calibration_progress(const CalibrationProgress& progress);
+
+// Heuristic 0..1 quality scores for guidance (not acceptance gates; the gates
+// in calibrate_orientation / fit_mag_hard_iron decide pass/fail).
+// Still: 1 at a motionless head, 0 at the 1.5 deg/s rejection limit.
+float still_quality(float gyro_rms_degs);
+// Motion step: geometric mean of axis purity (dominance against its 4.0 gate)
+// and excursion (12 deg gate, full marks from 25 deg).
+float axis_quality(const CalibrationAxisDiagnostics& axis);
+// Whole calibration: mean headroom of the four cross-axis consistency checks
+// against their rejection limits (1 = perfectly consistent axes).
+float orientation_quality(const OrientationCalibrationResult& result);
+
 // Optional magnetometer calibration stored in the same file. A missing key is
 // not an error (returns true with mag.valid == false).
 bool load_mag_calibration(const std::string& path, MagCalibration& mag, std::string& error);

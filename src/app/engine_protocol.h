@@ -96,6 +96,14 @@ inline constexpr const char* kStatusKeyDetached = "detached";
 inline constexpr const char* kStatusKeyElapsed = "elapsed_s";
 inline constexpr const char* kStatusKeyUpdated = "updated_unix";
 inline constexpr const char* kStatusKeyError = "error";
+// Magnetometer heading lock (optional keys; older controllers ignore them):
+// mag = off | acquiring | locked | disturbed | relearning ("off" also when
+// there is no magnetometer calibration), mag_error_deg = current heading
+// disagreement, mag_offset_ut = how far online hard-iron tracking has moved
+// the offset from the stored calibration (0 when tracking is off).
+inline constexpr const char* kStatusKeyMag = "mag";
+inline constexpr const char* kStatusKeyMagError = "mag_error_deg";
+inline constexpr const char* kStatusKeyMagOffset = "mag_offset_ut";
 
 inline constexpr const char* kStatusStarting = "starting";
 inline constexpr const char* kStatusReady = "ready";
