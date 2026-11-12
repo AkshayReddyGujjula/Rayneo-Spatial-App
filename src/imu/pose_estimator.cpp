@@ -484,7 +484,11 @@ void PoseEstimator::apply_mag_heading(const ImuSample& sample, float dt) {
                        sample.mag_ut.y != last_mag_raw_.y || sample.mag_ut.z != last_mag_raw_.z;
     last_mag_raw_ = sample.mag_ut;
     have_last_mag_ = true;
-    const Vec3 head_field = map_mag(mag_to_package(sample.mag_ut, cfg_.mag_calibration));
+    // The lock's online hard-iron tracker may refine the stored offset (it
+    // returns the stored one unchanged when tracking is disabled).
+    MagCalibration calibration = cfg_.mag_calibration;
+    calibration.hard_iron_ut = mag_lock_.track_hard_iron(sample, bias_degs_, cfg_.mag_calibration);
+    const Vec3 head_field = map_mag(mag_to_package(sample.mag_ut, calibration));
     const Quat q = filter_.orientation();
     const Vec3 earth_field = quat_rotate_vec(q, head_field);
     const float yaw_rad = mag_lock_.update(earth_field, fresh, corrected_rate_degs_, dt);

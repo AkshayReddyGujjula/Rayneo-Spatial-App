@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace gt {
 namespace {
@@ -328,6 +329,485 @@ MagFitResult fit_mag_hard_iron(const std::vector<ImuSample>& samples, const Vec3
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// MagHardIronTracker
+
+void MagHardIronTracker::configure(const Config& cfg, const Vec3& calibrated_hard_iron_ut) {
+    cfg_ = cfg;
+    calibration_ = calibrated_hard_iron_ut;
+    reset();
+}
+
+void MagHardIronTracker::reset() {
+    hard_iron_ = calibration_;
+    have_tick_ = false;
+    have_mag_ = false;
+    have_estimates_ = false;
+    step_armed_ = false;
+    step_time_s_ = 0.0;
+    last_step_ = Vec3{};
+    last_scale_ = 1.0f;
+    have_hypothesis_ = false;
+    hypothesis_ = Vec3{};
+    hypothesis_age_s_ = 0.0;
+    evidence_sep_ = 0.0;
+    evidence_gain_ = 0.0;
+    reset_windows();
+    steps_ = 0;
+    transients_ = 0;
+    foreign_steps_ = 0;
+    adopted_ = 0;
+    rejected_ = 0;
+    windows_used_ = 0;
+}
+
+void MagHardIronTracker::reset_windows() {
+    for (Window& w : windows_) {
+        w = Window{};
+    }
+    since_start_s_ = cfg_.hop_s;  // start one on the next sample
+}
+
+Vec3 MagHardIronTracker::offset_from_calibration_ut() const {
+    return Vec3{hard_iron_.x - calibration_.x, hard_iron_.y - calibration_.y, hard_iron_.z - calibration_.z};
+}
+
+float MagHardIronTracker::hypothesis_scale() const {
+    // Least-squares scale along the step, shrunk toward the step as measured
+    // (scale 1) by a prior worth scale_prior_ut2 of separation.
+    const double a = 1.0 + evidence_gain_ / (evidence_sep_ + static_cast<double>(cfg_.scale_prior_ut2));
+    return static_cast<float>(std::max(0.0, std::min(static_cast<double>(cfg_.max_scale), a)));
+}
+
+MagHardIronTracker::Event MagHardIronTracker::add_sample(const ImuSample& s, const Vec3& gyro_bias_degs,
+                                                         float reference_field_ut) {
+    if (!cfg_.enabled) {
+        return Event::none;
+    }
+    double dt = 0.0;
+    if (have_tick_) {
+        dt = static_cast<double>(s.tick_100us - last_tick_) * 1e-4;
+        if (dt <= 0.0 || dt >= 0.05) {
+            // A gap breaks the rotation compensation and the window attitude:
+            // restart both (a pending hypothesis keeps its evidence).
+            have_estimates_ = false;
+            step_armed_ = false;
+            reset_windows();
+            dt = 0.0;
+        }
+    }
+    have_tick_ = true;
+    last_tick_ = s.tick_100us;
+
+    const bool finite = std::isfinite(s.mag_ut.x) && std::isfinite(s.mag_ut.y) && std::isfinite(s.mag_ut.z);
+    const bool fresh = finite && (!have_mag_ || s.mag_ut.x != last_mag_.x || s.mag_ut.y != last_mag_.y ||
+                                  s.mag_ut.z != last_mag_.z);
+    if (finite) {
+        last_mag_ = s.mag_ut;
+        have_mag_ = true;
+    }
+
+    const double wx = static_cast<double>(s.gyro_degs.x - gyro_bias_degs.x);
+    const double wy = static_cast<double>(s.gyro_degs.y - gyro_bias_degs.y);
+    const double wz = static_cast<double>(s.gyro_degs.z - gyro_bias_degs.z);
+    const double rate = std::sqrt(wx * wx + wy * wy + wz * wz);
+    const bool slow_head = rate <= cfg_.max_rate_degs;
+    const Mat3d step = rotvec_to_mat(wx * kRadPerDeg * dt, wy * kRadPerDeg * dt, wz * kRadPerDeg * dt);
+    const double centred[3] = {s.mag_ut.x - hard_iron_.x, s.mag_ut.y - hard_iron_.y, s.mag_ut.z - hard_iron_.z};
+    // Package-frame field, P (m - c).
+    double mp[3];
+    for (int i = 0; i < 3; ++i) {
+        mp[i] = kMagToPackage[static_cast<size_t>(i * 3)] * centred[0] +
+                kMagToPackage[static_cast<size_t>(i * 3 + 1)] * centred[1] +
+                kMagToPackage[static_cast<size_t>(i * 3 + 2)] * centred[2];
+    }
+
+    since_fresh_s_ += dt;
+    Event event = Event::none;
+
+    // --- Step detector -----------------------------------------------------
+    if (have_estimates_ && dt > 0.0) {
+        // An earth-fixed vector seen from a frame that rotated by `step`:
+        // f <- step^T f.
+        double f[3];
+        double g[3];
+        for (int i = 0; i < 3; ++i) {
+            f[i] = step.m[0][i] * fast_[0] + step.m[1][i] * fast_[1] + step.m[2][i] * fast_[2];
+            g[i] = step.m[0][i] * slow_[0] + step.m[1][i] * slow_[1] + step.m[2][i] * slow_[2];
+        }
+        for (int i = 0; i < 3; ++i) {
+            fast_[i] = f[i];
+            slow_[i] = g[i];
+        }
+    }
+    if (fresh) {
+        const double interval = since_fresh_s_;
+        since_fresh_s_ = 0.0;
+        if (!have_estimates_) {
+            for (int i = 0; i < 3; ++i) {
+                fast_[i] = mp[i];
+                slow_[i] = mp[i];
+            }
+            have_estimates_ = true;
+        } else if (slow_head) {
+            // Gains from the actual interval since the previous reading, so
+            // the time constants hold at any magnetometer rate.
+            const double kf = 1.0 - std::exp(-interval / static_cast<double>(cfg_.fast_tau_s));
+            for (int i = 0; i < 3; ++i) {
+                fast_[i] += (mp[i] - fast_[i]) * kf;
+            }
+            if (!step_armed_) {
+                const double ks = 1.0 - std::exp(-interval / static_cast<double>(cfg_.slow_tau_s));
+                for (int i = 0; i < 3; ++i) {
+                    slow_[i] += (mp[i] - slow_[i]) * ks;
+                }
+            }
+        }
+    }
+    if (have_estimates_) {
+        const double j[3] = {fast_[0] - slow_[0], fast_[1] - slow_[1], fast_[2] - slow_[2]};
+        const double jn = std::sqrt(j[0] * j[0] + j[1] * j[1] + j[2] * j[2]);
+        if (!step_armed_) {
+            if (jn > cfg_.step_watch_ut && slow_head) {
+                step_armed_ = true;
+                step_time_s_ = 0.0;
+                armed_total_s_ = 0.0;
+                for (int i = 0; i < 3; ++i) {
+                    step_ref_[i] = j[i];
+                }
+            }
+        } else if (jn < cfg_.step_off_ut) {
+            // Fell back before confirming: a transient. The slow estimate was
+            // frozen, so it never absorbed it.
+            step_armed_ = false;
+            ++transients_;
+        } else if ((armed_total_s_ += dt) > cfg_.max_armed_s) {
+            // Never settled into a stable step: a field that keeps changing.
+            // Hand it back to the lock's gates and follow it here.
+            step_armed_ = false;
+            ++foreign_steps_;
+            for (int i = 0; i < 3; ++i) {
+                slow_[i] = fast_[i];
+            }
+        } else {
+            const double dx = j[0] - step_ref_[0];
+            const double dy = j[1] - step_ref_[1];
+            const double dz = j[2] - step_ref_[2];
+            if (std::sqrt(dx * dx + dy * dy + dz * dz) > cfg_.step_stability_ut) {
+                // Still ramping (or moving): restart the confirmation.
+                for (int i = 0; i < 3; ++i) {
+                    step_ref_[i] = j[i];
+                }
+                step_time_s_ = 0.0;
+            } else if (slow_head) {
+                step_time_s_ += dt;
+            }
+            if (step_time_s_ >= cfg_.step_confirm_s && jn < cfg_.step_on_ut) {
+                // Settled, but below the step threshold (the remains of a
+                // transient, or a slow drift): absorb it, it is not a step.
+                step_armed_ = false;
+                ++transients_;
+                for (int i = 0; i < 3; ++i) {
+                    slow_[i] = fast_[i];
+                }
+            } else if (step_time_s_ >= cfg_.step_confirm_s) {
+                // Confirmed step. In raw magnetometer axes (P is a rotation,
+                // so its inverse is its transpose).
+                const Vec3 h{static_cast<float>(kMagToPackage[0] * j[0] + kMagToPackage[3] * j[1] +
+                                                kMagToPackage[6] * j[2]),
+                             static_cast<float>(kMagToPackage[1] * j[0] + kMagToPackage[4] * j[1] +
+                                                kMagToPackage[7] * j[2]),
+                             static_cast<float>(kMagToPackage[2] * j[0] + kMagToPackage[5] * j[1] +
+                                                kMagToPackage[8] * j[2])};
+                last_step_ = h;
+                step_armed_ = false;
+                const float hn = std::sqrt(h.x * h.x + h.y * h.y + h.z * h.z);
+                const double before = std::sqrt(slow_[0] * slow_[0] + slow_[1] * slow_[1] + slow_[2] * slow_[2]);
+                const double after = std::sqrt(fast_[0] * fast_[0] + fast_[1] * fast_[1] + fast_[2] * fast_[2]);
+                const double ref = reference_field_ut;
+                const Vec3 next{hard_iron_.x + h.x, hard_iron_.y + h.y, hard_iron_.z + h.z};
+                const float ox = next.x - calibration_.x;
+                const float oy = next.y - calibration_.y;
+                const float oz = next.z - calibration_.z;
+                const bool plausible =
+                    hn <= cfg_.max_step_ut && std::sqrt(ox * ox + oy * oy + oz * oz) <= cfg_.max_offset_ut &&
+                    (ref <= 0.0 || (std::fabs(before - ref) <= cfg_.pre_step_field_tolerance * ref &&
+                                    std::fabs(after - ref) <= cfg_.post_step_field_tolerance * ref));
+                if (!plausible) {
+                    // Too large, or into/out of a foreign field: not an
+                    // earbud-sized head-fixed change. The lock's own
+                    // disturbance gates own it; follow it here so it is not
+                    // re-detected.
+                    ++foreign_steps_;
+                    for (int i = 0; i < 3; ++i) {
+                        slow_[i] = fast_[i];
+                    }
+                } else {
+                    ++steps_;
+                    // Provisionally head-fixed: fold it into the offset now, so
+                    // the field the lock sees (and its heading) is continuous
+                    // across the step. In the new offset's frame the field
+                    // estimates are the pre-step value.
+                    hard_iron_ = next;
+                    for (int i = 0; i < 3; ++i) {
+                        fast_[i] = slow_[i];
+                    }
+                    // Compose with a pending hypothesis (an earbud out and back
+                    // in again cancels).
+                    Vec3 combined = h;
+                    if (have_hypothesis_) {
+                        combined = Vec3{hypothesis_.x + h.x, hypothesis_.y + h.y, hypothesis_.z + h.z};
+                    }
+                    const float cn =
+                        std::sqrt(combined.x * combined.x + combined.y * combined.y + combined.z * combined.z);
+                    hypothesis_ = combined;
+                    have_hypothesis_ = true;
+                    hypothesis_age_s_ = 0.0;
+                    evidence_sep_ = 0.0;
+                    evidence_gain_ = 0.0;
+                    reset_windows();
+                    if (cn < cfg_.step_off_ut) {
+                        // Out and back in again (or a field that came and
+                        // went): restore the offset exactly as it was.
+                        revert_hypothesis();
+                    }
+                    event = Event::step;
+                }
+            }
+        }
+    }
+
+    // --- Hypothesis test windows ----------------------------------------------
+    if (!have_hypothesis_) {
+        return event;
+    }
+    hypothesis_age_s_ += dt;
+    const bool use_row = fresh && slow_head;
+    const double h[3] = {hypothesis_.x, hypothesis_.y, hypothesis_.z};
+    for (Window& w : windows_) {
+        if (!w.active) {
+            continue;
+        }
+        if (dt > 0.0) {
+            Mat3d att{};
+            for (int i = 0; i < 3; ++i) {
+                for (int k = 0; k < 3; ++k) {
+                    att.m[i][k] = w.att[i][k];
+                }
+            }
+            att = mat_mul(att, step);
+            for (int i = 0; i < 3; ++i) {
+                for (int k = 0; k < 3; ++k) {
+                    w.att[i][k] = att.m[i][k];
+                }
+            }
+            w.elapsed_s += dt;
+        }
+        if (use_row) {
+            // M = att * P, y = M (m - c).
+            double m[3][3];
+            for (int i = 0; i < 3; ++i) {
+                for (int k = 0; k < 3; ++k) {
+                    m[i][k] = w.att[i][0] * kMagToPackage[static_cast<size_t>(k)] +
+                              w.att[i][1] * kMagToPackage[static_cast<size_t>(3 + k)] +
+                              w.att[i][2] * kMagToPackage[static_cast<size_t>(6 + k)];
+                }
+            }
+            double y[3];
+            for (int i = 0; i < 3; ++i) {
+                y[i] = m[i][0] * centred[0] + m[i][1] * centred[1] + m[i][2] * centred[2];
+            }
+            for (int i = 0; i < 3; ++i) {
+                for (int k = 0; k < 3; ++k) {
+                    w.m_sum[i][k] += m[i][k];
+                }
+                w.mty[i] += m[0][i] * y[0] + m[1][i] * y[1] + m[2][i] * y[2];
+                w.y_sum[i] += y[i];
+                w.yy += y[i] * y[i];
+            }
+            ++w.rows;
+        }
+        if (w.elapsed_s >= cfg_.window_s) {
+            const Window finished = w;
+            w.active = false;
+            close_window(finished, reference_field_ut);
+        }
+    }
+    (void)h;
+    if (event == Event::none) {
+        event = decide();
+    }
+    if (!have_hypothesis_) {
+        return event;
+    }
+    since_start_s_ += dt;
+    if (since_start_s_ >= cfg_.hop_s) {
+        for (Window& w : windows_) {
+            if (!w.active) {
+                w = Window{};
+                w.active = true;
+                since_start_s_ = 0.0;
+                break;
+            }
+        }
+    }
+    return event;
+}
+
+void MagHardIronTracker::close_window(const Window& w, float reference_field_ut) {
+    const double min_rows = static_cast<double>(cfg_.min_fill) * static_cast<double>(cfg_.window_s) * 50.0;
+    if (w.rows < 3 || static_cast<double>(w.rows) < min_rows) {
+        return;
+    }
+    const double n = static_cast<double>(w.rows);
+    double mbar[3][3];
+    for (int i = 0; i < 3; ++i) {
+        for (int k = 0; k < 3; ++k) {
+            mbar[i][k] = w.m_sum[i][k] / n;
+        }
+    }
+    const double h[3] = {hypothesis_.x, hypothesis_.y, hypothesis_.z};
+    const double ybar[3] = {w.y_sum[0] / n, w.y_sum[1] / n, w.y_sum[2] / n};
+    // g = sum (M_t - Mbar)^T (y_t - ybar) = mty - n Mbar^T ybar.
+    double g[3];
+    for (int i = 0; i < 3; ++i) {
+        g[i] = w.mty[i] - n * (mbar[0][i] * ybar[0] + mbar[1][i] * ybar[1] + mbar[2][i] * ybar[2]);
+    }
+    // h^T S h with S = I - Mbar^T Mbar: |h|^2 - |Mbar h|^2.
+    double mh[3];
+    for (int i = 0; i < 3; ++i) {
+        mh[i] = mbar[i][0] * h[0] + mbar[i][1] * h[1] + mbar[i][2] * h[2];
+    }
+    const double sep = std::max(0.0, h[0] * h[0] + h[1] * h[1] + h[2] * h[2] -
+                                         (mh[0] * mh[0] + mh[1] * mh[1] + mh[2] * mh[2]));
+    const double hg = (h[0] * g[0] + h[1] * g[1] + h[2] * g[2]) / n;
+    const double var0 = std::max(0.0, w.yy / n - (ybar[0] * ybar[0] + ybar[1] * ybar[1] + ybar[2] * ybar[2]));
+    // The offset already includes h (provisional). The alternative is
+    // reverting it, i.e. a change of -h: residual var0 + 2 hg + sep.
+    const double var_revert = std::max(0.0, var0 + 2.0 * hg + sep);
+    // A field that was not constant under either hypothesis (a moving
+    // magnet) carries no information about c.
+    if (std::sqrt(std::min(var0, var_revert) / 3.0) > cfg_.max_residual_ut) {
+        return;
+    }
+    if (reference_field_ut > 0.0f) {
+        const double b0 = std::sqrt(ybar[0] * ybar[0] + ybar[1] * ybar[1] + ybar[2] * ybar[2]);
+        const double br[3] = {ybar[0] + mh[0], ybar[1] + mh[1], ybar[2] + mh[2]};
+        const double brn = std::sqrt(br[0] * br[0] + br[1] * br[1] + br[2] * br[2]);
+        const double tol = static_cast<double>(cfg_.field_tolerance) * reference_field_ut;
+        if (std::fabs(b0 - reference_field_ut) > tol && std::fabs(brn - reference_field_ut) > tol) {
+            return;
+        }
+    }
+    ++windows_used_;
+    // One degree of freedom: the offset c_before + a h. Relative to the
+    // current (a = 1) the residual is var0 - 2 (a - 1) hg + (a - 1)^2 sep, so
+    // the least-squares a is 1 + sum(hg) / sum(sep): 1 when the step was
+    // head-fixed and measured exactly, 0 when it was earth-fixed.
+    evidence_sep_ += sep;
+    evidence_gain_ += hg;
+}
+
+void MagHardIronTracker::revert_hypothesis() {
+    hard_iron_ = Vec3{hard_iron_.x - hypothesis_.x, hard_iron_.y - hypothesis_.y, hard_iron_.z - hypothesis_.z};
+    // The package-frame field estimates move by +P h in the restored frame.
+    const double h[3] = {hypothesis_.x, hypothesis_.y, hypothesis_.z};
+    for (int i = 0; i < 3; ++i) {
+        const double ph = kMagToPackage[static_cast<size_t>(i * 3)] * h[0] +
+                          kMagToPackage[static_cast<size_t>(i * 3 + 1)] * h[1] +
+                          kMagToPackage[static_cast<size_t>(i * 3 + 2)] * h[2];
+        fast_[i] += ph;
+        slow_[i] += ph;
+    }
+    have_hypothesis_ = false;
+    reset_windows();
+}
+
+MagHardIronTracker::Event MagHardIronTracker::decide() {
+    if (!have_hypothesis_) {
+        return Event::none;
+    }
+    if (evidence_sep_ >= cfg_.decide_separation_ut2) {
+        const float a = hypothesis_scale();
+        last_scale_ = a;
+        if (a < cfg_.revert_below_scale) {
+            // Earth-fixed: back to the previous offset; the lock's own gates
+            // treat the change as they always did.
+            revert_hypothesis();
+            ++rejected_;
+            return Event::rejected;
+        }
+        // Head-fixed: refine the provisional offset to c_before + a h.
+        const double k = static_cast<double>(a) - 1.0;
+        const double adj[3] = {k * hypothesis_.x, k * hypothesis_.y, k * hypothesis_.z};
+        hard_iron_ = Vec3{hard_iron_.x + static_cast<float>(adj[0]), hard_iron_.y + static_cast<float>(adj[1]),
+                          hard_iron_.z + static_cast<float>(adj[2])};
+        for (int i = 0; i < 3; ++i) {
+            const double pa = kMagToPackage[static_cast<size_t>(i * 3)] * adj[0] +
+                              kMagToPackage[static_cast<size_t>(i * 3 + 1)] * adj[1] +
+                              kMagToPackage[static_cast<size_t>(i * 3 + 2)] * adj[2];
+            fast_[i] -= pa;
+            slow_[i] -= pa;
+        }
+        have_hypothesis_ = false;
+        reset_windows();
+        ++adopted_;
+        return Event::adopted;
+    }
+    if (hypothesis_age_s_ >= cfg_.hypothesis_timeout_s) {
+        // Never enough rotation to tell: keep the step as measured (with
+        // so little rotation the choice barely affects the heading).
+        have_hypothesis_ = false;
+        reset_windows();
+        return Event::expired;
+    }
+    return Event::none;
+}
+
+// ---------------------------------------------------------------------------
+// MagHeadingLock
+
+const char* mag_state_name(MagHeadingLock::State state) {
+    switch (state) {
+        case MagHeadingLock::State::off:
+            return "off";
+        case MagHeadingLock::State::acquiring:
+            return "acquiring";
+        case MagHeadingLock::State::locked:
+            return "locked";
+        case MagHeadingLock::State::disturbed:
+            return "disturbed";
+        case MagHeadingLock::State::relearning:
+            return "relearning";
+    }
+    return "off";
+}
+
+Vec3 MagHeadingLock::track_hard_iron(const ImuSample& sample, const Vec3& gyro_bias_degs,
+                                     const MagCalibration& calibration) {
+    if (!cfg_.hard_iron.enabled) {
+        return calibration.hard_iron_ut;
+    }
+    if (!tracker_ready_) {
+        tracker_.configure(cfg_.hard_iron, calibration.hard_iron_ut);
+        tracker_ready_ = true;
+    }
+    // |B| reference: the calibration's (measured over a full turn), else the
+    // lock's once it has one.
+    const float ref_field = calibration.field_ut > 1.0f ? calibration.field_ut
+                                                        : (ref_field_ut_ > 1.0f ? ref_field_ut_ : 0.0f);
+    // A confirmed step is folded into the offset at once, so the heading the
+    // lock sees stays continuous and its reference stays valid: the lock is
+    // never re-referenced from here. (Re-referencing when a step is reverted
+    // as earth-fixed was tried: it removes the pull of a magnet put down on
+    // the desk in simulation, 5.9 -> 1.1 deg, but on the recorded session the
+    // ambiguous real events made the worst injected case 7.6 -> 11.0 deg.)
+    if (tracker_.add_sample(sample, gyro_bias_degs, ref_field) == MagHardIronTracker::Event::step) {
+        ++rebases_;
+    }
+    return tracker_.hard_iron_ut();
+}
+
 void MagHeadingLock::configure(const Config& cfg) {
     cfg_ = cfg;
     reset();
@@ -349,6 +829,8 @@ void MagHeadingLock::reset() {
     since_fresh_s_ = 0.0f;
     reacquisitions_ = 0;
     total_correction_deg_ = 0.0f;
+    tracker_ready_ = false;
+    rebases_ = 0;
 }
 
 void MagHeadingLock::begin_acquire() {
@@ -439,7 +921,10 @@ float MagHeadingLock::update(const Vec3& b, bool fresh, float head_rate_degs, fl
         }
     }
 
-    if (state_ != State::locked || !have_error_ || cfg_.observe_only) {
+    // While the hard-iron tracker confirms a field step the field is suspect:
+    // measure, but apply nothing (a few seconds of gyro-only yaw).
+    const bool suspect = cfg_.hard_iron.enabled && tracker_.step_pending();
+    if (state_ != State::locked || !have_error_ || cfg_.observe_only || suspect) {
         return 0.0f;
     }
     const float kp = 1.0f / cfg_.tau_s;
