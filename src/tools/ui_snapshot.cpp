@@ -328,8 +328,49 @@ struct Shot {
     bool dark;
     std::function<void(gt::AppState&)> setup;
     // Optional pixel check on the finished frame (32-bit top-down BGRA).
-    std::function<void(const std::string&, const gt::AppState&, const uint32_t*)> verify;
+    std::function<void(const std::string&, const gt::AppState&, const uint32_t*,
+                       const std::vector<gt::ui::Hotspot>&)>
+        verify;
 };
+
+// A slider's knob must be where the pointer maps that value: AppWindow
+// turns a press at x into (x - rect.left) / width of the slider's hit rect.
+// The knob's white centre dot is found on the track row and mapped back.
+void check_slider_knob(const std::string& shot, int width, UINT dpi, const uint32_t* bits,
+                       const std::vector<gt::ui::Hotspot>& hotspots, int id, float fraction) {
+    const auto spot = std::find_if(hotspots.begin(), hotspots.end(),
+                                   [id](const gt::ui::Hotspot& h) { return h.id == id; });
+    if (spot == hotspots.end()) {
+        fail(shot, "slider " + std::to_string(id) + " was not painted");
+        return;
+    }
+    const RECT r = spot->full;
+    const int label_h = gt::ui::scale_px(24, dpi);
+    const int cy = r.top + label_h + (r.bottom - r.top - label_h) / 2;
+    const int knob = gt::ui::scale_px(8, dpi);
+    long sum = 0;
+    int count = 0;
+    for (int x = std::max(0, static_cast<int>(r.left) - knob * 2); x < std::min(width, static_cast<int>(r.right) + knob * 2);
+         ++x) {
+        const uint32_t value = bits[static_cast<size_t>(cy) * static_cast<size_t>(width) + static_cast<size_t>(x)];
+        if (((value >> 16) & 0xff) > 245 && ((value >> 8) & 0xff) > 245 && (value & 0xff) > 245) {
+            sum += x;
+            ++count;
+        }
+    }
+    if (count == 0) {
+        fail(shot, "slider " + std::to_string(id) + ": no knob found on the track row");
+        return;
+    }
+    const double centre = static_cast<double>(sum) / count + 0.5;
+    const double mapped = (centre - r.left) / static_cast<double>(r.right - r.left);
+    if (std::fabs(mapped - fraction) * (r.right - r.left) > 1.5) {
+        char buffer[160];
+        std::snprintf(buffer, sizeof(buffer), "slider %d: knob at %.1f px maps to %.3f, painted value %.3f", id,
+                      centre - r.left, mapped, static_cast<double>(fraction));
+        fail(shot, buffer);
+    }
+}
 
 // The sidebar's engine card dot (full sidebar: 20 px in from the card's
 // left edge, vertically centred in the 68 px card) must be drawn in want.
@@ -392,7 +433,7 @@ void render(const Shot& shot, const std::filesystem::path& out_dir) {
     }
     GdiFlush();
     if (shot.verify && bits != nullptr) {
-        shot.verify(shot.name, state, static_cast<const uint32_t*>(bits));
+        shot.verify(shot.name, state, static_cast<const uint32_t*>(bits), hotspots);
     }
 
     // Layout checks.
@@ -681,13 +722,34 @@ std::vector<Shot> shots() {
                             s.engine.set_preview_snapshot(snapshot, false);
                             s.page = failed_page;
                         },
-                        [](const std::string& name, const AppState& s, const uint32_t* bits) {
+                        [](const std::string& name, const AppState& s, const uint32_t* bits, const auto&) {
                             check_status_dot(name, 1280, 800, 96, bits, gt::ui::current_theme(s).error, "the error colour");
                         }});
     }
     list.push_back({"sidebar-stopped-1280x800", 1280, 800, 96, true, page(AppPage::Settings, true, false),
-                    [](const std::string& name, const AppState& s, const uint32_t* bits) {
+                    [](const std::string& name, const AppState& s, const uint32_t* bits, const auto&) {
                         check_status_dot(name, 1280, 800, 96, bits, gt::ui::current_theme(s).text_faint, "faint");
+                    }});
+    // Slider knobs at both ends and the middle sit where a press maps.
+    list.push_back({"comfort-slider-ends-1280x800", 1280, 800, 96, true,
+                    [](AppState& s) {
+                        base_state(s, true);
+                        s.page = AppPage::Comfort;
+                        s.config.comfort.dim_mode = gt::DimMode::Manual;
+                        s.config.comfort.screen_brightness_pct[0] = gt::kComfortMinBrightnessPct;
+                        s.config.comfort.screen_brightness_pct[1] = 100;
+                        s.config.comfort.screen_brightness_pct[2] = (gt::kComfortMinBrightnessPct + 100) / 2;
+                        s.config.comfort.night_tint = true;
+                        s.config.comfort.night_tint_pct = 100;
+                    },
+                    [](const std::string& name, const AppState& s, const uint32_t* bits, const auto& hotspots) {
+                        const int min = gt::kComfortMinBrightnessPct;
+                        for (int i = 0; i < 3; ++i) {
+                            const int pct = s.config.comfort.screen_brightness_pct[static_cast<size_t>(i)];
+                            check_slider_knob(name, 1280, 96, bits, hotspots, gt::kUiBrightnessBase + i,
+                                              static_cast<float>(pct - min) / static_cast<float>(100 - min));
+                        }
+                        check_slider_knob(name, 1280, 96, bits, hotspots, gt::kUiNightTintStrength, 1.0f);
                     }});
     // A broken layout file: the readiness row and the Layout card must not
     // both register the same go-to id (Tab focus would loop between them).
