@@ -67,6 +67,8 @@ enum class HelpTopic {
     HeadingLockStatus,
     SettingsTheme,
     SettingsSetupGuide,
+    EngineMagTrackHardIron,
+    CalibrationEarbuds,
     Count,
 };
 
@@ -254,9 +256,20 @@ inline const wchar_t* help_text(HelpTopic topic) {
                    L"drift sideways. Needs a head calibration first; do it wearing what you "
                    L"normally wear (earbuds included), away from magnets.";
         case HelpTopic::EngineMotionPrediction:
-            return L"Predicts head motion a few milliseconds ahead so the screens lag less "
-                   L"behind fast turns. Turn it off if the view overshoots when you stop. "
-                   L"Takes effect the next time the engine starts.";
+            return L"Shows the world slightly ahead during fast head turns so it keeps up with "
+                   L"your head. Increase if screens trail a quick turn; decrease if they "
+                   L"overshoot when you stop. Has no effect while reading. Applies at the next "
+                   L"start.";
+        case HelpTopic::EngineMagTrackHardIron:
+            return L"Experimental. Earbud magnets move with your head and shift the compass, "
+                   L"which can slowly turn the workspace when you put them in or take them out. "
+                   L"This follows such a change instead. Measured only on recordings, never on "
+                   L"glasses; it can also react to a real field change. Needs a compass "
+                   L"calibration. Applies at the next start.";
+        case HelpTopic::CalibrationEarbuds:
+            return L"Turn on if you are wearing in-ear earbuds for this compass calibration. "
+                   L"Calibrate the way you normally work: their magnets are then part of the "
+                   L"saved offset. It only records that they were in.";
         case HelpTopic::HeadingLockStatus:
             return L"Live state of the magnetic heading lock: Locked holds the centre steady, "
                    L"Disturbed means a nearby magnet or metal is changing the field, "

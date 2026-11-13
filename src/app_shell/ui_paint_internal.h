@@ -53,6 +53,7 @@ enum EngineHelpRow : int {
     kRowCursor = 21,
     kRowPrediction = 22,
     kRowHeadingLock = 23,
+    kRowMagTrack = 24,
 };
 
 // Fixed rows inside kHelpTools.
@@ -66,6 +67,7 @@ enum ToolsHelpRow : int {
     kRowCalMag = 6,
     kRowTheme = 7,
     kRowSetupGuide = 8,
+    kRowCalEarbuds = 9,
 };
 
 // One paint pass: the canvas, the state, fonts/theme, the hotspot sink and

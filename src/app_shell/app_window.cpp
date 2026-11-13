@@ -529,8 +529,12 @@ void AppWindow::on_destroy() {
     KillTimer(hwnd_, kTimerAnimation);
     animation_timer_ = false;
     if (calibration_.active()) {
+        // Graceful first: the tool turns the IMU stream off on "q"/EOF
+        // within a few hundred ms; terminate only if it does not exit.
         calibration_.cancel();
-        calibration_.terminate();
+        if (!calibration_.wait_for_exit(3000)) {
+            calibration_.terminate();
+        }
     }
     tray_.remove();
     release_back_buffer();
@@ -1227,6 +1231,7 @@ void AppWindow::adjust_focused(WPARAM key) {
     const Group groups[] = {{kUiStabiliseBase, kComfortStabiliseLevels},
                             {kUiDimModeBase, kDimModeCount},
                             {kUiThemeBase, kThemeModeCount},
+                            {kUiPredictBase, kPredictMsChoiceCount},
                             {kUiEditor2D, 2}};
     for (const Group& group : groups) {
         if (focus >= group.base && focus < group.base + group.count && (key == VK_LEFT || key == VK_RIGHT)) {
@@ -1464,12 +1469,16 @@ void AppWindow::execute(int id, int arg) {
             state_.editor_3d = id == kUiEditor3D;
             invalidate();
             return;
-        case kUiMotionPrediction:
-            state_.config.engine.motion_prediction = !state_.config.engine.motion_prediction;
+        case kUiMagTrackHardIron:
+            state_.config.engine.mag_track_hard_iron = !state_.config.engine.mag_track_hard_iron;
             save_comfort(state_);
-            state_.show_toast(state_.config.engine.motion_prediction
-                                  ? L"Motion prediction on; applies the next time the engine starts"
-                                  : L"Motion prediction off; applies the next time the engine starts");
+            state_.show_toast(state_.config.engine.mag_track_hard_iron
+                                  ? L"Earbud magnet compensation on; applies the next time the engine starts"
+                                  : L"Earbud magnet compensation off; applies the next time the engine starts");
+            invalidate();
+            return;
+        case kUiCalEarbuds:
+            state_.cal_earbuds = !state_.cal_earbuds;
             invalidate();
             return;
         case kUiCalHeadStart:
@@ -1499,9 +1508,14 @@ void AppWindow::execute(int id, int arg) {
             if (!state_.paths.calibration_tool_found) {
                 state_.set_banner(L"orientation_calibrate.exe was not found next to this app",
                                   Severity::Error);
-            } else if (state_.engine.launch_tool(state_.paths.calibration_executable,
-                                                 {"--mag", "--output", narrow_utf8(state_.paths.calibration_path)},
-                                                 tool_error)) {
+            } else if (state_.engine.launch_tool(
+                           state_.paths.calibration_executable,
+                           state_.cal_earbuds
+                               ? std::vector<std::string>{"--mag", "--earbuds", "--output",
+                                                          narrow_utf8(state_.paths.calibration_path)}
+                               : std::vector<std::string>{"--mag", "--output",
+                                                          narrow_utf8(state_.paths.calibration_path)},
+                           tool_error)) {
                 state_.show_toast(L"Compass calibration started in its own console window");
                 add_event(L"launched orientation_calibrate.exe --mag in a console window");
             } else {
@@ -1512,6 +1526,16 @@ void AppWindow::execute(int id, int arg) {
             return;
         default:
             break;
+    }
+    if (id >= kUiPredictBase && id < kUiPredictBase + kPredictMsChoiceCount) {
+        state_.config.engine.predict_ms = kPredictMsChoices[id - kUiPredictBase];
+        save_comfort(state_);
+        state_.show_toast(state_.config.engine.predict_ms == 0
+                              ? std::wstring(L"Turn prediction off; applies the next time the engine starts")
+                              : L"Turn prediction " + std::to_wstring(state_.config.engine.predict_ms) +
+                                    L" ms; applies the next time the engine starts");
+        invalidate();
+        return;
     }
     if (id >= kUiStabiliseBase && id < kUiStabiliseBase + kComfortStabiliseLevels) {
         state_.config.comfort.stabilise_level = id - kUiStabiliseBase;
@@ -1812,13 +1836,11 @@ void AppWindow::start_calibration(CalFlow flow) {
         invalidate();
         return;
     }
-    std::vector<std::string> arguments{"--progress-json", "--output",
-                                       narrow_utf8(state_.paths.calibration_path)};
-    if (flow == CalFlow::Mag) {
-        arguments.insert(arguments.begin(), "--mag");
-    }
+    const std::vector<std::string> arguments =
+        calibration_tool_arguments(flow, narrow_utf8(state_.paths.calibration_path), state_.cal_earbuds);
     state_.cal_in_wizard = state_.onboarding.active;
-    state_.cal_run.begin(flow);
+    state_.cal_run.begin(flow, true, static_cast<double>(kCalAutoDelayS));
+    state_.cal_run.state_since_s = state_.now_s;
     std::string error;
     if (!calibration_.start(state_.paths.calibration_executable, arguments, hwnd_, calibration_message_, error)) {
         state_.cal_run.start_failed(error);
@@ -1849,7 +1871,7 @@ void AppWindow::on_calibration_output() {
     state_.now_s = steady_now_s();
     CalibrationRunner::Drain drain = calibration_.take();
     for (const std::string& line : drain.lines) {
-        state_.cal_run.consume_line(line);
+        state_.cal_run.consume_line(line, state_.now_s);
     }
     if (drain.exited) {
         state_.cal_run.process_exited(drain.exit_code);

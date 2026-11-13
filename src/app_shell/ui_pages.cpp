@@ -459,10 +459,14 @@ int tracking_card_head(Ui& ui, int left, int top, int width) {
         {kUiPreviewWithoutHeadTracking, L"Preview without head tracking",
          L"Start preview pins the camera still, for arranging screens at your desk (--no-imu).",
          s.config.preview_without_head_tracking, !busy, kRowNoImu, HelpTopic::EngineNoImu},
-        {kUiMotionPrediction, L"Motion prediction",
-         L"Predicts head motion slightly ahead to reduce lag on fast turns. Applies at the next start.",
-         s.config.engine.motion_prediction, true, kRowPrediction, HelpTopic::EngineMotionPrediction},
+        {kUiMagTrackHardIron, L"Earbud magnet compensation (experimental)",
+         L"Keeps the compass steady when earbuds go in or out. Untested on glasses. Applies at the next "
+         L"start.",
+         s.config.engine.mag_track_hard_iron, true, kRowMagTrack, HelpTopic::EngineMagTrackHardIron},
     };
+    const std::wstring predict_desc =
+        L"Shows the world slightly ahead during fast head turns. Raise it if screens trail a quick turn, "
+        L"lower it if they overshoot. Applies at the next start.";
     // Measure.
     const int text_w = inner_w - ui.px(size::switch_w) - help_mark_width(ui.dpi) - ui.px(space::lg) * 2;
     int rows_h = 0;
@@ -470,9 +474,13 @@ int tracking_card_head(Ui& ui, int left, int top, int width) {
         rows_h += std::max(ui.px(44), ui.px(24) + wrapped_text_height(ui.c.dc(), ui.f.small, text_w, row.description)) +
                   ui.px(space::lg) * 2 + 1;
     }
+    const int predict_desc_h = wrapped_text_height(ui.c.dc(), ui.f.small, text_w, predict_desc);
+    const int predict_h = ui.px(24) + predict_desc_h + ui.px(space::md) + ui.px(size::control) +
+                          ui.px(space::lg) * 2 + 1;
     const std::wstring lock_detail = heading_lock_detail(s.heading_lock);
     const int lock_h = ui.px(24) + wrapped_text_height(ui.c.dc(), ui.f.small, text_w, lock_detail);
-    const int height = pad + ui.px(30) + ui.px(space::sm) + rows_h + std::max(ui.px(44), lock_h) + pad;
+    const int height =
+        pad + ui.px(30) + ui.px(space::sm) + rows_h + predict_h + std::max(ui.px(44), lock_h) + pad;
     RECT frame = rect_of(left, top, width, height);
     card(ui, frame);
     ui.c.text(ui.f.title, ui.t.text, rect_of(left + pad, top + pad, inner_w, ui.px(28)), L"Head tracking");
@@ -482,6 +490,25 @@ int tracking_card_head(Ui& ui, int left, int top, int width) {
         y += switch_row(ui, row.id, left + pad, y, inner_w, row.title, row.description, row.value, row.enabled,
                         kHelpEngine, row.help_row, row.topic);
         y += ui.px(space::lg);
+        ui.c.fill(rect_of(left + pad, y, inner_w, 1), ui.t.border);
+        y += 1;
+    }
+    // Turn prediction (--predict-ms): Off / 20 / 35 / 50 ms.
+    {
+        const int help_w = help_mark_width(ui.dpi);
+        y += ui.px(space::lg);
+        ui.c.text(ui.f.body_strong, ui.t.text, rect_of(left + pad, y, text_w, ui.px(22)), L"Turn prediction");
+        ui.c.text(ui.f.small, ui.t.text_dim, rect_of(left + pad, y + ui.px(24), text_w, predict_desc_h), predict_desc,
+                  DT_LEFT | DT_TOP | DT_WORDBREAK);
+        y += ui.px(24) + predict_desc_h + ui.px(space::md);
+        static const wchar_t* const kNames[kPredictMsChoiceCount] = {L"Off", L"20 ms", L"35 ms", L"50 ms"};
+        RECT seg = rect_of(left + pad, y, std::min(inner_w - help_w - ui.px(space::md), ui.px(420)),
+                           ui.px(size::control));
+        segmented(ui, kUiPredictBase, seg, kNames, kPredictMsChoiceCount,
+                  predict_ms_choice_index(s.config.engine.predict_ms));
+        ui.help(kHelpEngine, kRowPrediction, HelpTopic::EngineMotionPrediction,
+                rect_of(seg.right + ui.px(space::md), y + (rh(seg) - help_w) / 2, help_w, help_w));
+        y += rh(seg) + ui.px(space::lg);
         ui.c.fill(rect_of(left + pad, y, inner_w, 1), ui.t.border);
         y += 1;
     }
@@ -496,6 +523,7 @@ int tracking_card_head(Ui& ui, int left, int top, int width) {
             dot = ui.t.warning;
             break;
         case HeadingLockState::Relearning:
+        case HeadingLockState::Acquiring:
             dot = ui.t.accent;
             break;
         case HeadingLockState::Off:
@@ -512,7 +540,8 @@ int tracking_card_head(Ui& ui, int left, int top, int width) {
     RECT badge = rect_of(frame.right - pad - help_w - ui.px(space::lg) - badge_w, y + ui.px(4), badge_w, ui.px(28));
     draw_badge(ui.c, badge, L"", dot, ui.f.small_strong);
     draw_status_dot(ui.c, badge.left + ui.px(14), (badge.top + badge.bottom) / 2, ui.px(4), dot,
-                    pulse_phase(ui, s.heading_lock == HeadingLockState::Relearning));
+                    pulse_phase(ui, s.heading_lock == HeadingLockState::Relearning ||
+                                        s.heading_lock == HeadingLockState::Acquiring));
     ui.c.text(ui.f.small_strong, dot == ui.t.text_faint ? ui.t.text_dim : dot,
               RECT{badge.left + ui.px(26), badge.top, badge.right - ui.px(10), badge.bottom}, lock_label);
     ui.help(kHelpEngine, kRowHeadingLock, HelpTopic::HeadingLockStatus,
@@ -556,7 +585,14 @@ int tracking_card_calibration(Ui& ui, int left, int top, int width, CalFlow flow
     const int desc_h = wrapped_text_height(ui.c.dc(), ui.f.small, inner_w, description);
     const int blocker_h = blocker.empty() ? 0 : ui.px(space::md) + wrapped_text_height(ui.c.dc(), ui.f.small, inner_w, blocker);
     const int run_h = run_here ? ui.px(space::lg) + paint_calibration_run(ui, left + pad, 0, inner_w, false) : 0;
-    const int height = pad + ui.px(30) + desc_h + ui.px(space::lg) + ui.px(size::control) + blocker_h + run_h + pad;
+    const std::wstring earbuds_desc = L"Turn on if you wear in-ear earbuds for this calibration.";
+    const int earbuds_text_w = inner_w - ui.px(size::switch_w) - help_mark_width(ui.dpi) - ui.px(space::lg) * 2;
+    const int earbuds_h =
+        mag ? std::max(ui.px(44), ui.px(24) + wrapped_text_height(ui.c.dc(), ui.f.small, earbuds_text_w, earbuds_desc)) +
+                  ui.px(space::lg)
+            : 0;
+    const int height =
+        pad + ui.px(30) + desc_h + ui.px(space::lg) + earbuds_h + ui.px(size::control) + blocker_h + run_h + pad;
     RECT frame = rect_of(left, top, width, height);
     card(ui, frame);
     ui.c.text(ui.f.title, ui.t.text, rect_of(left + pad, top + pad, inner_w, ui.px(28)), title);
@@ -567,6 +603,11 @@ int tracking_card_calibration(Ui& ui, int left, int top, int width, CalFlow flow
     ui.c.text(ui.f.small, ui.t.text_dim, rect_of(left + pad, y, inner_w, desc_h), description,
               DT_LEFT | DT_TOP | DT_WORDBREAK);
     y += desc_h + ui.px(space::lg);
+    if (mag) {
+        switch_row(ui, kUiCalEarbuds, left + pad, y, inner_w, L"Earbuds in", earbuds_desc, s.cal_earbuds, !run_active,
+                   kHelpTools, kRowCalEarbuds, HelpTopic::CalibrationEarbuds);
+        y += earbuds_h;
+    }
     const int help_w = help_mark_width(ui.dpi);
     const bool can_start = tool && !busy && !run_active && (!mag || report.calibration_valid);
     int x = left + pad;
@@ -853,12 +894,16 @@ int paint_calibration_run(Ui& ui, int left, int top, int width, bool draw) {
         const float phase = draw ? pulse_phase(ui, true) : -1.0f;
         const std::wstring step_text =
             run.steps > 0 ? format_wide(L"Step %d of %d", std::max(1, run.step), run.steps) : L"Starting";
+        const double countdown = run.countdown_s(ui.s.now_s);
+        const std::wstring countdown_text =
+            countdown > 0.0 ? format_wide(L"Starts in %d s", static_cast<int>(std::ceil(countdown)))
+                            : std::wstring(L"Starting now");
         const wchar_t* state_text = L"Starting";
         COLORREF state_color = t.text_dim;
         if (run.has_event) {
             switch (run.state) {
                 case CalStepState::Waiting:
-                    state_text = L"Waiting for you";
+                    state_text = countdown >= 0.0 ? countdown_text.c_str() : L"Waiting for you";
                     state_color = t.accent;
                     break;
                 case CalStepState::Recording:
@@ -895,9 +940,12 @@ int paint_calibration_run(Ui& ui, int left, int top, int width, bool draw) {
                                         ? wide_from_utf8(run.prompt)
                                         : std::wstring(L"Starting the calibration tool. Put the glasses on.");
         text_block(ui.f.title, t.text, prompt);
-        if (!run.detail.empty()) {
+        if (!run.retry_reason.empty() && run.state != CalStepState::Ok) {
             y += ui.px(space::xs);
-            text_block(ui.f.body, t.text_dim, wide_from_utf8(run.detail));
+            text_block(ui.f.body, t.warning, L"Again: " + wide_from_utf8(run.retry_reason));
+        } else if (!run.detail.empty() && run.state != CalStepState::Waiting) {
+            y += ui.px(space::xs);
+            text_block(ui.f.body, t.text_dim, wide_from_utf8(cal_reason_text(run.detail)));
         }
         if (run.quality >= 0.0f) {
             y += ui.px(space::md);
@@ -916,8 +964,10 @@ int paint_calibration_run(Ui& ui, int left, int top, int width, bool draw) {
         if (draw) {
             int x = left;
             if (run.awaiting_user()) {
+                // --auto: the step starts by itself; this only skips the wait.
                 RECT ready = rect_of(x, y, ui.px(150), ui.px(size::control));
-                button(ui, kUiCalContinue, ready, L"I'm ready", ButtonStyle::Primary, true, glyph::play);
+                button(ui, kUiCalContinue, ready, run.auto_advance ? L"Start now" : L"I'm ready",
+                       ButtonStyle::Primary, true, glyph::play);
                 x = ready.right + ui.px(space::md);
             }
             RECT cancel = rect_of(x, y, ui.px(120), ui.px(size::control));

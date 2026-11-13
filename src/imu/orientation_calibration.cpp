@@ -598,6 +598,25 @@ float clamp01(float v) {
 
 }  // namespace
 
+CalibrationStdinCommand parse_calibration_stdin_line(const std::string& line) {
+    size_t begin = 0;
+    size_t end = line.size();
+    while (begin < end && (line[begin] == ' ' || line[begin] == '\t' || line[begin] == '\r' || line[begin] == '\n')) {
+        ++begin;
+    }
+    while (end > begin && (line[end - 1] == ' ' || line[end - 1] == '\t' || line[end - 1] == '\r' || line[end - 1] == '\n')) {
+        --end;
+    }
+    const std::string text = line.substr(begin, end - begin);
+    if (text.empty()) {
+        return CalibrationStdinCommand::StartNow;
+    }
+    if (text == "q" || text == "Q") {
+        return CalibrationStdinCommand::Cancel;
+    }
+    return CalibrationStdinCommand::None;
+}
+
 std::string format_calibration_progress(const CalibrationProgress& progress) {
     std::string out = kProgressPrefix;
     out += "{\"flow\":";

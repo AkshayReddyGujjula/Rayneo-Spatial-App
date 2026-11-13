@@ -42,7 +42,8 @@ bool build_engine_launch_command(const std::string& engine_executable,
                                  const std::string& telemetry_path, LaunchMode mode,
                                  bool head_tracking, int monitor_index, float fov_deg,
                                  EngineLaunchCommand& command, std::string& error,
-                                 const ViewComfort& comfort = ViewComfort{});
+                                 const ViewComfort& comfort = ViewComfort{},
+                                 const EngineOptions& options = EngineOptions{});
 
 struct EngineStatusFile {
     bool parsed = false;
@@ -59,6 +60,10 @@ struct EngineStatusFile {
     bool detached = false;
     double elapsed_s = 0.0;
     uint64_t updated_unix = 0;
+    // Magnetometer heading lock (optional keys; empty mag = not reported).
+    std::string mag;
+    double mag_error_deg = 0.0;
+    double mag_offset_ut = 0.0;
 };
 
 bool parse_engine_status(const std::string& text, EngineStatusFile& status, std::string& error);
@@ -68,6 +73,10 @@ std::string engine_status_summary(const EngineStatusFile& status);
 // so content older than max_age_s (or from the future, or missing its stamp)
 // is a stale file from a previous run, not live state.
 inline constexpr uint64_t kEngineStatusMaxAgeS = 3;
+// Heading-lock badge state from a status file: Unknown unless the file is
+// parsed, head tracking runs (imu=1) and the "mag" key holds a known value.
+HeadingLockState heading_lock_from_status(const EngineStatusFile& status);
+
 bool engine_status_is_fresh(const EngineStatusFile& status, uint64_t now_unix, uint64_t max_age_s);
 
 }  // namespace gt

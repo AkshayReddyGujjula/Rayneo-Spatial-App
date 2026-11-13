@@ -162,15 +162,88 @@ CalLineKind parse_cal_progress_line(std::string_view line, CalProgressEvent& eve
     return CalLineKind::Progress;
 }
 
-void CalRunState::begin(CalFlow run_flow) {
+std::vector<std::string> calibration_tool_arguments(CalFlow flow, const std::string& output_path,
+                                                    bool earbuds) {
+    std::vector<std::string> arguments{"--progress-json", "--auto", "--auto-delay", std::to_string(kCalAutoDelayS)};
+    if (flow == CalFlow::Mag) {
+        arguments.push_back("--mag");
+        if (earbuds) {
+            arguments.push_back("--earbuds");
+        }
+    }
+    arguments.push_back("--output");
+    arguments.push_back(output_path);
+    return arguments;
+}
+
+std::string cal_reason_text(const std::string& detail) {
+    struct Known {
+        const char* code;
+        const char* text;
+    };
+    static const Known kKnown[] = {
+        {"NO_DEVICE", "The glasses were not found. Connect them by USB and try again."},
+        {"NO_HID", "The USB device layer could not start. Reconnect the glasses and try again."},
+        {"OPEN_FAILED", "The glasses could not be opened. Close other apps using them (the workspace, "
+                        "another calibration) and try again."},
+        {"STREAM_FAILED", "The glasses did not start sending motion data. Close other apps using them, "
+                          "reconnect and try again."},
+        {"NO_ORIENTATION", "Do the head calibration first; the compass calibration builds on it."},
+        {"SAVE_FAILED", "The calibration was measured but could not be saved. Check that the config "
+                        "folder is writable."},
+        {"LOG_FAILED", "The raw calibration log could not be opened."},
+    };
+    const size_t colon = detail.find(": ");
+    if (colon == std::string::npos || colon == 0) {
+        return detail;
+    }
+    const std::string code = detail.substr(0, colon);
+    for (char c : code) {
+        if (!((c >= 'A' && c <= 'Z') || c == '_')) {
+            return detail;
+        }
+    }
+    for (const Known& known : kKnown) {
+        if (code == known.code) {
+            return known.text;
+        }
+    }
+    std::string rest = detail.substr(colon + 2);
+    if (!rest.empty() && rest.front() >= 'a' && rest.front() <= 'z') {
+        rest.front() = static_cast<char>(rest.front() - 'a' + 'A');
+    }
+    return rest;
+}
+
+void CalRunState::begin(CalFlow run_flow, bool auto_mode, double delay_s) {
     *this = CalRunState{};
     flow = run_flow;
     phase = Phase::Running;
+    auto_advance = auto_mode;
+    auto_delay_s = delay_s;
 }
 
-void CalRunState::apply(const CalProgressEvent& event) {
+double CalRunState::countdown_s(double now_s) const {
+    if (!auto_advance || !awaiting_user()) {
+        return -1.0;
+    }
+    return std::max(0.0, auto_delay_s - (now_s - state_since_s));
+}
+
+void CalRunState::apply(const CalProgressEvent& event, double now_s) {
     if (phase != Phase::Running) {
         return;
+    }
+    if (!has_event || event.step != step || event.state != state) {
+        state_since_s = now_s;
+    }
+    if (has_event && event.step != step) {
+        retry_reason.clear();
+    }
+    if (event.state == CalStepState::Retry) {
+        retry_reason = cal_reason_text(event.detail);
+    } else if (event.state == CalStepState::Ok) {
+        retry_reason.clear();
     }
     has_event = true;
     step = event.step;
@@ -186,20 +259,26 @@ void CalRunState::apply(const CalProgressEvent& event) {
     if (event.state == CalStepState::Done) {
         phase = Phase::Succeeded;
     } else if (event.state == CalStepState::Failed) {
+        if (event.detail == "cancelled") {
+            // The tool saw a cancel this window did not send (stdin closed,
+            // console closed): nothing was changed either way.
+            phase = Phase::Cancelled;
+            return;
+        }
         phase = Phase::Failed;
-        failure = !event.detail.empty() ? event.detail
+        failure = !event.detail.empty() ? cal_reason_text(event.detail)
                   : !event.prompt.empty()
                       ? event.prompt
                       : std::string("The calibration tool reported a failure.");
     }
 }
 
-CalLineKind CalRunState::consume_line(const std::string& line) {
+CalLineKind CalRunState::consume_line(const std::string& line, double now_s) {
     CalProgressEvent event;
     std::string error;
     const CalLineKind kind = parse_cal_progress_line(line, event, error);
     if (kind == CalLineKind::Progress) {
-        apply(event);
+        apply(event, now_s);
     } else if (kind == CalLineKind::Malformed) {
         ++malformed_lines;
     } else {
@@ -219,6 +298,13 @@ void CalRunState::process_exited(int exit_code) {
         return;
     }
     phase = Phase::Failed;
+    if (exit_code == 2) {
+        // Exit code 2 = bad arguments: a tool from an older build that does
+        // not know --progress-json / --auto.
+        failure = "This orientation_calibrate.exe does not understand the in-app options (exit code 2). "
+                  "Rebuild or re-stage it together with this app, or use Open in console.";
+        return;
+    }
     failure = "The calibration tool closed before it finished (exit code " +
               std::to_string(exit_code) + ").";
     if (!has_event) {

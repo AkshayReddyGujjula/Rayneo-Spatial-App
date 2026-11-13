@@ -25,6 +25,45 @@ using SteadyClock = std::chrono::steady_clock;
 // Set by Ctrl+C / Ctrl+Break / console close so the recording loops stop and
 // the stream-off guard still runs.
 std::atomic<bool> g_cancel{false};
+// Set by an empty line on a piped stdin in --auto mode: skip the countdown.
+std::atomic<bool> g_start_now{false};
+
+// --auto with a piped stdin (the in-app wizard): a detached watcher reads
+// lines with ReadFile (no CRT stream lock held at exit) and turns "q" or the
+// pipe closing into the normal cancel path, so the stream-off guard runs
+// before the process exits. A console stdin is left alone: Ctrl+C works there.
+void start_stdin_watcher() {
+    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    if (input == nullptr || input == INVALID_HANDLE_VALUE || GetFileType(input) != FILE_TYPE_PIPE) {
+        return;
+    }
+    std::thread([input]() {
+        std::string pending;
+        char buffer[256];
+        for (;;) {
+            DWORD read = 0;
+            if (!ReadFile(input, buffer, sizeof(buffer), &read, nullptr) || read == 0) {
+                g_cancel.store(true);  // the front end closed stdin or went away
+                return;
+            }
+            pending.append(buffer, read);
+            size_t newline = 0;
+            while ((newline = pending.find('\n')) != std::string::npos) {
+                const gt::CalibrationStdinCommand command =
+                    gt::parse_calibration_stdin_line(pending.substr(0, newline));
+                pending.erase(0, newline + 1);
+                if (command == gt::CalibrationStdinCommand::Cancel) {
+                    g_cancel.store(true);
+                } else if (command == gt::CalibrationStdinCommand::StartNow) {
+                    g_start_now.store(true);
+                }
+            }
+            if (pending.size() > 4096) {
+                pending.clear();
+            }
+        }
+    }).detach();
+}
 
 BOOL WINAPI console_handler(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT) {
@@ -104,7 +143,9 @@ void print_usage() {
         "                     the way you normally work so their magnets are absorbed\n"
         "  --progress-json    also print one '@@progress {json}' line per state change\n"
         "  --auto             no keyboard: each step starts after --auto-delay seconds\n"
-        "  --auto-delay S     seconds to read each instruction in --auto mode (default 4)\n"
+        "  --auto-delay S     seconds to read each instruction in --auto mode (default 4);\n"
+        "                     with a piped stdin, an empty line starts the step now and\n"
+        "                     'q' (or closing stdin) cancels like Ctrl+C\n"
         "Exit code 0 = calibration saved, 1 = failed or cancelled, 2 = bad arguments.\n");
 }
 
@@ -210,8 +251,9 @@ bool wait_ready(const Options& options, const Progress& progress, int step, cons
     if (options.auto_advance) {
         std::printf("\n%s\nStarting in %.0f s...\n", prompt.c_str(), options.auto_delay_s);
         std::fflush(stdout);
+        g_start_now.store(false);
         const auto end = SteadyClock::now() + std::chrono::duration<double>(options.auto_delay_s);
-        while (SteadyClock::now() < end) {
+        while (SteadyClock::now() < end && !g_start_now.load()) {
             if (g_cancel.load()) {
                 return false;
             }
@@ -635,6 +677,9 @@ int main(int argc, char** argv) {
         options.output_path = default_output_path();
     }
     SetConsoleCtrlHandler(console_handler, TRUE);
+    if (options.auto_advance) {
+        start_stdin_watcher();
+    }
     const Progress setup(options, options.mag_only ? "mag" : "orientation", options.mag_only ? 2 : 4);
     const char* const kConnectPrompt = "Connect the glasses and try again.";
 

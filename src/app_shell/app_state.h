@@ -94,7 +94,11 @@ enum UiId : int {
     kUiWizardSkipAll = 1453,
     kUiWizardRecheck = 1454,
     kUiWizardPresetKeep = 1459,
-    kUiWizardPresetBase = 1460,  // + LayoutPreset
+    kUiWizardPresetBase = 1460,  // + LayoutPreset (ui_is_wizard covers up to 1475)
+    // Integration of the engine options and calibration flags.
+    kUiPredictBase = 1480,       // + index into kPredictMsChoices (Off/20/35/50 ms)
+    kUiMagTrackHardIron = 1484,  // earbud magnet compensation (--mag-track-hard-iron)
+    kUiCalEarbuds = 1485,        // compass calibration "earbuds in" (--earbuds)
 };
 
 inline bool ui_is_wizard(int id) {
@@ -289,8 +293,9 @@ struct AppState {
     OnboardingFlow onboarding;
     CalRunState cal_run;             // the in-app calibration run, if any
     bool cal_in_wizard = false;      // the run was started from the setup guide
-    // Magnetic heading lock as reported by the engine. Integration point:
-    // set it from the engine status file / telemetry in poll_engine().
+    bool cal_earbuds = false;        // compass calibration recorded with earbuds in
+    // Magnetic heading lock as reported by the engine status file ("mag"),
+    // refreshed by poll_engine(); Unknown while no fresh status exists.
     HeadingLockState heading_lock = HeadingLockState::Unknown;
 
     void add_event(const std::wstring& text);

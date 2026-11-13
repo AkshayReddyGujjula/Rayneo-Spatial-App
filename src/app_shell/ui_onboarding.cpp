@@ -118,8 +118,9 @@ int body_calibration(Ui& ui, int left, int top, int width, CalFlow flow) {
     } else {
         y += paragraph(ui, rect_of(left, y, width, 0), ui.f.body, ui.t.text_dim,
                        L"Put the glasses on and sit upright facing your desk. The guide asks you to hold still, "
-                       L"nod and turn; follow each prompt and press I'm ready when you are set. It takes about "
-                       L"a minute and only replaces the saved calibration if it succeeds.");
+                       L"turn, nod and tilt; each step starts by itself after a short countdown, so you never "
+                       L"need the keyboard. It takes about a minute and only replaces the saved calibration if "
+                       L"it succeeds.");
     }
     y += ui.px(space::lg);
     std::wstring note;
@@ -151,6 +152,13 @@ int body_calibration(Ui& ui, int left, int top, int width, CalFlow flow) {
     }
     const bool can_start = s.paths.calibration_tool_found && !s.engine.busy() && !s.cal_run.running() &&
                            (!mag || report.calibration_valid);
+    if (mag) {
+        y += switch_row(ui, kUiCalEarbuds, left, y, std::min(width, ui.px(620)), L"Earbuds in",
+                        L"Turn on if you are wearing in-ear earbuds now, the way you normally work.",
+                        s.cal_earbuds, !s.cal_run.running(), kHelpTools, kRowCalEarbuds,
+                        HelpTopic::CalibrationEarbuds) +
+             ui.px(space::lg);
+    }
     RECT start = rect_of(left, y, ui.px(230), ui.px(size::control_lg));
     button(ui, mag ? kUiCalMagStart : kUiCalHeadStart, start, mag ? L"Start compass calibration" : L"Start calibration",
            ButtonStyle::Primary, can_start, mag ? glyph::compass : glyph::play);
