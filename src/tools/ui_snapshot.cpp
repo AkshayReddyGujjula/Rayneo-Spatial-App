@@ -15,11 +15,13 @@
 #include "app_shell/ui_cal_guide.h"
 #include "app_shell/ui_help.h"
 #include "app_shell/ui_paint.h"
+#include "app_shell/ui_paint_internal.h"
 #include "app_shell/ui_widgets.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <cstdio>
@@ -127,6 +129,29 @@ void check_contrast() {
                                           std::pair<const char*, COLORREF>{"warning", t.warning},
                                           std::pair<const char*, COLORREF>{"error", t.error}}) {
             report(std::string(name) + " on its badge", color, gt::ui::mix(t.surface, color, tint), 4.5);
+        }
+    }
+}
+
+// Arrangement-editor screen labels keep the angle for the longest id the
+// layout accepts (64 characters) and stay a readable length.
+void check_editor_labels() {
+    std::printf("ui_snapshot: arrangement editor labels\n");
+    for (const std::string& id : {std::string("centre"), std::string(56, 'a'), std::string(64, 'w')}) {
+        gt::ScreenLayout screen;
+        screen.id = id;
+        screen.yaw_deg = -45.0f;
+        const std::wstring label = gt::ui::detail::editor_screen_label(screen);
+        const std::wstring tail = L"-45°";
+        const bool angle = label.size() >= tail.size() && label.compare(label.size() - tail.size(), tail.size(), tail) == 0;
+        std::printf("  [%s] id of %zu chars -> label of %zu chars\n", angle && label.size() <= 32 ? "ok" : "..",
+                    id.size(), label.size());
+        if (!angle) {
+            fail("editor-label", "a " + std::to_string(id.size()) + "-character id loses the angle");
+        }
+        if (label.size() > 32) {
+            fail("editor-label", "a " + std::to_string(id.size()) + "-character id makes a " +
+                                     std::to_string(label.size()) + "-character label");
         }
     }
 }
@@ -326,7 +351,68 @@ struct Shot {
     UINT dpi;
     bool dark;
     std::function<void(gt::AppState&)> setup;
+    // Optional pixel check on the finished frame (32-bit top-down BGRA).
+    std::function<void(const std::string&, const gt::AppState&, const uint32_t*,
+                       const std::vector<gt::ui::Hotspot>&)>
+        verify;
 };
+
+// A slider's knob must be where the pointer maps that value: AppWindow
+// turns a press at x into (x - rect.left) / width of the slider's hit rect.
+// The knob's white centre dot is found on the track row and mapped back.
+void check_slider_knob(const std::string& shot, int width, UINT dpi, const uint32_t* bits,
+                       const std::vector<gt::ui::Hotspot>& hotspots, int id, float fraction) {
+    const auto spot = std::find_if(hotspots.begin(), hotspots.end(),
+                                   [id](const gt::ui::Hotspot& h) { return h.id == id; });
+    if (spot == hotspots.end()) {
+        fail(shot, "slider " + std::to_string(id) + " was not painted");
+        return;
+    }
+    const RECT r = spot->full;
+    const int label_h = gt::ui::scale_px(24, dpi);
+    const int cy = r.top + label_h + (r.bottom - r.top - label_h) / 2;
+    const int knob = gt::ui::scale_px(8, dpi);
+    long sum = 0;
+    int count = 0;
+    for (int x = std::max(0, static_cast<int>(r.left) - knob * 2); x < std::min(width, static_cast<int>(r.right) + knob * 2);
+         ++x) {
+        const uint32_t value = bits[static_cast<size_t>(cy) * static_cast<size_t>(width) + static_cast<size_t>(x)];
+        if (((value >> 16) & 0xff) > 245 && ((value >> 8) & 0xff) > 245 && (value & 0xff) > 245) {
+            sum += x;
+            ++count;
+        }
+    }
+    if (count == 0) {
+        fail(shot, "slider " + std::to_string(id) + ": no knob found on the track row");
+        return;
+    }
+    const double centre = static_cast<double>(sum) / count + 0.5;
+    const double mapped = (centre - r.left) / static_cast<double>(r.right - r.left);
+    if (std::fabs(mapped - fraction) * (r.right - r.left) > 1.5) {
+        char buffer[160];
+        std::snprintf(buffer, sizeof(buffer), "slider %d: knob at %.1f px maps to %.3f, painted value %.3f", id,
+                      centre - r.left, mapped, static_cast<double>(fraction));
+        fail(shot, buffer);
+    }
+}
+
+// The sidebar's engine card dot (full sidebar: 20 px in from the card's
+// left edge, vertically centred in the 68 px card) must be drawn in want.
+void check_status_dot(const std::string& shot, int width, int height, UINT dpi, const uint32_t* bits,
+                      COLORREF want, const char* what) {
+    using gt::ui::scale_px;
+    const int x = scale_px(gt::ui::space::md, dpi) + scale_px(20, dpi);
+    const int card_h = scale_px(68, dpi);
+    const int y = height - scale_px(gt::ui::space::lg, dpi) - card_h + card_h / 2;
+    const uint32_t value = bits[static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)];
+    const int r = static_cast<int>((value >> 16) & 0xff);
+    const int g = static_cast<int>((value >> 8) & 0xff);
+    const int b = static_cast<int>(value & 0xff);
+    if (std::abs(r - GetRValue(want)) > 8 || std::abs(g - GetGValue(want)) > 8 || std::abs(b - GetBValue(want)) > 8) {
+        fail(shot, std::string("sidebar engine dot is not ") + what + " (got " + std::to_string(r) + "," +
+                       std::to_string(g) + "," + std::to_string(b) + ")");
+    }
+}
 
 void render(const Shot& shot, const std::filesystem::path& out_dir) {
     gt::AppState state;
@@ -370,6 +456,9 @@ void render(const Shot& shot, const std::filesystem::path& out_dir) {
         }
     }
     GdiFlush();
+    if (shot.verify && bits != nullptr) {
+        shot.verify(shot.name, state, static_cast<const uint32_t*>(bits), hotspots);
+    }
 
     // Layout checks.
     int interactive = 0;
@@ -404,6 +493,11 @@ void render(const Shot& shot, const std::filesystem::path& out_dir) {
     }
     if (interactive == 0) {
         fail(shot.name, "no interactive elements were painted");
+    }
+    if (state.page == gt::AppPage::Layout && !state.onboarding.active &&
+        std::none_of(hotspots.begin(), hotspots.end(),
+                     [](const gt::ui::Hotspot& h) { return h.id == gt::kUiEditorCanvas; })) {
+        fail(shot.name, "the Layout page painted no arrangement editor");
     }
     std::printf("  [%s] %s: %dx%d @%u%% %s, %d interactive\n", failures == 0 ? "ok" : "..",
                 shot.name.c_str(), shot.width, shot.height, shot.dpi * 100 / 96, shot.dark ? "dark" : "light",
@@ -635,6 +729,82 @@ std::vector<Shot> shots() {
                         s.cal_in_wizard = true;
                         guide_cases()[4].setup(s.cal_run, s.now_s);
                     })});
+    // A run that failed and exited: the sidebar card must say so on every
+    // page (it used to fall back to a grey "Stopped" once the process was
+    // gone, while only Home showed the failure).
+    for (const AppPage failed_page : {AppPage::Home, AppPage::Layout}) {
+        list.push_back({std::string("sidebar-failed-") + (failed_page == AppPage::Home ? "home" : "layout") +
+                            "-1280x800",
+                        1280, 800, 96, true,
+                        [failed_page](AppState& s) {
+                            base_state(s, true);
+                            gt::EngineSnapshot snapshot;
+                            snapshot.state = gt::EngineProcessState::Failed;
+                            snapshot.has_exit_code = true;
+                            snapshot.exit_code = 1;
+                            snapshot.last_error = "engine exited with code 1";
+                            s.engine.set_preview_snapshot(snapshot, false);
+                            s.page = failed_page;
+                        },
+                        [](const std::string& name, const AppState& s, const uint32_t* bits, const auto&) {
+                            check_status_dot(name, 1280, 800, 96, bits, gt::ui::current_theme(s).error, "the error colour");
+                        }});
+    }
+    list.push_back({"sidebar-stopped-1280x800", 1280, 800, 96, true, page(AppPage::Settings, true, false),
+                    [](const std::string& name, const AppState& s, const uint32_t* bits, const auto&) {
+                        check_status_dot(name, 1280, 800, 96, bits, gt::ui::current_theme(s).text_faint, "faint");
+                    }});
+    // Slider knobs at both ends and the middle sit where a press maps.
+    list.push_back({"comfort-slider-ends-1280x800", 1280, 800, 96, true,
+                    [](AppState& s) {
+                        base_state(s, true);
+                        s.page = AppPage::Comfort;
+                        s.config.comfort.dim_mode = gt::DimMode::Manual;
+                        s.config.comfort.screen_brightness_pct[0] = gt::kComfortMinBrightnessPct;
+                        s.config.comfort.screen_brightness_pct[1] = 100;
+                        s.config.comfort.screen_brightness_pct[2] = (gt::kComfortMinBrightnessPct + 100) / 2;
+                        s.config.comfort.night_tint = true;
+                        s.config.comfort.night_tint_pct = 100;
+                    },
+                    [](const std::string& name, const AppState& s, const uint32_t* bits, const auto& hotspots) {
+                        const int min = gt::kComfortMinBrightnessPct;
+                        for (int i = 0; i < 3; ++i) {
+                            const int pct = s.config.comfort.screen_brightness_pct[static_cast<size_t>(i)];
+                            check_slider_knob(name, 1280, 96, bits, hotspots, gt::kUiBrightnessBase + i,
+                                              static_cast<float>(pct - min) / static_cast<float>(100 - min));
+                        }
+                        check_slider_knob(name, 1280, 96, bits, hotspots, gt::kUiNightTintStrength, 1.0f);
+                    }});
+    // A broken layout file: the readiness row and the Layout card must not
+    // both register the same go-to id (Tab focus would loop between them).
+    list.push_back({"home-layout-problem-1280x800", 1280, 800, 96, true, [](AppState& s) {
+                        base_state(s, true);
+                        s.diagnostics.layout_ok = false;
+                        s.diagnostics.layout_detail = L"config/layouts/default.json: screen 2 overlaps screen 1";
+                        s.page = AppPage::Home;
+                    }});
+    // The smallest window the controller allows (760x560 outer, about
+    // 744x521 client), every page, with six user presets: the Layout page
+    // must still paint its editor and inspector.
+    const std::vector<std::string> many_presets = {"triple",      "ultrawide",   "reading-desk",
+                                                   "evening-sofa", "coding-wide", "travel-laptop"};
+    static const char* const kPageNames[] = {"home", "layout", "comfort", "tracking", "diagnostics", "settings"};
+    for (int p = 0; p < gt::kAppPageCount; ++p) {
+        list.push_back({std::string("min-") + kPageNames[p] + "-744x521", 744, 521, 96, true,
+                        [p, many_presets](AppState& s) {
+                            base_state(s, true);
+                            running_state(s);
+                            s.preset_names = many_presets;
+                            s.page = static_cast<AppPage>(p);
+                            s.config.comfort.dim_mode = gt::DimMode::Manual;
+                        }});
+    }
+    list.push_back({"min-layout-1488x1042-200-light", 1488, 1042, 192, false, [many_presets](AppState& s) {
+                        base_state(s, true);
+                        s.preset_names = many_presets;
+                        s.page = AppPage::Layout;
+                        s.layout_dirty = true;
+                    }});
     return list;
 }
 
@@ -747,6 +917,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     check_contrast();
+    check_editor_labels();
     std::printf("ui_snapshot: offscreen renders of the controller UI\n");
     for (const Shot& shot : shots()) {
         if (!only.empty() && shot.name.find(only) == std::string::npos) {

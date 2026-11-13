@@ -343,6 +343,24 @@ EngineView engine_view(const AppState& state, const Theme& theme) {
     return view;
 }
 
+StatusCard status_card(const EngineView& view, const AppState& state, const Theme& theme) {
+    StatusCard card;
+    if (view.busy) {
+        card.label = view.label;
+        card.dot = view.transitional ? theme.warning : theme.ok;
+        card.pulse = view.transitional;
+    } else if (state.engine.snapshot().state == EngineProcessState::Failed) {
+        // The process is gone, but the run failed: say so wherever the
+        // wearer is, not only on Home.
+        card.label = view.label;
+        card.dot = theme.error;
+    } else {
+        card.label = L"Stopped";
+        card.dot = theme.text_faint;
+    }
+    return card;
+}
+
 std::vector<HealthItem> health_items(const AppState& state) {
     const DiagnosticsReport& report = state.diagnostics;
     std::vector<HealthItem> items;
@@ -573,8 +591,9 @@ void paint_sidebar(Ui& ui, const RECT& side) {
     const WidgetState state = ui.ws(kUiStatusCard);
     ui.c.fill_round(status, ui.px(radius::md), mix(t.surface_alt, t.surface_hover, state.hover));
     ui.c.outline_round(status, ui.px(radius::md), 1.0f, t.border);
-    const COLORREF dot = view.busy ? (view.transitional ? t.warning : t.ok) : t.text_faint;
-    const float phase = pulse_phase(ui, view.transitional);
+    const StatusCard shown = status_card(view, ui.s, t);
+    const COLORREF dot = shown.dot;
+    const float phase = pulse_phase(ui, shown.pulse);
     if (compact) {
         draw_status_dot(ui.c, (status.left + status.right) / 2, (status.top + status.bottom) / 2,
                         ui.px(6), dot, phase);
@@ -585,7 +604,7 @@ void paint_sidebar(Ui& ui, const RECT& side) {
                   L"Engine");
         ui.c.text(ui.f.body_strong, t.text,
                   rect_of(status.left + ui.px(36), status.top + ui.px(30), rw(status) - ui.px(44), ui.px(22)),
-                  view.busy ? view.label : std::wstring(L"Stopped"),
+                  shown.label,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
     if (state.focused) {

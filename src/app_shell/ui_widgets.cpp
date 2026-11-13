@@ -372,7 +372,10 @@ void draw_slider(Canvas& canvas, const RECT& rect, const std::wstring& label,
     const int knob_r = canvas.px(8);
     const int track_h = canvas.px(4);
     const int cy = rect.top + label_h + (height_of(rect) - label_h) / 2;
-    RECT track{rect.left + knob_r, cy - track_h / 2, rect.right - knob_r, cy - track_h / 2 + track_h};
+    // The track spans the whole hit rect: the pointer maps x to a value as
+    // (x - rect.left) / width (AppWindow::on_mouse_move), so the knob must sit
+    // exactly there or pressing on it jumps the value.
+    RECT track{rect.left, cy - track_h / 2, rect.right, cy - track_h / 2 + track_h};
     canvas.fill_round(track, track_h / 2, state.enabled ? t.surface_hover : t.surface_alt);
     canvas.outline_round(track, track_h / 2, 1.0f, t.border, 120);
     const float clamped = std::clamp(fraction, 0.0f, 1.0f);
