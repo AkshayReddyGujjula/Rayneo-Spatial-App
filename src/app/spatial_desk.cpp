@@ -1693,9 +1693,11 @@ int wmain(int argc, wchar_t** argv) {
                 const uint32_t reseeds = imu.startup_reseeds();
                 const uint32_t reverts = imu.startup_reverts();
                 if (reseeds != logged_reseeds || reverts != logged_reverts) {
-                    std::printf("  startup confirmation: reseeds=%u reverts=%u bias=(%+.3f,%+.3f,%+.3f)\n",
-                                static_cast<unsigned>(reseeds), static_cast<unsigned>(reverts), bias.x,
-                                bias.y, bias.z);
+                    std::printf("  startup confirmation: reseeds=%u (single-episode %u) reverts=%u "
+                                "bias=(%+.3f,%+.3f,%+.3f)\n",
+                                static_cast<unsigned>(reseeds),
+                                static_cast<unsigned>(imu.startup_episode_reseeds()),
+                                static_cast<unsigned>(reverts), bias.x, bias.y, bias.z);
                     logged_reseeds = reseeds;
                     logged_reverts = reverts;
                 }

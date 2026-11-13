@@ -230,6 +230,7 @@ void ImuSource::run() {
             escape_rollbacks_.store(estimator.escape_rollbacks(), std::memory_order_relaxed);
             startup_reseeds_.store(estimator.startup_reseeds(), std::memory_order_relaxed);
             startup_reverts_.store(estimator.startup_reverts(), std::memory_order_relaxed);
+            startup_episode_reseeds_.store(estimator.startup_episode_reseeds(), std::memory_order_relaxed);
             calibrated_.store(estimator.calibrated(), std::memory_order_relaxed);
             drift_degs_.store(estimator.drift_correction_degs(), std::memory_order_relaxed);
 
