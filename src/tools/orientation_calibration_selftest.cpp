@@ -452,6 +452,8 @@ int main() {
         std::vector<float> errors[3];
         int rejected_runs[3] = {0, 0, 0};
         int outliers_dropped = 0;
+        int split_steps = 0;
+        int split_exact = 0;
         bool proper = true;
         float worst_gravity_deg = 0.0f;
         for (int trial = 0; trial < kTrials; ++trial) {
@@ -482,6 +484,12 @@ int main() {
                 }
                 errors[m].push_back(matrix_angle_deg(out.sensor_to_head, truth));
                 outliers_dropped += out.yaw_repeats.rejected + out.nod_repeats.rejected + out.tilt_repeats.rejected;
+                if (n > 1) {
+                    for (const gt::AxisRepeatStats* st : {&out.yaw_repeats, &out.nod_repeats, &out.tilt_repeats}) {
+                        ++split_steps;
+                        split_exact += st->detected == n && st->usable == n ? 1 : 0;
+                    }
+                }
                 const float det = determinant(out.sensor_to_head);
                 proper = proper && std::fabs(det - 1.0f) < 1e-3f;
                 const Vec3 g = gt::apply_sensor_to_head(out.sensor_to_head, s.samples.front().accel_mps2);
@@ -509,6 +517,11 @@ int main() {
               mean_error[2] / mean_error[0], 0.65f);
         check(p95_error[1] < p95_error[0], "3 gestures/step: lower p95 than single-shot", p95_error[1],
               p95_error[0]);
+        std::printf("  gesture split: %d of %d repeat steps found exactly N usable gestures (pauses at centre "
+                    "random, half with none)\n",
+                    split_exact, split_steps);
+        check(split_exact * 100 >= split_steps * 98, "gestures are split with and without a pause at centre",
+              static_cast<float>(split_exact) / static_cast<float>(split_steps > 0 ? split_steps : 1), 0.98f);
         check(proper, "every averaged result is a proper rotation (det +1)");
         check(worst_gravity_deg < 5.0f, "gravity stays on head +Z (within the up-axis error)",
               worst_gravity_deg, 5.0f);
