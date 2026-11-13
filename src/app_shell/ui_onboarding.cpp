@@ -138,7 +138,7 @@ int body_calibration(Ui& ui, int left, int top, int width, CalFlow flow) {
         note = L"Do the head calibration first; the compass step builds on it.";
         note_severity = Severity::Warning;
     } else if (!mag && report.calibration_valid) {
-        note = L"A valid calibration is already saved. Keep it with Next, or redo it if nodding tilts the screens.";
+        note = L"A valid calibration is already saved. Keep it and continue, or redo it if nodding tilts the screens.";
         note_severity = Severity::Ok;
     }
     if (!note.empty()) {
@@ -283,12 +283,17 @@ void paint_stepper(Ui& ui, int left, int top, int width) {
         }
         if (labels || i == current) {
             const auto step = static_cast<OnboardingStep>(i);
-            const int label_w = ui.px(120);
+            // Centred under its circle; the first and last labels stop at
+            // the stepper's edges, so they line up with their circle's
+            // outer edge instead of drifting into the next gap.
+            HFONT label_font = i == current ? ui.f.small_strong : ui.f.caption;
+            const std::wstring text = onboarding_step_label(step);
+            const int label_w = text_width(ui.c.dc(), label_font, text);
             int label_left = cx - label_w / 2;
-            label_left = std::clamp(label_left, left - ui.px(8), left + width - label_w + ui.px(8));
-            ui.c.text(i == current ? ui.f.small_strong : ui.f.caption, i == current ? ui.t.text : ui.t.text_faint,
-                      rect_of(label_left, cy + r + ui.px(6), label_w, ui.px(18)), onboarding_step_label(step),
-                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            label_left = std::clamp(label_left, left, std::max(left, left + width - label_w));
+            ui.c.text(label_font, i == current ? ui.t.text : ui.t.text_faint,
+                      rect_of(label_left, cy + r + ui.px(6), label_w + 1, ui.px(18)), text,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         }
     }
 }
