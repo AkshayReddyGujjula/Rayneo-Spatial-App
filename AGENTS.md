@@ -103,6 +103,8 @@ calibration), `gt_imu_probe.exe` (protocol probe), plus the test binaries below.
 | 23 | "Looking up tilts the screens right, looking down tilts them left" - only after a recenter, never at startup | `q * conj(q_ref)` with a reference carrying earth heading psi rotates every head axis by psi, so a nod became sin(psi) roll. Startup references come from the accelerometer (psi = 0), hence fine until the first recenter. Field telemetry 2026-09-25: nod-to-roll coupling 2 deg before recenter, 14.5 / 17.9 / 27.4 deg after successive recenters | Reference split `q_ref = H*T` (heading twist about earth Z, tilt remainder); publish `conj(H)*q*conj(T)`. Earth yaw stays pure yaw (bug 2 guard kept). `pose_selftest` nod after +40 deg headed recenter: axis error 39.98 -> 0.002 deg |
 | 24 | Workspace drifts after turning the chair / slow pans (54 deg/min after one turn, replayed) | Rest was judged from gyro *fluctuation* only; a smooth steady turn at ~15 deg/s has low deviation, qualified as rest, and the escape walked the yaw bias 0.43 -> 1.5 (clamp) -> -0.49 deg/s | Raw-rate ceiling on rest (3 deg/s, motion above 4; the in-band bias norm bound 2.6 + margin, a RAW gate so it cannot lock out; exempt during startup calibration). `pose_selftest` two 360 deg turns out and back: 5.23 -> 0.52 deg; replay of the recording keeps bias at 0.43 |
 | 25 | Small-text reading still swam with the 1-euro on; any sub-0.04 deg smoothing decision was blind | `2 * acos(w)` in float cannot resolve rotations below ~0.04 deg (w rounds to 1), so the 1-euro speed estimate moved in 2.4 deg/s steps at 60 Hz; separately the frame-start pose was rendered after the capture pass and the swapchain wait, and the smoother had no hold at all (31 px/s text motion while reading, replayed) | `quat_angle_deg` (atan2 of the vector part); late pose sample after `wait_for_frame()`; reading hold (soft hysteresis deadband, tanh knee, settle leak) with off/low/medium/high presets, default medium, Ctrl+Alt+S cycles live. `pose_scenarios` 19: 0.01 deg measures 0.010000; reading sway 0.654 -> 0.090 deg; off == plain 1-euro. Replay: 31.0 -> 6.7 px/s |
+| 26 | Gyro-only heading drifted +35 deg in the first 300 s of the 2026-09-25 session (blamed on "thermal drift") | The 1.26 s startup window held a smooth ~3 deg/s head roll that passes every fluctuation gate: bias (0.00, 0.35, -1.08) vs true (0.0, 0.42, 0.38) deg/s, outside routine authority, so only the slow escape could fix it. Bias vs temperature is only ~0.005 deg/s per deg C | Startup confirmation (`startup_confirm_s` 60, `startup_confirm_agree_degs` 0.3): later motion-separated rest episodes form a consensus that reseeds the bias in one step, with snapshot revert (invariant 6 pattern); one continuous episode can never confirm itself. Replay audit (870 starts): first-60 s drift mean 9.21 -> 7.13 deg, first-180 s 15.7 -> 11.0 deg, time to tracking unchanged. `pose_scenarios` 20-22 |
+| 27 | In-app calibration: the wearer had to press "I'm ready" while holding a pose, and every Cancel force-killed the tool with the IMU stream still on | The wizard waited for ENTER; `--auto` never read stdin, so the `q` cancel was ignored and the 4 s TerminateProcess always fired | In-app runs use `--progress-json --auto --auto-delay 5` with a countdown and Start now; a stdin watcher in `--auto` maps `q`/EOF to the normal Ctrl+C path (stream off, `failed`/`cancelled`, exit 1). `app_selftest` tool-argument and countdown cases; `orientation_calibration_selftest` stdin parser |
 
 **Standing lesson:** the IMU path is where the subtle bugs live. Every gating change must be
 accompanied by a synthetic scenario that fails before and passes after, and every claim in a commit
@@ -166,6 +168,8 @@ scenarios and update this table.
 | `bias_adapt_slow_tau_s` | 40 | The escape must be slow enough that a 20 s / 1.0 deg/s ambiguous turn keeps >=80% of its travel (scenario 11). Cost: a genuinely stale runtime estimate converges over tens of seconds, not seconds. |
 | `escape_return_tol_degs` / `escape_return_dwell_s` | 0.2 / 0.2 | The rollback trigger: the observed rate must return to the pre-escape snapshot's band for a continuous, dwell-qualified rest interval. Motion resets confirmation. While the excursion is armed the routine update is blocked, so the estimate can only return to the snapshot through this one-step rollback, not through a tau-1 unwind. |
 | `drift_rate_cap_degs` | 0 | Absorption off: it was the source of the 3.87 deg/min workspace rotation. |
+| `startup_confirm_s` / `startup_confirm_agree_degs` | 60 / 0.3 | Bug 26. Per-rest-episode means after tracking opens; two episodes agreeing within 0.3 deg/s (the routine cap's scale) form a consensus; outside routine authority it reseeds the bias in one step and snapshots the old one, and a later episode agreeing with the snapshot reverts. 0.2 / 0.4 and per-window voting were measured worse (track-a.md). Known gap: one long rest episode cannot outvote a bad startup. |
+| `PoseSmoother::predict_s` (`--predict-ms`) | 0.035 | Display-side turn prediction along the 8 Hz low-passed angular velocity, faded in by smoothstep between 10 and 30 deg/s, applied after the 1-euro and reading hold, so reading is bit-identical. 35 ms improves turning error for every assumed latency 15-40 ms; 50 ms is worse at 15 ms. The real GT motion-to-photon latency has never been measured. |
 
 **The ambiguity, stated plainly.** With the magnetometer disabled there is *no* absolute heading
 reference, so a steady 1.0 deg/s yaw rotation and a 1.0 deg/s yaw bias are the *same measurement*.
@@ -210,6 +214,12 @@ change.
 | Reading hold on the worn 2026-09-25 session (`imu_replay --smooth-eval --stabilise N`, 235 s of reading) | off/low/medium/high: 31.0 / 11.1 / 6.7 / 5.2 px/s text motion; p95 frame step 0.025 / 0.015 / 0.010 / 0.008 deg; turn lag rms 1.18 / 1.40 / 1.57 / 1.71 deg | measured, not asserted |
 | Mag lock lag on the same session (10 s mean of the lock error) | tau 20: rms 1.07, p95 1.77 deg; tau 10: rms 0.59, p95 0.86 deg; tau 6: 0.44 / 0.55 deg; reading jitter 31.0 px/s at all three | measured, not asserted |
 | Noiseless pan-return closure (scenario 17) | +/-0.025 deg final | abs(final) < 0.05 deg |
+| Startup window absorbs a 0.8 deg/s turn, then 55 s of work (scenario 20) | drift 46.5 -> 9.7 deg; final yaw bias error 0.77 -> 0.006 deg/s; one reseed | unconfirmed > 10 deg (defect present); confirmation removes >= 70% |
+| Scenario 11's turn inside the confirmation period (scenario 21) | 17.83 deg registered, 0.13 deg reverse, no reseed; bit-identical to unconfirmed | as scenario 11 |
+| Two separate 0.6 deg/s turns outvote a clean startup (scenario 22) | 1 reseed then 1 revert; 2.6 deg drift (0.27 unconfirmed) - the yaw ambiguity, bounded | < 3.5 deg |
+| Turn prediction 35 ms (scenario 23) | turn error vs pose 25 ms later 4.863 -> 1.855 deg rms; reading sway difference 0; overshoot 0.021 deg | reading identical; overshoot < 0.25 deg |
+| Turn prediction on the worn 2026-09-25 session (`--smooth-eval --latency 25 --predict 0.035`) | turning rms off/low/medium/high/ultra: 2.57 -> 0.84, 2.76 -> 1.03, 2.92 -> 1.19, 3.04 -> 1.32, 3.85 -> 2.17 deg; reading unchanged to the printed digit | measured, not asserted |
+| Earbud hard-iron step, 30 injected steps on the same session (`--inject-hard-iron`, opt-in tracker) | view departure rms mean 4.86 -> 1.91 deg, median 5.76 -> 0.93, worst 7.71 -> 6.29; 5/30 slightly worse | measured, not asserted (tracker off by default) |
 
 **Lessons from this round, in the order they were learned:**
 1. A safety mechanism that is never *released* becomes a permanent error (bug 6).
@@ -264,14 +274,15 @@ Run inside the MSVC environment: `call "C:\Program Files (x86)\Microsoft Visual 
 |---|---|
 | `camera_selftest` | Frame conversion, the sign triple, single-axis and combined orientation cases |
 | `pose_selftest` | Tilted-recenter coupling, contiguous-vs-fragmented startup calibration and its timeout, accelerometer-blocked rest, bias clamp, reconfigure resets, swing/twist helpers, drift-absorption behaviour, 20-cycle pan-and-settle accumulation |
-| `pose_scenarios` | Nineteen synthetic worn-head scenarios through the real estimator: pan-and-return both ways, small moves, slow and fast pans, residual bias, breathing, diagonal, recenter, the 1.0 deg/s ambiguous turn and its rollback guard (11), always-live micro adjustments (12), persistent bias step (13), and motion-gated rollback crossing (14), display-side smoothing (15), 5-min session drift (16), noiseless closure (17), repeated look-around walk-off (18), and the reading hold plus small-angle precision (19) |
+| `pose_scenarios` | Twenty-three synthetic worn-head scenarios (20-23 added 2026-11-13: contaminated startup window reseeded by confirmation (20), ambiguous turn inside the confirmation period (21), two turns outvote then revert (22), turn prediction with reading unchanged (23)); the original nineteen through the real estimator: pan-and-return both ways, small moves, slow and fast pans, residual bias, breathing, diagonal, recenter, the 1.0 deg/s ambiguous turn and its rollback guard (11), always-live micro adjustments (12), persistent bias step (13), and motion-gated rollback crossing (14), display-side smoothing (15), 5-min session drift (16), noiseless closure (17), repeated look-around walk-off (18), and the reading hold plus small-angle precision (19) |
 | `orientation_calibration_selftest` | Guided-calibration maths, rejection gates, file round-trip, version handling |
 | `protocol_selftest` | 66/99 framing and `99 65` decoding |
 | `layout_selftest` | Layout parsing/validation, geometry, capture-policy constraints |
 | `vdd_selftest` | Parsec VDD protocol, cleanup order, index parsing |
 | `view_selftest` | Offline "virtual glasses": real layout + real camera maths projected to NDC, numeric assertions, and 640x360 PPM frames in `scratch/` |
 | `app_selftest` | Controller app model: engine command contract, status protocol + freshness gate, preference validation/persistence, presets, field normalisation, 3D face selection and view-plane drag, depth slider scale, per-session log archive (10-min gate, rolling three, real tar round trip), telemetry tail, view comfort (ranges, engine switch round-trip, tint/focus/fade maths, app.json persistence) |
-| `mag_heading_selftest` | Magnetometer heading lock closed loop (stale bias bounded, integral removes lag, rate limit, disturbance rejected with zero view motion, new environment re-acquired without a jump) and the gyro-constrained hard-iron fit (recovery + rejection) |
+| `mag_heading_selftest` | Magnetometer heading lock closed loop (stale bias bounded, integral removes lag, rate limit, disturbance rejected with zero view motion, new environment re-acquired without a jump) and the gyro-constrained hard-iron fit (recovery + rejection), fit observability / weak axis, and the opt-in online hard-iron tracker (earbud in/out learned, desk magnet reverted, passing phone ignored) |
+| `ui_snapshot` | Offscreen renders of every controller page, the setup guide and the calibration states at several sizes, DPIs and both themes (PNGs in `scratch/ui`), with hotspot checks; regenerate with `ui_snapshot --out scratch\ui` and look at them after any UI change |
 
 Every fix MUST come with a regression test that fails without it. Synthetic IMU scenarios live in
 `pose_scenarios.cpp` (`HeadSim` helpers) and `pose_selftest.cpp` (local helpers).
@@ -309,8 +320,11 @@ Every fix MUST come with a regression test that fails without it. Synthetic IMU 
   `--stats` prints per-interval gate duty (rest/still/routine/escape); `--smooth-eval` replays the
   display smoother at 60 Hz (`--stabilise N`, `--hold inner,outer,tau`, `--min-cutoff`, `--beta`);
   `--lock-tau` / `--lock-ki` retune the heading lock. In observe mode the lock's `err` is exactly the
-  gyro-only heading drift, which is how the 2026-09-25 session showed ~20 deg of thermal gyro drift the
-  lock removed.
+  gyro-only heading drift. The 2026-09-25 session showed ~20 deg of it, which this file used to call
+  thermal gyro drift; the 2026-11-13 replay (bug 26) showed it was mostly a contaminated *startup*
+  bias - the measured thermal slope is only ~0.005 deg/s per deg C (0.08 deg/s over the 16 C warm-up,
+  well inside routine authority). `--trace`, `--startup-audit`, `--confirm`, `--cal-window`,
+  `--latency`/`--predict` and the hard-iron injection flags are documented in `docs/overnight/`.
 - **Measure small rotations with `quat_angle_deg`, never `2 * acos(w)`**: in float the latter reads 0 or
   0.0396 deg for anything below ~0.04 deg (bug 25).
 - **Two tar.exe on this machine**: Git Bash's GNU tar is first on PATH and `tar -a -c -f x.zip`
@@ -396,10 +410,34 @@ alone cannot distinguish these and cannot guarantee fixed yaw while preserving i
 slow head turns. Compare worn and stationary conditions before attributing every recenter to
 hardware thermal drift or declaring another estimator fix.
 
+## 10. Overnight run log, 2026-11-12/13 (agent session, branch `overnight-claude-improvements`)
+
+Local branch only (never pushed or merged into `main`). No glasses were available: every claim is
+synthetic, replayed from `dist/reference-logs-2026-09-25.zip`, or an offscreen UI render. Detailed
+reports with all numbers and rejected ideas: `docs/overnight/track-a.md` (estimator), `track-b.md`
+(calibration + magnetometer), `track-c.md` (UI + integration), `r2-*.md` (round 2), `REPORT.md`.
+
+- **Estimator:** startup confirmation (bug 26) and 35 ms turn prediction, both on by default.
+  Scenarios 1-19 and `pose_selftest` printed identical output before and after.
+- **Calibration tool:** `--progress-json` (`@@progress {...}` line protocol), `--auto` /
+  `--auto-delay`, `--earbuds`, quality scores, hard-iron fit observability, stdin cancel (bug 27).
+- **Magnetometer:** status keys `mag` / `mag_error_deg` / `mag_offset_ut`; opt-in online hard-iron
+  tracker (`--mag-track-hard-iron`, off by default: on the recording it reacts to one real ambiguous
+  field event). Earbud guidance: calibrate the compass *with the earbuds in* if they are normally
+  worn; their magnets are then part of the fixed offset.
+- **Controller UI:** full redesign (sidebar pages, design tokens, dark/light/system themes, GDI+
+  anti-aliasing, idle-stopping animation timer, per-monitor DPI), first-run setup guide
+  (`onboarding_complete` in app.json), in-app calibration, Turn prediction Off/20/35/50, compass
+  badge, earbud switch. Every previous control is mapped in track-c.md.
+- **Needs a person with the glasses:** the live window's message paths, real startup reseeds
+  (engine log `startup confirmation: reseeds=N reverts=M`), the prediction horizon (overshoot vs
+  trail on a quick turn), calibration cancel turning the stream off, the 5 s auto delay, the
+  compass badge.
+
 ## 8. Definition of done for any change
 
 1. Builds clean under `/W4 /permissive-` (no new warnings).
-2. All ten test suites pass, and the change's own regression test fails without the change.
+2. All eleven test suites pass, and the change's own regression test fails without the change.
 3. Numeric claims in the commit message are reproducible from printed test output.
 4. Docs updated if behaviour or a trade-off changed (`docs/PROTOCOL-NOTES.md`, this file).
 5. No new global state, no unbounded memory/GPU growth, no resource leaks (see `capture_smoketest`
