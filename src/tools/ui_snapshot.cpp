@@ -267,6 +267,20 @@ std::vector<Shot> shots() {
                             "tilt or nod. Slow and smooth is fine.\",\"detail\":\"\",\"quality\":-1}",
                             s.now_s - 2.2);
                     }});
+    // Finished calibrations: the tool's final quality as a plain-language band.
+    list.push_back({"tracking-calibration-saved-good-1280x800", 1280, 800, 96, true, [](AppState& s) {
+                        base_state(s, true);
+                        s.page = AppPage::Tracking;
+                        s.cal_run.begin(gt::CalFlow::Orientation, true, 5.0);
+                        s.cal_run.consume_line(
+                            "@@progress {\"flow\":\"orientation\",\"step\":4,\"steps\":4,\"state\":\"done\","
+                            "\"prompt\":\"Orientation calibration saved.\",\"detail\":\"up_vs_yaw 0.84 deg, "
+                            "nod_level 1.10 deg, nod_tilt 1.92 deg, handedness 1.35 deg; 3 repeats: spread 1.05 "
+                            "deg, estimated axis error 0.74 deg\",\"quality\":0.87}");
+                        s.cal_run.process_exited(0);
+                        s.scroll[gt::kScrollPage].offset = 2000;
+                        s.scroll[gt::kScrollPage].max_offset = 2000;  // clamped by the paint pass
+                    }});
     list.push_back({"tracking-compass-earbuds-1280x800", 1280, 800, 96, true, [](AppState& s) {
                         base_state(s, true);
                         s.page = AppPage::Tracking;
@@ -335,6 +349,16 @@ std::vector<Shot> shots() {
                             "HID device found\",\"quality\":-1}");
                         s.cal_run.consume_line("no RayNeo GT HID device found; connect the glasses and retry");
                         s.cal_run.process_exited(1);
+                    })});
+    list.push_back({"wizard-3-head-saved-retry-1280x800-light", 1280, 800, 96, false,
+                    wizard(gt::OnboardingStep::HeadCalibration, true, [](AppState& s) {
+                        s.cal_in_wizard = true;
+                        s.cal_run.begin(gt::CalFlow::Orientation, true, 5.0);
+                        s.cal_run.consume_line(
+                            "@@progress {\"flow\":\"orientation\",\"step\":4,\"steps\":4,\"state\":\"done\","
+                            "\"prompt\":\"Orientation calibration saved.\",\"detail\":\"up_vs_yaw 6.10 deg, "
+                            "nod_level 5.40 deg, nod_tilt 12.80 deg, handedness 9.95 deg\",\"quality\":0.31}");
+                        s.cal_run.process_exited(0);
                     })});
     list.push_back({"wizard-4-compass-1280x800", 1280, 800, 96, true,
                     wizard(gt::OnboardingStep::MagCalibration, true, nullptr)});

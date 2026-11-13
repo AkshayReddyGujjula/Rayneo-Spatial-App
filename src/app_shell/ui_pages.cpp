@@ -4,6 +4,7 @@
 
 #include "app/engine_protocol.h"
 #include "app_shell/ui_paint_internal.h"
+#include "imu/orientation_calibration.h"
 
 #include <algorithm>
 #include <cmath>
@@ -976,11 +977,23 @@ int paint_calibration_run(Ui& ui, int left, int top, int width, bool draw) {
         y += ui.px(size::control);
     } else if (run.phase == CalRunState::Phase::Succeeded) {
         if (draw) {
-            status_icon(ui, left + ui.px(14), y + ui.px(14), Severity::Ok);
+            // Saved either way; a low final score warns instead of ticking.
+            status_icon(ui, left + ui.px(14), y + ui.px(14),
+                        run.quality >= 0.0f && run.quality < 0.4f ? Severity::Warning : Severity::Ok);
             ui.c.text(ui.f.title, t.text, rect_of(left + ui.px(40), y, width - ui.px(40), ui.px(28)),
                       run.flow == CalFlow::Mag ? L"Compass calibrated" : L"Calibration saved");
         }
         y += ui.px(30);
+        // The tool's final score in plain words (same bands as the bar above).
+        const char* band = gt::calibration_quality_label(run.quality);
+        if (band[0] != '\0') {
+            const COLORREF qc = run.quality >= 0.7f ? t.ok : run.quality >= 0.4f ? t.warning : t.error;
+            if (draw) {
+                ui.c.text(ui.f.small_strong, qc, rect_of(left, y, width, ui.px(20)),
+                          L"Calibration quality: " + wide_from_utf8(band), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+            y += ui.px(20) + ui.px(space::xs);
+        }
         const std::wstring detail = !run.detail.empty() ? wide_from_utf8(run.detail)
                                     : !run.prompt.empty() ? wide_from_utf8(run.prompt)
                                                           : std::wstring(L"The new calibration is in use from the next start.");
