@@ -10,6 +10,7 @@
 // animated value has settled, so an idle window burns no CPU.
 
 #include "app_shell/app_state.h"
+#include "app_shell/cal_guide_window.h"
 #include "app_shell/calibration_runner.h"
 #include "app_shell/tray_icon.h"
 #include "app_shell/ui_input.h"
@@ -86,6 +87,8 @@ private:
     void apply_theme();
     void start_calibration(CalFlow flow);
     void cancel_calibration();
+    // Opens / refreshes / closes the live guide on the glasses display.
+    void update_cal_guide_window();
     void finish_onboarding(bool skipped);
     void refresh_health(bool expensive);
     void update_tooltip();
@@ -113,6 +116,7 @@ private:
     FontSet fonts_;
     TrayIcon tray_;
     CalibrationRunner calibration_;
+    CalGuideWindow cal_guide_window_;
     std::vector<Hotspot> hotspots_;
     HWND hwnd_ = nullptr;
     HINSTANCE instance_ = nullptr;

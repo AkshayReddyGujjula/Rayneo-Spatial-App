@@ -3,6 +3,7 @@
 // ui_page_layout.cpp and the setup guide in ui_onboarding.cpp.
 
 #include "app/engine_protocol.h"
+#include "app_shell/ui_cal_guide.h"
 #include "app_shell/ui_paint_internal.h"
 #include "imu/orientation_calibration.h"
 
@@ -1068,6 +1069,24 @@ int paint_calibration_run(Ui& ui, int left, int top, int width, bool draw) {
                                         ? wide_from_utf8(run.prompt)
                                         : std::wstring(L"Starting the calibration tool. Put the glasses on.");
         text_block(ui.f.title, t.text, prompt);
+        // Live guide (tools that stream @@live): the same picture the glasses
+        // show, smaller. Older tools keep the text-only view.
+        if (run.tool_has_live && (run.state == CalStepState::Waiting || run.state == CalStepState::Recording)) {
+            y += ui.px(space::md);
+            const int guide_h = std::clamp(width * 9 / 20, ui.px(170), ui.px(250));
+            if (draw) {
+                CalGuideView view = cal_guide_view(run, ui.s.now_s);
+                if (run.state == CalStepState::Waiting) {
+                    view.subline.clear();  // the prompt above already says how
+                }
+                const RECT guide = rect_of(left, y, width, guide_h);
+                ui.c.push_clip(guide);
+                const float fov = ui.s.layout.fov_deg > 5.0f ? ui.s.layout.fov_deg : kCalGuideDefaultFovDeg;
+                paint_cal_guide(ui.c, guide, view, panel_guide_style(t, ui.f), fov);
+                ui.c.pop_clip();
+            }
+            y += guide_h;
+        }
         if (!run.retry_reason.empty() && run.state != CalStepState::Ok) {
             y += ui.px(space::xs);
             text_block(ui.f.body, t.warning, L"Again: " + wide_from_utf8(run.retry_reason));

@@ -162,6 +162,142 @@ CalLineKind parse_cal_progress_line(std::string_view line, CalProgressEvent& eve
     return CalLineKind::Progress;
 }
 
+CalLiveLineKind parse_cal_live_line(std::string_view line, CalLiveSample& sample, std::string& error) {
+    error.clear();
+    const std::string_view text = trim(line);
+    const std::string_view prefix = kCalLivePrefix;
+    if (text.size() < prefix.size() || text.substr(0, prefix.size()) != prefix) {
+        return CalLiveLineKind::NotLive;
+    }
+    std::string_view payload = text.substr(prefix.size());
+    if (!payload.empty() && payload.front() != ' ' && payload.front() != '\t' && payload.front() != '{') {
+        return CalLiveLineKind::NotLive;
+    }
+    payload = trim(payload);
+    const Json node = Json::parse(payload.begin(), payload.end(), nullptr, false);
+    if (node.is_discarded() || !node.is_object()) {
+        error = "live payload is not a JSON object";
+        return CalLiveLineKind::Malformed;
+    }
+    CalLiveSample parsed;
+    const auto string_of = [&](const char* key) -> std::string {
+        if (!node.contains(key) || !node.at(key).is_string()) {
+            return {};
+        }
+        return node.at(key).get<std::string>();
+    };
+    const std::string kind = string_of("kind");
+    if (kind == "still") {
+        parsed.kind = CalGuideKind::Still;
+    } else if (kind == "turn") {
+        parsed.kind = CalGuideKind::Turn;
+    } else if (kind == "nod") {
+        parsed.kind = CalGuideKind::Nod;
+    } else if (kind == "tilt") {
+        parsed.kind = CalGuideKind::Tilt;
+    } else {
+        error = "'kind' must be still, turn, nod or tilt";
+        return CalLiveLineKind::Malformed;
+    }
+    const std::string state = string_of("state");
+    if (state != "waiting" && state != "recording") {
+        error = "'state' must be waiting or recording";
+        return CalLiveLineKind::Malformed;
+    }
+    parsed.waiting = state == "waiting";
+    const auto number = [&](const char* key, float fallback, float limit) -> float {
+        if (!node.contains(key) || !node.at(key).is_number()) {
+            return fallback;
+        }
+        const double value = node.at(key).get<double>();
+        if (!std::isfinite(value)) {
+            return fallback;
+        }
+        return static_cast<float>(std::clamp(value, -static_cast<double>(limit), static_cast<double>(limit)));
+    };
+    const auto integer = [&](const char* key) -> int {
+        if (!node.contains(key) || !node.at(key).is_number_integer()) {
+            return 0;
+        }
+        return static_cast<int>(std::clamp<long long>(node.at(key).get<long long>(), 0, 100));
+    };
+    parsed.step = integer("step");
+    parsed.elapsed_s = number("elapsed", 0.0f, 3600.0f);
+    parsed.remaining_s = number("remaining", -1.0f, 3600.0f);
+    parsed.frame = string_of("frame").substr(0, 16);
+    parsed.yaw_deg = number("yaw", 0.0f, 360.0f);
+    parsed.pitch_deg = number("pitch", 0.0f, 360.0f);
+    parsed.roll_deg = number("roll", 0.0f, 360.0f);
+    parsed.along_deg = number("along", 0.0f, 360.0f);
+    parsed.off_deg = std::max(0.0f, number("off", 0.0f, 360.0f));
+    parsed.speed_degs = std::max(0.0f, number("speed", 0.0f, 5000.0f));
+    parsed.still_rms_degs = std::max(0.0f, number("still_rms", 0.0f, 5000.0f));
+    parsed.still_gate_degs = number("still_gate", 1.5f, 100.0f);
+    parsed.gate_deg = number("gate", 12.0f, 180.0f);
+    parsed.target_deg = number("target", 25.0f, 180.0f);
+    parsed.peak_deg = number("peak", 0.0f, 360.0f);
+    if (!(parsed.still_gate_degs > 0.0f)) {
+        parsed.still_gate_degs = 1.5f;
+    }
+    if (!(parsed.gate_deg > 0.0f)) {
+        parsed.gate_deg = 12.0f;
+    }
+    if (!(parsed.target_deg >= parsed.gate_deg)) {
+        parsed.target_deg = parsed.gate_deg;
+    }
+    parsed.repeats = integer("repeats");
+    parsed.repeats_required = integer("repeats_required");
+    std::string hint = string_of("hint");
+    bool hint_ok = !hint.empty() && hint.size() <= 24;
+    for (const char c : hint) {
+        if (!((c >= 'A' && c <= 'Z') || c == '_')) {
+            hint_ok = false;
+        }
+    }
+    parsed.hint = hint_ok ? hint : std::string();
+    sample = std::move(parsed);
+    return CalLiveLineKind::Live;
+}
+
+std::string cal_retry_tip(const CalLiveSample& last, int off_axis_count, int slower_count, int wrong_way_count) {
+    // About half a second of a live hint (the tool sends ~22 lines/s).
+    constexpr int kSeen = 10;
+    if (wrong_way_count >= kSeen) {
+        switch (last.kind) {
+            case CalGuideKind::Turn:
+                return "Turn to your LEFT first, then come back.";
+            case CalGuideKind::Nod:
+                return "Nod DOWN first (chin toward your chest), then come back up.";
+            case CalGuideKind::Tilt:
+                return "Tilt toward your RIGHT shoulder first, then come back.";
+            case CalGuideKind::Still:
+                break;
+        }
+    }
+    if (off_axis_count >= kSeen) {
+        switch (last.kind) {
+            case CalGuideKind::Turn:
+                return "Keep your chin level while you turn: no nodding or tilting. Follow the line with the ball.";
+            case CalGuideKind::Nod:
+                return "Nod straight down, as if saying yes: keep facing forward, no turning or tilting.";
+            case CalGuideKind::Tilt:
+                return "Keep your nose pointing straight ahead and bring your ear toward your shoulder: no turning "
+                       "or nodding.";
+            case CalGuideKind::Still:
+                break;
+        }
+    }
+    if (last.kind != CalGuideKind::Still && last.repeats_required > 0 && last.repeats < last.repeats_required) {
+        return "Go a little further each time, past the first mark on the guide, and come all the way back to "
+               "centre. Do it " +
+               std::to_string(last.repeats_required) + (last.repeats_required == 1 ? " time." : " times.");
+    }
+    if (slower_count >= kSeen) {
+        return "Move more slowly and smoothly.";
+    }
+    return {};
+}
+
 std::vector<std::string> calibration_tool_arguments(CalFlow flow, const std::string& output_path,
                                                     bool earbuds) {
     std::vector<std::string> arguments{"--progress-json", "--auto", "--auto-delay", std::to_string(kCalAutoDelayS)};
@@ -316,10 +452,29 @@ void CalRunState::apply(const CalProgressEvent& event, double now_s) {
     if (has_event && event.step != step) {
         retry_reason.clear();
     }
+    if (has_event && event.step != step) {
+        retry_tip.clear();
+    }
     if (event.state == CalStepState::Retry) {
         retry_reason = cal_reason_text(event.detail);
+        retry_tip = has_last_recording
+                        ? cal_retry_tip(last_recording, live_off_axis, live_slower, live_wrong_way)
+                        : std::string();
     } else if (event.state == CalStepState::Ok) {
         retry_reason.clear();
+        retry_tip.clear();
+    }
+    if (event.state == CalStepState::Recording) {
+        live_off_axis = 0;
+        live_slower = 0;
+        live_wrong_way = 0;
+        has_last_recording = false;
+    }
+    // The guide shows the live head only while a step waits or records.
+    if (event.state != CalStepState::Waiting && event.state != CalStepState::Recording) {
+        has_live = false;
+    } else if (has_event && event.step != step) {
+        has_live = false;
     }
     has_event = true;
     step = event.step;
@@ -349,7 +504,41 @@ void CalRunState::apply(const CalProgressEvent& event, double now_s) {
     }
 }
 
+void CalRunState::apply_live(const CalLiveSample& sample, double now_s) {
+    if (phase != Phase::Running) {
+        return;
+    }
+    tool_has_live = true;
+    has_live = true;
+    live = sample;
+    live_at_s = now_s;
+    if (!sample.waiting && sample.kind != CalGuideKind::Still) {
+        if (sample.hint == "OFF_AXIS") {
+            ++live_off_axis;
+        } else if (sample.hint == "SLOWER") {
+            ++live_slower;
+        } else if (sample.hint == "WRONG_WAY") {
+            ++live_wrong_way;
+        }
+        last_recording = sample;
+        has_last_recording = true;
+    }
+}
+
 CalLineKind CalRunState::consume_line(const std::string& line, double now_s) {
+    {
+        CalLiveSample sample;
+        std::string live_error;
+        const CalLiveLineKind live_kind = parse_cal_live_line(line, sample, live_error);
+        if (live_kind == CalLiveLineKind::Live) {
+            apply_live(sample, now_s);
+            return CalLineKind::NotProgress;
+        }
+        if (live_kind == CalLiveLineKind::Malformed) {
+            // Display-only data: a bad live line is dropped, never a failure.
+            return CalLineKind::NotProgress;
+        }
+    }
     CalProgressEvent event;
     std::string error;
     const CalLineKind kind = parse_cal_progress_line(line, event, error);

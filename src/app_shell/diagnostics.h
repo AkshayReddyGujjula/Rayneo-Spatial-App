@@ -11,6 +11,8 @@
 #include "app_shell/paths.h"
 #include "app_shell/telemetry.h"
 
+#include <windows.h>
+
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -21,6 +23,8 @@ namespace gt {
 struct DisplayInfo {
     std::wstring device_name;
     std::wstring description;
+    int left = 0;
+    int top = 0;
     int width = 0;
     int height = 0;
     bool primary = false;
@@ -58,6 +62,9 @@ struct DiagnosticsReport {
 // Display topology plus the Parsec VDD driver state (reads the display class
 // registry key through VddClient::driver_status; no device is created).
 void collect_display_and_vdd(DiagnosticsReport& report);
+// Desktop rectangle of the glasses monitor, found by the same rule as the
+// Readiness "Glasses display" row (virtual displays excluded). Read-only.
+bool find_glasses_monitor_rect(RECT& rect);
 
 // Orientation calibration file: present, loadable, and its mounting basis.
 void collect_calibration(const Paths& paths, DiagnosticsReport& report);
