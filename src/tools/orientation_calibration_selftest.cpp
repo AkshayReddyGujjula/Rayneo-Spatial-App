@@ -1,3 +1,4 @@
+#include "imu/calibration_live.h"
 #include "imu/orientation_calibration.h"
 
 #include <algorithm>
@@ -279,9 +280,220 @@ void check(bool condition, const char* label, float value = 0.0f, float limit = 
     }
 }
 
+// ---- Live guide (@@live) -------------------------------------------------
+// Synthetic body-frame data for the live tracker: right = +X, forward = +Y,
+// up = +Z (body). Package = (b.x, b.z, -b.y) so live_package_to_body maps back.
+Vec3 live_body_to_package(const Vec3& b) {
+    return Vec3{b.x, b.z, -b.y};
+}
+
+struct LiveSim {
+    gt::CalibrationLiveTracker tracker;
+    uint32_t tick = 0;
+    Vec3 bias_body;
+    void feed(const Vec3& rate_body, float seconds, const Vec3& noise = Vec3{}) {
+        const int n = static_cast<int>(seconds * kRateHz + 0.5f);
+        for (int i = 0; i < n; ++i) {
+            ImuSample s;
+            const float wobble = std::sin(static_cast<float>(tick) * 0.37f);
+            const Vec3 g{rate_body.x + bias_body.x + noise.x * wobble, rate_body.y + bias_body.y + noise.y * wobble,
+                         rate_body.z + bias_body.z + noise.z * wobble};
+            s.gyro_degs = live_body_to_package(g);
+            s.accel_mps2 = live_body_to_package(Vec3{0.0f, 0.0f, 9.81f});
+            s.tick_100us = tick;
+            tick += 21;  // 2.1 ms, ~476 Hz
+            tracker.add(s);
+        }
+    }
+};
+
+gt::CalibrationLiveFrame test_frame() {
+    return gt::make_live_frame(Vec3{0.0f, 0.0f, 9.81f}, Vec3{0.0f, 1.0f, 0.0f}, "file");
+}
+
+Vec3 unit(const Vec3& v) {
+    const float n = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    return Vec3{v.x / n, v.y / n, v.z / n};
+}
+
+Vec3 times(const Vec3& v, float s) {
+    return Vec3{v.x * s, v.y * s, v.z * s};
+}
+
+void live_guide_tests() {
+    std::printf("orientation_calibration_selftest: live guide line shape\n");
+    {
+        gt::CalibrationLiveLine line;
+        line.step = 2;
+        line.kind = gt::LiveStepKind::Turn;
+        line.state = "recording";
+        line.elapsed_s = 1.25f;
+        line.remaining_s = 11.75f;
+        line.frame = "file";
+        line.yaw_deg = 12.5f;
+        line.pitch_deg = -0.004f;
+        line.roll_deg = 0.25f;
+        line.along_deg = 12.5f;
+        line.off_deg = 0.25f;
+        line.speed_degs = 30.04f;
+        line.still_rms_degs = 0.5f;
+        line.peak_deg = 12.5f;
+        line.repeats_done = 1;
+        line.repeats_required = 3;
+        line.hint = "FURTHER";
+        const std::string text = gt::format_calibration_live(line);
+        const std::string expected =
+            "@@live {\"step\":2,\"kind\":\"turn\",\"state\":\"recording\",\"elapsed\":1.25,\"remaining\":11.75,"
+            "\"frame\":\"file\",\"yaw\":12.50,\"pitch\":0.00,\"roll\":0.25,\"along\":12.50,\"off\":0.25,"
+            "\"speed\":30.0,\"still_rms\":0.50,\"still_gate\":1.5,\"gate\":12,\"target\":25,\"peak\":12.50,"
+            "\"repeats\":1,\"repeats_required\":3,\"hint\":\"FURTHER\"}";
+        check(text == expected, "@@live line is pinned exactly");
+        if (text != expected) {
+            std::printf("    got %s\n", text.c_str());
+        }
+        line.remaining_s = -1.0f;
+        line.frame = "bogus\"frame";
+        line.hint = "BAD\"HINT\n";
+        line.yaw_deg = std::numeric_limits<float>::quiet_NaN();
+        const std::string odd = gt::format_calibration_live(line);
+        check(odd.find("\"remaining\":-1.00") != std::string::npos &&
+                  odd.find("\"frame\":\"nominal\"") != std::string::npos &&
+                  odd.find("\"hint\":\"BADHINT\"") != std::string::npos &&
+                  odd.find("\"yaw\":0.00") != std::string::npos,
+              "unknown frame, unsafe hint characters and NaN never break the JSON");
+    }
+
+    std::printf("orientation_calibration_selftest: live guide frame\n");
+    {
+        const gt::CalibrationLiveFrame frame = test_frame();
+        check(frame.valid && std::fabs(frame.up_body.z - 1.0f) < 1e-5f && std::fabs(frame.right_body.x - 1.0f) < 1e-5f &&
+                  std::fabs(frame.forward_body.y - 1.0f) < 1e-5f,
+              "frame is right-handed with right x forward = up");
+        // A tilted forward hint is projected horizontal.
+        const gt::CalibrationLiveFrame tilted =
+            gt::make_live_frame(Vec3{0.0f, 0.0f, 1.0f}, Vec3{0.0f, 1.0f, 0.4f}, "file");
+        check(std::fabs(tilted.forward_body.z) < 1e-5f && tilted.source == "file", "forward hint is levelled");
+        const gt::CalibrationLiveFrame vertical =
+            gt::make_live_frame(Vec3{0.0f, 0.0f, 1.0f}, Vec3{0.0f, 0.0f, 1.0f}, "file");
+        check(vertical.valid && vertical.source == "nominal", "a vertical hint falls back to the nominal mounting");
+        // The default sensor_to_head (head = (x, -z, y) of the package): forward row
+        // (0, 1, 0)... its forward is package +Y's row, mapped into the body frame.
+        const std::array<float, 9> identity{1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+        const Vec3 f = gt::live_forward_from_sensor_to_head(identity);
+        const Vec3 n = gt::live_nominal_forward_body();
+        check(std::fabs(f.x - n.x) < 1e-6f && std::fabs(f.y - n.y) < 1e-6f && std::fabs(f.z - n.z) < 1e-6f,
+              "an identity sensor_to_head gives the nominal forward (package +Y)");
+    }
+
+    std::printf("orientation_calibration_selftest: live guide gestures\n");
+    const Vec3 up{0.0f, 0.0f, 1.0f};
+    const Vec3 right{1.0f, 0.0f, 0.0f};
+    const Vec3 forward{0.0f, 1.0f, 0.0f};
+    {
+        LiveSim sim;
+        sim.bias_body = Vec3{0.4f, -0.3f, 0.8f};
+        sim.tracker.begin(gt::LiveStepKind::Turn, 2, "recording", 1, sim.bias_body, test_frame());
+        sim.feed(Vec3{}, 0.3f);
+        gt::CalibrationLiveLine line = sim.tracker.snapshot(0.3f, 5.7f);
+        check(line.hint == "GO" && std::fabs(line.along_deg) < 0.05f, "bias removed; turn step starts with GO",
+              line.along_deg, 0.05f);
+        sim.feed(times(up, 25.0f), 0.5f);  // 12.5 deg left
+        line = sim.tracker.snapshot(0.8f, 5.2f);
+        check(std::fabs(line.along_deg - 12.5f) < 0.1f && line.off_deg < 0.1f && line.hint == "FURTHER",
+              "pure turn: along 12.5 deg, on-axis, FURTHER (target 25)", line.along_deg, 12.5f);
+        check(std::fabs(line.yaw_deg - 12.5f) < 0.1f && std::fabs(line.speed_degs - 25.0f) < 1.0f,
+              "turn left is +yaw at the commanded speed", line.speed_degs, 25.0f);
+        sim.feed(times(up, 25.0f), 0.5f);  // 25 deg
+        line = sim.tracker.snapshot(1.3f, 4.7f);
+        check(line.hint == "BACK_TO_CENTRE" && std::fabs(line.peak_deg - 25.0f) < 0.1f,
+              "target reached: BACK_TO_CENTRE", line.peak_deg, 25.0f);
+        sim.feed(times(up, -25.0f), 1.0f);  // back to centre
+        sim.feed(Vec3{}, 0.5f);
+        line = sim.tracker.snapshot(2.8f, 3.2f);
+        check(line.repeats_done == 1 && line.hint == "DONE" && std::fabs(line.along_deg) < 0.1f,
+              "out and back counts one repeat; DONE at centre", static_cast<float>(line.repeats_done), 1.0f);
+    }
+    {
+        LiveSim sim;
+        sim.tracker.begin(gt::LiveStepKind::Turn, 2, "recording", 3, Vec3{}, test_frame());
+        sim.feed(times(unit(Vec3{0.0f, 0.15f, 1.0f}), 25.0f), 1.0f);  // a turn with 15% roll mixed in
+        const gt::CalibrationLiveLine line = sim.tracker.snapshot(1.0f, 5.0f);
+        check(line.hint == "OFF_AXIS" && line.off_deg > 3.4f && line.off_deg < 4.0f,
+              "turn with 15% tilt: OFF_AXIS (off-axis ~3.7 deg)", line.off_deg, 3.7f);
+        check(std::fabs(line.along_deg - 24.72f) < 0.1f && line.roll_deg > 3.4f,
+              "off-axis turn: along keeps the turn, roll shows the tilt", line.along_deg, 24.72f);
+        LiveSim clean;
+        clean.tracker.begin(gt::LiveStepKind::Turn, 2, "recording", 3, Vec3{}, test_frame());
+        clean.feed(times(unit(Vec3{0.0f, 0.08f, 1.0f}), 25.0f), 1.0f);  // 8%: inside the advice
+        check(clean.tracker.snapshot(1.0f, 5.0f).hint != "OFF_AXIS", "8% mixing is not flagged");
+    }
+    {
+        LiveSim sim;
+        sim.tracker.begin(gt::LiveStepKind::Nod, 3, "recording", 3, Vec3{}, test_frame());
+        sim.feed(times(right, -20.0f), 1.0f);  // nod down 20 deg
+        const gt::CalibrationLiveLine line = sim.tracker.snapshot(1.0f, 5.0f);
+        check(std::fabs(line.along_deg - 20.0f) < 0.1f && std::fabs(line.pitch_deg + 20.0f) < 0.1f &&
+                  line.off_deg < 0.1f && line.hint == "BACK_TO_CENTRE",
+              "nod down: along +20 deg, pitch -20 deg, target reached", line.along_deg, 20.0f);
+    }
+    {
+        LiveSim sim;
+        sim.tracker.begin(gt::LiveStepKind::Tilt, 4, "recording", 3, Vec3{}, test_frame());
+        sim.feed(times(forward, 15.0f), 1.0f);  // tilt right 15 deg
+        gt::CalibrationLiveLine line = sim.tracker.snapshot(1.0f, 5.0f);
+        check(std::fabs(line.along_deg - 15.0f) < 0.1f && std::fabs(line.roll_deg - 15.0f) < 0.1f &&
+                  line.hint == "FURTHER",
+              "tilt right: along +15 deg, FURTHER (target 20)", line.along_deg, 15.0f);
+        sim.feed(times(forward, -15.0f), 1.0f);
+        line = sim.tracker.snapshot(2.0f, 4.0f);
+        check(line.repeats_done == 1 && line.hint == "GO", "tilt out and back: one of three, GO again",
+              static_cast<float>(line.repeats_done), 1.0f);
+        LiveSim small;
+        small.tracker.begin(gt::LiveStepKind::Tilt, 4, "recording", 3, Vec3{}, test_frame());
+        small.feed(times(forward, 8.0f), 1.0f);
+        small.feed(times(forward, -6.0f), 1.0f);
+        line = small.tracker.snapshot(2.0f, 4.0f);
+        check(line.repeats_done == 0 && line.hint == "FURTHER",
+              "an 8 deg tilt returned early is not counted: FURTHER");
+    }
+    {
+        LiveSim sim;
+        sim.tracker.begin(gt::LiveStepKind::Turn, 2, "recording", 3, Vec3{}, test_frame());
+        sim.feed(times(up, -20.0f), 0.5f);  // turned right
+        check(sim.tracker.snapshot(0.5f, 5.5f).hint == "WRONG_WAY", "turning the wrong way: WRONG_WAY");
+        LiveSim fast;
+        fast.tracker.begin(gt::LiveStepKind::Turn, 2, "recording", 3, Vec3{}, test_frame());
+        fast.feed(times(up, 150.0f), 0.15f);
+        check(fast.tracker.snapshot(0.15f, 5.85f).hint == "SLOWER", "a 150 deg/s whip: SLOWER");
+    }
+    {
+        LiveSim quiet;
+        quiet.tracker.begin(gt::LiveStepKind::Still, 1, "recording", 3, Vec3{}, gt::CalibrationLiveFrame{});
+        quiet.feed(Vec3{}, 2.0f, Vec3{0.3f, 0.3f, 0.3f});
+        gt::CalibrationLiveLine line = quiet.tracker.snapshot(2.0f, 2.0f);
+        check(line.hint == "STEADY" && line.still_rms_degs < 0.5f && line.frame == "gravity" &&
+                  line.repeats_required == 0,
+              "still step, quiet head: STEADY, gravity frame", line.still_rms_degs, 0.5f);
+        LiveSim shaky;
+        shaky.tracker.begin(gt::LiveStepKind::Still, 1, "recording", 3, Vec3{}, gt::CalibrationLiveFrame{});
+        shaky.feed(Vec3{}, 2.0f, Vec3{3.0f, 0.0f, 0.0f});
+        line = shaky.tracker.snapshot(2.0f, 2.0f);
+        // A sinusoid of amplitude 3 has rms 3 / sqrt(2) = 2.12 deg/s.
+        check(line.hint == "HOLD" && std::fabs(line.still_rms_degs - 2.12f) < 0.15f,
+              "still step, 3 deg/s wobble: HOLD with the gyro rms", line.still_rms_degs, 2.12f);
+        LiveSim waiting;
+        waiting.tracker.begin(gt::LiveStepKind::Turn, 2, "waiting", 3, Vec3{}, test_frame());
+        waiting.feed(times(up, 25.0f), 1.0f);
+        line = waiting.tracker.snapshot(1.0f, 4.0f);
+        check(line.hint == "GET_READY" && line.repeats_done == 0 && line.state == "waiting",
+              "waiting: GET_READY, no repeats counted");
+    }
+}
+
 }  // namespace
 
 int main() {
+    live_guide_tests();
     const Mat3 head_to_body = multiply(rotation(1.0f, 0.0f, 0.0f, 4.0f),
                                        rotation(0.0f, 0.0f, 1.0f, 37.0f));
     const Vec3 bias{0.18f, -0.27f, 0.11f};

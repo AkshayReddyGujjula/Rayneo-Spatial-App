@@ -43,6 +43,7 @@ add_library(rayneo_core STATIC
   src/imu/gt_hid.cpp
   src/imu/fusion.cpp
   src/imu/orientation_calibration.cpp
+  src/imu/calibration_live.cpp
   src/imu/pose_estimator.cpp
   src/imu/pose_smoother.cpp
   src/imu/mag_heading.cpp

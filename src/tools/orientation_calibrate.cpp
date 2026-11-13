@@ -1,3 +1,4 @@
+#include "imu/calibration_live.h"
 #include "imu/gt_hid.h"
 #include "imu/gt_protocol.h"
 #include "imu/orientation_calibration.h"
@@ -90,11 +91,108 @@ struct Options {
     int repeats = 1;
 };
 
+// Display-only live guide (--progress-json): "@@live {json}" lines at about
+// 22 Hz while a step waits or records. Never feeds the calibration maths.
+class LiveReporter {
+public:
+    LiveReporter(bool enabled, int repeats) : enabled_(enabled), repeats_(repeats) {}
+    bool enabled() const { return enabled_; }
+    void set_forward_hint(const gt::Vec3& forward_body, const char* source) {
+        forward_hint_ = forward_body;
+        forward_source_ = source;
+        if (frame_.valid) {
+            frame_ = gt::make_live_frame(frame_.up_body, forward_hint_, forward_source_);
+        }
+    }
+    // After the still step: its gyro bias and measured gravity.
+    void set_still(const gt::Vec3& bias_body, const gt::CalibrationPhaseData& still) {
+        bias_ = bias_body;
+        gt::Vec3 sum;
+        for (const gt::ImuSample& sample : still.samples) {
+            const gt::Vec3 a = gt::live_package_to_body(sample.accel_mps2);
+            sum = gt::Vec3{sum.x + a.x, sum.y + a.y, sum.z + a.z};
+        }
+        frame_ = gt::make_live_frame(sum, forward_hint_, forward_source_);
+    }
+    // After the nod step: the measured head-right axis refines forward
+    // (forward = up x right).
+    void set_measured_right(const gt::Vec3& right_body) {
+        if (!frame_.valid) {
+            return;
+        }
+        const gt::Vec3& u = frame_.up_body;
+        const gt::Vec3 forward{u.y * right_body.z - u.z * right_body.y, u.z * right_body.x - u.x * right_body.z,
+                               u.x * right_body.y - u.y * right_body.x};
+        set_forward_hint(forward, "measured");
+    }
+    void begin(gt::LiveStepKind kind, int step, const char* state, double seconds) {
+        if (!enabled_) {
+            return;
+        }
+        tracker_.begin(kind, step, state, repeats_, bias_, frame_);
+        start_ = SteadyClock::now();
+        seconds_ = seconds;
+        last_emit_ = start_ - std::chrono::seconds(1);
+        active_ = true;
+    }
+    void end() { active_ = false; }
+    void add(const gt::ImuSample& sample) {
+        if (!enabled_ || !active_) {
+            return;
+        }
+        tracker_.add(sample);
+        emit_if_due();
+    }
+    void emit_if_due() {
+        if (!enabled_ || !active_) {
+            return;
+        }
+        const auto now = SteadyClock::now();
+        if (now - last_emit_ < std::chrono::milliseconds(45)) {
+            return;
+        }
+        last_emit_ = now;
+        const double elapsed = std::chrono::duration<double>(now - start_).count();
+        const double remaining = seconds_ < 0.0 ? -1.0 : (std::max)(0.0, seconds_ - elapsed);
+        const std::string line = gt::format_calibration_live(
+            tracker_.snapshot(static_cast<float>(elapsed), static_cast<float>(remaining)));
+        std::puts(line.c_str());
+        std::fflush(stdout);
+    }
+
+private:
+    bool enabled_ = false;
+    bool active_ = false;
+    int repeats_ = 1;
+    gt::Vec3 bias_;
+    gt::Vec3 forward_hint_ = gt::live_nominal_forward_body();
+    const char* forward_source_ = "nominal";
+    gt::CalibrationLiveFrame frame_;
+    gt::CalibrationLiveTracker tracker_;
+    SteadyClock::time_point start_{};
+    SteadyClock::time_point last_emit_{};
+    double seconds_ = -1.0;
+};
+
+gt::LiveStepKind live_kind(gt::CalibrationPhase phase) {
+    switch (phase) {
+        case gt::CalibrationPhase::Yaw:
+            return gt::LiveStepKind::Turn;
+        case gt::CalibrationPhase::Nod:
+            return gt::LiveStepKind::Nod;
+        case gt::CalibrationPhase::Tilt:
+            return gt::LiveStepKind::Tilt;
+        case gt::CalibrationPhase::Still:
+            break;
+    }
+    return gt::LiveStepKind::Still;
+}
+
 // Front-end reporting for one calibration flow.
 class Progress {
 public:
-    Progress(const Options& options, const char* flow, int steps)
-        : options_(options), flow_(flow), steps_(steps) {}
+    Progress(const Options& options, const char* flow, int steps, LiveReporter* live = nullptr)
+        : options_(options), flow_(flow), steps_(steps), live_(live) {}
 
     void emit(int step, const char* state, const std::string& prompt, const std::string& detail = {},
               float quality = -1.0f) const {
@@ -115,11 +213,13 @@ public:
     }
 
     int steps() const { return steps_; }
+    LiveReporter* live() const { return live_ != nullptr && live_->enabled() ? live_ : nullptr; }
 
 private:
     const Options& options_;
     const char* flow_;
     int steps_;
+    LiveReporter* live_;
 };
 
 const char* phase_name(gt::CalibrationPhase phase) {
@@ -259,8 +359,40 @@ private:
 // Shows one instruction and waits until the wearer is ready: ENTER on the
 // console, or (--auto) a fixed reading delay. Emits "waiting" either way.
 // Returns false when the wearer cancelled.
-bool wait_ready(const Options& options, const Progress& progress, int step, const std::string& prompt) {
+bool wait_ready(const Options& options, const Progress& progress, int step, const std::string& prompt,
+                gt::GtHidDevice* device = nullptr, gt::CalibrationPhase phase = gt::CalibrationPhase::Still) {
     progress.emit(step, "waiting", prompt);
+    LiveReporter* const live = device != nullptr ? progress.live() : nullptr;
+    if (options.auto_advance && live != nullptr) {
+        // The same countdown, but the samples are read so the guide can show
+        // the head live (display only; they are never recorded).
+        std::printf("\n%s\nStarting in %.0f s...\n", prompt.c_str(), options.auto_delay_s);
+        std::fflush(stdout);
+        g_start_now.store(false);
+        live->begin(live_kind(phase), step, "waiting", options.auto_delay_s);
+        const auto end = SteadyClock::now() + std::chrono::duration<double>(options.auto_delay_s);
+        while (SteadyClock::now() < end && !g_start_now.load()) {
+            if (g_cancel.load()) {
+                live->end();
+                return false;
+            }
+            uint8_t buffer[64]{};
+            const int bytes = device->read_report(buffer, sizeof(buffer), 20);
+            if (bytes < 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                continue;
+            }
+            if (bytes > 0) {
+                const gt::Report report = gt::decode_report(buffer, static_cast<size_t>(bytes));
+                if (report.kind == gt::ReportKind::Imu) {
+                    live->add(report.imu);
+                }
+            }
+            live->emit_if_due();
+        }
+        live->end();
+        return !g_cancel.load();
+    }
     if (options.auto_advance) {
         std::printf("\n%s\nStarting in %.0f s...\n", prompt.c_str(), options.auto_delay_s);
         std::fflush(stdout);
@@ -297,9 +429,21 @@ bool wait_ready(const Options& options, const Progress& progress, int step, cons
 }
 
 bool capture_phase(gt::GtHidDevice& device, gt::CalibrationPhase phase, double seconds,
-                   gt::CalibrationPhaseData& output, std::ofstream& csv, std::string& error) {
+                   gt::CalibrationPhaseData& output, std::ofstream& csv, std::string& error,
+                   LiveReporter* live = nullptr, int step = 1) {
     output.phase = phase;
     output.samples.clear();
+    if (live != nullptr) {
+        live->begin(live_kind(phase), step, "recording", seconds);
+    }
+    struct LiveEnd {
+        LiveReporter* live;
+        ~LiveEnd() {
+            if (live != nullptr) {
+                live->end();
+            }
+        }
+    } live_end{live};
     const auto end = SteadyClock::now() + std::chrono::duration<double>(seconds);
     while (SteadyClock::now() < end) {
         if (g_cancel.load()) {
@@ -321,6 +465,9 @@ bool capture_phase(gt::GtHidDevice& device, gt::CalibrationPhase phase, double s
         }
         report.imu.host_time_us = now_us();
         output.samples.push_back(report.imu);
+        if (live != nullptr) {
+            live->add(report.imu);
+        }
         if (csv) {
             csv << phase_name(phase) << ',' << report.imu.host_time_us << ',' << report.imu.tick_100us
                 << ',' << report.imu.accel_mps2.x << ',' << report.imu.accel_mps2.y << ','
@@ -353,13 +500,13 @@ bool capture_still(gt::GtHidDevice& device, const Options& options, const Progre
                    gt::CalibrationPhaseData& still, gt::Vec3& bias_body, std::ofstream& csv,
                    std::string& error) {
     for (int attempt = 1; attempt <= 3; ++attempt) {
-        if (!wait_ready(options, progress, step, kStillPrompt)) {
+        if (!wait_ready(options, progress, step, kStillPrompt, &device, gt::CalibrationPhase::Still)) {
             error = "cancelled";
             return false;
         }
         progress.emit(step, "recording", kStillPrompt);
         std::printf("Recording stillness now...\n");
-        if (!capture_phase(device, gt::CalibrationPhase::Still, 4.0, still, csv, error)) {
+        if (!capture_phase(device, gt::CalibrationPhase::Still, 4.0, still, csv, error, progress.live(), step)) {
             return false;
         }
         float rms = 0.0f;
@@ -368,6 +515,9 @@ bool capture_still(gt::GtHidDevice& device, const Options& options, const Progre
         if (rms <= 1.5f) {
             char detail[96];
             std::snprintf(detail, sizeof(detail), "head movement %.2f deg/s (limit 1.5)", rms);
+            if (progress.live() != nullptr) {
+                progress.live()->set_still(bias_body, still);
+            }
             progress.emit(step, "ok", kStillPrompt, detail, gt::still_quality(rms));
             return true;
         }
@@ -391,14 +541,14 @@ bool capture_still(gt::GtHidDevice& device, const Options& options, const Progre
 bool capture_motion(gt::GtHidDevice& device, const Options& options, const Progress& progress, int step,
                     gt::CalibrationPhase phase, float command_sign, const std::string& prompt, double seconds,
                     const gt::Vec3& bias_body, gt::CalibrationPhaseData& data, std::ofstream& csv,
-                    std::string& error) {
+                    std::string& error, gt::Vec3* measured_axis = nullptr) {
     for (int attempt = 1; attempt <= 3; ++attempt) {
-        if (!wait_ready(options, progress, step, prompt)) {
+        if (!wait_ready(options, progress, step, prompt, &device, phase)) {
             error = "cancelled";
             return false;
         }
         progress.emit(step, "recording", prompt);
-        if (!capture_phase(device, phase, seconds, data, csv, error)) {
+        if (!capture_phase(device, phase, seconds, data, csv, error, progress.live(), step)) {
             return false;
         }
         gt::CalibrationAxisDiagnostics diagnostics;
@@ -421,6 +571,9 @@ bool capture_motion(gt::GtHidDevice& device, const Options& options, const Progr
                 if (stats.used < 2) {
                     std::printf("Only one usable gesture was found, so its consistency cannot be checked.\n");
                 }
+                if (measured_axis != nullptr) {
+                    *measured_axis = diagnostics.axis_body;
+                }
                 progress.emit(step, "ok", prompt, detail, quality);
                 return true;
             }
@@ -431,6 +584,9 @@ bool capture_motion(gt::GtHidDevice& device, const Options& options, const Progr
             char detail[128];
             std::snprintf(detail, sizeof(detail), "excursion %.1f deg, dominance %.1f",
                           diagnostics.excursion_deg, diagnostics.dominance);
+            if (measured_axis != nullptr) {
+                *measured_axis = diagnostics.axis_body;
+            }
             progress.emit(step, "ok", prompt, detail, gt::axis_quality(diagnostics));
             return true;
         }
@@ -599,7 +755,17 @@ int calibrate_magnetometer(gt::GtHidDevice& device, const Options& options, std:
 }
 
 int calibrate_orientation_flow(gt::GtHidDevice& device, const Options& options, std::ofstream& csv) {
-    const Progress progress(options, "orientation", 4);
+    LiveReporter live(options.progress_json, options.repeats);
+    {
+        // The guide's forward direction comes from the existing calibration
+        // when there is a valid one (display only; this run measures its own).
+        std::array<float, 9> previous{};
+        std::string previous_error;
+        if (gt::load_orientation_calibration(options.output_path, previous, previous_error)) {
+            live.set_forward_hint(gt::live_forward_from_sensor_to_head(previous), "file");
+        }
+    }
+    const Progress progress(options, "orientation", 4, &live);
     std::printf("\nWear the glasses normally and sit upright. Keep your torso facing forward.\n"
                 "Each motion goes away from centre first, then returns to centre.\n");
 
@@ -638,10 +804,12 @@ int calibrate_orientation_flow(gt::GtHidDevice& device, const Options& options, 
                         motion_seconds, bias_body, yaw, csv, error)) {
         return fail_run(progress, 2, yaw_prompt, error);
     }
+    gt::Vec3 nod_axis;
     if (!capture_motion(device, options, progress, 3, gt::CalibrationPhase::Nod, -1.0f, nod_prompt,
-                        motion_seconds, bias_body, nod, csv, error)) {
+                        motion_seconds, bias_body, nod, csv, error, &nod_axis)) {
         return fail_run(progress, 3, nod_prompt, error);
     }
+    live.set_measured_right(nod_axis);
     if (!capture_motion(device, options, progress, 4, gt::CalibrationPhase::Tilt, +1.0f, tilt_prompt,
                         motion_seconds, bias_body, tilt, csv, error)) {
         return fail_run(progress, 4, tilt_prompt, error);
