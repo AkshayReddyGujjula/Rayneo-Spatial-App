@@ -61,6 +61,14 @@ void PoseEstimator::configure(const Config& cfg) {
     confirm_time_s_ = 0.0f;
     startup_reseeds_ = 0;
     startup_reverts_ = 0;
+    startup_episode_reseeds_ = 0;
+    single_active_ = false;
+    single_episode_ = 0;
+    single_sum_ = Vec3{};
+    single_windows_ = 0;
+    single_first_gravity_ = Vec3{};
+    single_first_s_ = 0.0f;
+    single_rotation_ = Quat{};
     confirm_reseeded_ = false;
     confirm_pair_last_ = -1;
     confirm_snapshot_ = Vec3{};
@@ -230,13 +238,15 @@ void PoseEstimator::reset_calibration_window() {
     calibration_run_s_ = 0.0f;
     calibration_run_samples_ = 0;
     calibration_sum_ = Vec3{};
+    calibration_accel_sum_ = Vec3{};
 }
 
 // Adds one sample to the contiguous calibration window (or discards the window
 // when the sample does not qualify) and returns true once a complete window is
-// available in calibration_sum_ / calibration_run_samples_. The caller
-// consumes it and resets the window.
-bool PoseEstimator::accumulate_calibration_window(const Vec3& raw, float dt, bool qualifies) {
+// available in calibration_sum_ / calibration_run_samples_ (and the matching
+// accelerometer sum). The caller consumes it and resets the window.
+bool PoseEstimator::accumulate_calibration_window(const Vec3& raw, const Vec3& accel, float dt,
+                                                  bool qualifies) {
     if (!qualifies) {
         reset_calibration_window();
         return false;
@@ -246,6 +256,9 @@ bool PoseEstimator::accumulate_calibration_window(const Vec3& raw, float dt, boo
     calibration_sum_.x += raw.x;
     calibration_sum_.y += raw.y;
     calibration_sum_.z += raw.z;
+    calibration_accel_sum_.x += accel.x;
+    calibration_accel_sum_.y += accel.y;
+    calibration_accel_sum_.z += accel.z;
     return calibration_run_samples_ >= 1 && calibration_run_samples_ >= cfg_.bias_samples &&
            calibration_run_s_ >= cfg_.calibration_window_s;
 }
@@ -271,8 +284,25 @@ void PoseEstimator::reset_escape() {
 // that agrees with the consensus ends it; one that instead agrees with the
 // snapshot reverts the bias to it in one step (two separate steady slow turns
 // had outvoted a correct startup bias) and ends it. One continuous slow turn
-// is a single episode, so it can never confirm itself.
-void PoseEstimator::confirm_startup_window(const Vec3& mean) {
+// is a single episode, so it can never confirm itself - unless gravity proves
+// the startup bias wrong (confirm_single_episode).
+void PoseEstimator::confirm_startup_window(const Vec3& mean, const Vec3& accel_mean) {
+    // Gravity-verified single episode: the windows of the current rest
+    // episode after the startup window itself.
+    if (!single_active_ || single_episode_ != motion_events_) {
+        single_active_ = true;
+        single_episode_ = motion_events_;
+        single_sum_ = Vec3{};
+        single_windows_ = 0;
+        single_first_gravity_ = accel_mean;
+        single_first_s_ = time_s_;
+        single_rotation_ = Quat{};
+    }
+    single_sum_.x += mean.x;
+    single_sum_.y += mean.y;
+    single_sum_.z += mean.z;
+    ++single_windows_;
+
     int current = confirm_count_ - 1;
     if (current >= 0 && confirm_episodes_[current] == motion_events_) {
         confirm_sums_[current].x += mean.x;
@@ -324,6 +354,90 @@ void PoseEstimator::confirm_startup_window(const Vec3& mean) {
         }
         return;
     }
+    confirm_single_episode(current, accel_mean);
+}
+
+// One rest episode as confirmation evidence. A steady slow turn and a stale
+// bias are the same gyro measurement, but not the same gravity measurement:
+// if the current bias were right, the head turned at d = (episode mean -
+// bias) during the episode, and gravity, fixed in the earth frame, would have
+// swung through the angle that rotation predicts in the sensor frame. Only
+// the component of d along gravity (a yaw about the vertical) predicts no
+// swing. So when d has a horizontal part beyond routine authority, predicts
+// a clear swing, and gravity stayed put, the current bias is wrong by that
+// part and the episode mean is the measured rate at rest. The vertical part
+// cannot be checked by gravity; it is taken with the episode on the strength
+// of that proof (the startup window has been shown to contain motion) and
+// the revert snapshot keeps it: a later episode that agrees with the startup
+// bias corrected only horizontally restores that instead.
+bool PoseEstimator::confirm_single_episode(int current, const Vec3& accel_mean) {
+    if (cfg_.startup_episode_min_s <= 0.0f || !single_active_ || single_windows_ < 2) {
+        return false;
+    }
+    const float span = time_s_ - single_first_s_;
+    if (span < cfg_.startup_episode_min_s) {
+        return false;
+    }
+    const float n = static_cast<float>(single_windows_);
+    const Vec3 episode{single_sum_.x / n, single_sum_.y / n, single_sum_.z / n};
+    const Vec3 d = vec_sub(episode, bias_degs_);
+    const float d_norm = vec_norm(d);
+    const float g_norm = vec_norm(accel_mean);
+    const float g0_norm = vec_norm(single_first_gravity_);
+    if (d_norm <= cfg_.adapt_residual_cap_degs || g_norm < 1e-3f || g0_norm < 1e-3f) {
+        return false;
+    }
+    const Vec3 g{accel_mean.x / g_norm, accel_mean.y / g_norm, accel_mean.z / g_norm};
+    const float d_vertical = d.x * g.x + d.y * g.y + d.z * g.z;
+    const Vec3 d_horizontal{d.x - d_vertical * g.x, d.y - d_vertical * g.y, d.z - d_vertical * g.z};
+    const float h_norm = vec_norm(d_horizontal);
+    if (h_norm < cfg_.startup_episode_tilt_degs) {
+        return false;
+    }
+    // The window means must stand for the whole episode: the rotation the bias
+    // in use integrated over every sample must carry the window-mean
+    // disagreement's horizontal part (a slow tilt during windows that was
+    // undone between them is not evidence).
+    const Quat& q = single_rotation_;
+    const float v_norm = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
+    const float rot_rad = 2.0f * std::atan2(v_norm, std::fabs(q.w));
+    const float sign = q.w < 0.0f ? -1.0f : 1.0f;
+    const float k = v_norm > 1e-9f ? sign * rot_rad / v_norm / kRadPerDeg : 0.0f;
+    const Vec3 rot_deg{q.x * k, q.y * k, q.z * k};
+    const float along = (rot_deg.x * d_horizontal.x + rot_deg.y * d_horizontal.y +
+                         rot_deg.z * d_horizontal.z) / h_norm;
+    if (along < 0.5f * h_norm * span) {
+        return false;
+    }
+    // atan2 of |cross| and dot keeps sub-degree angles exact in float (bug 25).
+    auto angle_deg = [](const Vec3& a, const Vec3& b) {
+        const Vec3 c{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+        return std::atan2(vec_norm(c), a.x * b.x + a.y * b.y + a.z * b.z) / kRadPerDeg;
+    };
+    // If that rotation were real, gravity (fixed in the earth frame) would
+    // now read conj(q) * g0 * q in the sensor frame.
+    const Vec3 g0{single_first_gravity_.x / g0_norm, single_first_gravity_.y / g0_norm,
+                  single_first_gravity_.z / g0_norm};
+    const Quat moved = quat_multiply(quat_multiply(quat_conjugate(q), Quat{0.0f, g0.x, g0.y, g0.z}), q);
+    const float predicted_deg = angle_deg(g0, Vec3{moved.x, moved.y, moved.z});
+    if (predicted_deg < cfg_.startup_episode_predict_min_deg) {
+        return false;
+    }
+    const float observed_deg = angle_deg(g0, g);
+    if (observed_deg > cfg_.startup_episode_observed_ratio * predicted_deg) {
+        return false;
+    }
+    confirm_snapshot_ = clamp_bias(Vec3{bias_degs_.x + d_horizontal.x, bias_degs_.y + d_horizontal.y,
+                                        bias_degs_.z + d_horizontal.z},
+                                   cfg_.bias_limit_degs);
+    confirm_consensus_ = episode;
+    confirm_pair_last_ = current;
+    confirm_reseeded_ = true;
+    bias_degs_ = clamp_bias(episode, cfg_.bias_limit_degs);
+    ++startup_reseeds_;
+    ++startup_episode_reseeds_;
+    reset_escape();
+    return true;
 }
 
 void PoseEstimator::finish_calibration() {
@@ -337,6 +451,7 @@ void PoseEstimator::finish_calibration() {
     confirm_time_s_ = 0.0f;
     confirm_reseeded_ = false;
     confirm_pair_last_ = -1;
+    single_active_ = false;  // the startup window itself is not single-episode evidence
     confirm_active_ = cfg_.startup_confirm_s > 0.0f;
     if (confirm_active_) {
         confirm_sums_[0] = mean;
@@ -427,7 +542,7 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
             stillness_degs_ < cfg_.calibration_gyro_dev_degs &&
             accel_dev_mps2_ < cfg_.calibration_accel_dev_mps2;
         calibration_phase_s_ += dt;
-        if (accumulate_calibration_window(raw, dt, window_sample)) {
+        if (accumulate_calibration_window(raw, sample.accel_mps2, dt, window_sample)) {
             finish_calibration();
         } else if (cfg_.calibration_timeout_s > 0.0f &&
                    calibration_phase_s_ >= cfg_.calibration_timeout_s) {
@@ -449,11 +564,13 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
         const bool window_sample = rest_eligible &&
                                    stillness_degs_ < cfg_.calibration_gyro_dev_degs &&
                                    accel_dev_mps2_ < cfg_.calibration_accel_dev_mps2;
-        if (accumulate_calibration_window(raw, dt, window_sample)) {
+        if (accumulate_calibration_window(raw, sample.accel_mps2, dt, window_sample)) {
             const float n = static_cast<float>(calibration_run_samples_);
             const Vec3 mean{calibration_sum_.x / n, calibration_sum_.y / n, calibration_sum_.z / n};
+            const Vec3 accel_mean{calibration_accel_sum_.x / n, calibration_accel_sum_.y / n,
+                                  calibration_accel_sum_.z / n};
             reset_calibration_window();
-            confirm_startup_window(mean);
+            confirm_startup_window(mean, accel_mean);
         }
         confirm_time_s_ += dt;
         if (confirm_time_s_ >= cfg_.startup_confirm_s) {
@@ -537,6 +654,20 @@ bool PoseEstimator::add_sample(const ImuSample& sample) {
             // the rollback above releases that part when the turn stops.
             step_bias(gyro_lpf_, dt / cfg_.bias_adapt_slow_tau_s, cfg_.bias_slew_degs_per_s * dt);
         }
+    }
+
+    // Single-episode evidence: the rotation the bias in use attributes to the
+    // head since the episode's first window (all samples, not only windows).
+    if (confirm_active_ && single_active_ && !confirm_reseeded_) {
+        const Vec3 w{(raw.x - bias_degs_.x) * kRadPerDeg * dt, (raw.y - bias_degs_.y) * kRadPerDeg * dt,
+                     (raw.z - bias_degs_.z) * kRadPerDeg * dt};
+        const float angle = vec_norm(w);
+        Quat step{};
+        if (angle > 1e-9f) {
+            const float s = std::sin(0.5f * angle) / angle;
+            step = Quat{std::cos(0.5f * angle), w.x * s, w.y * s, w.z * s};
+        }
+        single_rotation_ = quat_normalize(quat_multiply(single_rotation_, step));
     }
 
     // --- pose path: always live -----------------------------------------------

@@ -1359,6 +1359,183 @@ int main() {
               std::fabs(guarded.second - plain.second), 1e-3f);
     }
 
+    std::printf("\n-- scenario 25: contaminated startup, one glance, then one long rest (single episode) --\n");
+    {
+        // The recorded 2026-09-25 start: the startup window caught a smooth
+        // head roll with some yaw (it passes every fluctuation gate), the
+        // wearer glanced away, then rested continuously for 36+ s. That rest
+        // is one episode, and one episode cannot outvote the startup, so the
+        // two-episode confirmation never decided and the slow escape owned
+        // the error. Gravity proves the startup wrong here: the roll part of
+        // the disagreement predicts a gravity swing the accelerometer never
+        // saw.
+        struct Run {
+            float drift_deg;
+            float bias_err_degs;
+            unsigned reseeds;
+            unsigned episode_reseeds;
+        };
+        auto run = [&](float episode_min_s) {
+            PoseEstimator::Config cfg;
+            cfg.startup_episode_min_s = episode_min_s;
+            HeadSim sim(0x5EED0025u);
+            sim.bias_walk_degs = 0.0f;
+            sim.bias_pkg_degs.y = 0.4f;
+            sim.est.configure(cfg);
+            sim.hold(3.5f);
+            // 1.3 deg/s about an axis mostly forward (roll) with a yaw part:
+            // ~1.2 deg/s roll and ~0.5 deg/s yaw, spanning the startup window.
+            sim.move(1.3f, 0.5f, 3.5f, Vec3{1.0f, 0.0f, 0.4f});
+            glance(sim);
+            const float pub0 = sim.yaw();
+            const float true0 = true_yaw(sim);
+            sim.hold(45.0f);
+            Run r{};
+            r.drift_deg = (sim.yaw() - pub0) - (true_yaw(sim) - true0);
+            const Vec3 b = sim.est.gyro_bias_degs();
+            r.bias_err_degs = std::sqrt((b.x - sim.bias_pkg_degs.x) * (b.x - sim.bias_pkg_degs.x) +
+                                        (b.y - sim.bias_pkg_degs.y) * (b.y - sim.bias_pkg_degs.y) +
+                                        (b.z - sim.bias_pkg_degs.z) * (b.z - sim.bias_pkg_degs.z));
+            r.reseeds = sim.est.startup_reseeds();
+            r.episode_reseeds = sim.est.startup_episode_reseeds();
+            return r;
+        };
+        const Run before = run(0.0f);
+        const Run after = run(PoseEstimator::Config{}.startup_episode_min_s);
+        std::printf("  two-episode confirmation only: drift %.3f deg over 45 s, bias error %.4f deg/s, reseeds %u\n",
+                    before.drift_deg, before.bias_err_degs, before.reseeds);
+        std::printf("  + gravity-verified episode   : drift %.3f deg over 45 s, bias error %.4f deg/s, reseeds %u "
+                    "(%u single-episode)\n",
+                    after.drift_deg, after.bias_err_degs, after.reseeds, after.episode_reseeds);
+        check(before.reseeds == 0 && std::fabs(before.drift_deg) > 8.0f,
+              "one long rest cannot outvote the startup by itself (the gap)", std::fabs(before.drift_deg), 8.0f);
+        check(after.episode_reseeds == 1 && after.reseeds == 1, "exactly one gravity-verified reseed",
+              static_cast<float>(after.episode_reseeds), 1.0f);
+        check(std::fabs(after.drift_deg) < 0.5f * std::fabs(before.drift_deg),
+              "the episode removes at least half of the drift", std::fabs(after.drift_deg),
+              0.5f * std::fabs(before.drift_deg));
+        check(after.bias_err_degs < 0.1f, "and the bias ends close to the truth", after.bias_err_degs, 0.1f);
+    }
+
+    std::printf("\n-- scenario 26: long slow turns are never single-episode evidence --\n");
+    {
+        // The guard for scenario 25. A steady slow turn is the same gyro
+        // measurement as a stale bias. About the vertical it predicts no
+        // gravity swing at all (no horizontal part); about the head's own up
+        // axis with the head pitched down it does predict one - and, being
+        // real, produces it. Neither may ever reseed, and the estimator must
+        // stay bit-identical to the one without the rule.
+        struct Run {
+            float registered;
+            float end_yaw;
+            unsigned reseeds;
+            unsigned episode_reseeds;
+        };
+        auto run = [&](float episode_min_s, float pitch_deg, float rate_degs, float seconds,
+                       float observed_ratio = PoseEstimator::Config{}.startup_episode_observed_ratio) {
+            PoseEstimator::Config cfg;
+            cfg.startup_episode_min_s = episode_min_s;
+            cfg.startup_episode_observed_ratio = observed_ratio;
+            HeadSim sim(0xC0FFEE26u);
+            sim.bias_walk_degs = 0.0f;
+            sim.bias_pkg_degs.y = 0.4f;
+            sim.est.configure(cfg);
+            sim.hold(kWarmupS);
+            glance(sim);
+            if (pitch_deg != 0.0f) {
+                sim.move(pitch_deg, 0.5f, 0.5f, Vec3{0.0f, 1.0f, 0.0f});  // look down
+            }
+            // The turn starts straight out of the previous movement, so its
+            // first rest window (~1.5 s later) already sees the full rate
+            // and cannot agree with the startup episode on a ramp.
+            const Vec3 up{sim.attitude.m[0][2], sim.attitude.m[1][2], sim.attitude.m[2][2]};
+            const float t0 = true_yaw(sim);
+            const float y0 = sim.yaw();
+            sim.move(rate_degs, 0.5f, seconds, up);
+            Run r{};
+            const float true_turn = true_yaw(sim) - t0;
+            r.registered = (sim.yaw() - y0) / true_turn;
+            sim.hold(10.0f);
+            r.end_yaw = sim.yaw();
+            r.reseeds = sim.est.startup_reseeds();
+            r.episode_reseeds = sim.est.startup_episode_reseeds();
+            return r;
+        };
+        const Run level_on = run(PoseEstimator::Config{}.startup_episode_min_s, 0.0f, 0.6f, 40.0f);
+        const Run level_off = run(0.0f, 0.0f, 0.6f, 40.0f);
+        const Run tilted_on = run(PoseEstimator::Config{}.startup_episode_min_s, 25.0f, 1.0f, 30.0f);
+        const Run tilted_off = run(0.0f, 25.0f, 1.0f, 30.0f);
+        // The same turn with the gravity comparison switched off: proves the
+        // tilted turn reached that comparison and that it is what rejects it.
+        const Run tilted_blind = run(PoseEstimator::Config{}.startup_episode_min_s, 25.0f, 1.0f, 30.0f, 1e3f);
+        std::printf("  level head, 0.6 deg/s for 40 s: registered %.1f%%, reseeds %u (%u single), end yaw %.4f "
+                    "(rule off %.4f)\n",
+                    100.0f * level_on.registered, level_on.reseeds, level_on.episode_reseeds, level_on.end_yaw,
+                    level_off.end_yaw);
+        std::printf("  head pitched 25 deg, 1.0 deg/s about its up axis for 30 s: registered %.1f%%, reseeds %u "
+                    "(%u single), end yaw %.4f (rule off %.4f)\n",
+                    100.0f * tilted_on.registered, tilted_on.reseeds, tilted_on.episode_reseeds,
+                    tilted_on.end_yaw, tilted_off.end_yaw);
+        std::printf("  same tilted turn without the gravity comparison: %u single-episode reseeds, registered "
+                    "%.1f%%\n",
+                    tilted_blind.episode_reseeds, 100.0f * tilted_blind.registered);
+        check(tilted_blind.episode_reseeds == 1, "the gravity comparison is what rejects the tilted turn",
+              static_cast<float>(tilted_blind.episode_reseeds), 1.0f);
+        check(level_on.episode_reseeds == 0 && tilted_on.episode_reseeds == 0,
+              "no slow turn is learned as a single-episode bias",
+              static_cast<float>(level_on.episode_reseeds + tilted_on.episode_reseeds), 0.0f);
+        check(std::fabs(level_on.end_yaw - level_off.end_yaw) < 1e-6f &&
+                  std::fabs(tilted_on.end_yaw - tilted_off.end_yaw) < 1e-6f,
+              "bit-identical to the estimator without the rule",
+              std::max(std::fabs(level_on.end_yaw - level_off.end_yaw),
+                       std::fabs(tilted_on.end_yaw - tilted_off.end_yaw)),
+              1e-6f);
+        check(tilted_on.registered >= 0.8f, "at least 80% of the tilted-axis turn registers",
+              tilted_on.registered, 0.8f);
+    }
+
+    std::printf("\n-- scenario 27: the exposure - contaminated startup AND a slow level turn in one episode --\n");
+    {
+        // The one case the rule cannot see: the startup is proven wrong by
+        // its roll part, and the same long episode also holds a steady slow
+        // yaw about the vertical (two independent events). The vertical part
+        // then rides on the gravity proof and the turn's rate is learned with
+        // it. Measured, not hidden (lesson 5). Here the snapshot revert cannot
+        // help either (the startup's own vertical part was contaminated too,
+        // so the later rest agrees with neither), and the escape owns the
+        // learned rate afterwards, as it owns the startup error without the
+        // rule: the cost stays of the order of the estimator without it.
+        auto run = [&](float episode_min_s, unsigned& reseeds, unsigned& reverts) {
+            PoseEstimator::Config cfg;
+            cfg.startup_episode_min_s = episode_min_s;
+            HeadSim sim(0x5EED0027u);
+            sim.bias_walk_degs = 0.0f;
+            sim.bias_pkg_degs.y = 0.4f;
+            sim.est.configure(cfg);
+            sim.hold(3.5f);
+            sim.move(1.3f, 0.5f, 3.5f, Vec3{1.0f, 0.0f, 0.4f});
+            glance(sim);
+            const float pub0 = sim.yaw();
+            const float true0 = true_yaw(sim);
+            sim.move(0.6f, 0.5f, 20.0f, Vec3{0.0f, 0.0f, 1.0f});
+            glance(sim);
+            sim.hold(20.0f);
+            reseeds = sim.est.startup_episode_reseeds();
+            reverts = sim.est.startup_reverts();
+            return (sim.yaw() - pub0) - (true_yaw(sim) - true0);
+        };
+        unsigned rs_on = 0, rv_on = 0, rs_off = 0, rv_off = 0;
+        const float on = run(PoseEstimator::Config{}.startup_episode_min_s, rs_on, rv_on);
+        const float off = run(0.0f, rs_off, rv_off);
+        std::printf("  with the rule   : drift %.3f deg over ~45 s, single-episode reseeds %u, reverts %u\n", on,
+                    rs_on, rv_on);
+        std::printf("  without the rule: drift %.3f deg over the same period\n", off);
+        check(rs_on == 1, "the exposure is real: the turn rode on the gravity proof", static_cast<float>(rs_on),
+              1.0f);
+        check(std::fabs(on) < 1.25f * std::fabs(off), "and costs at most 25% more drift than no rule",
+              std::fabs(on), 1.25f * std::fabs(off));
+    }
+
     std::printf("\npose_scenarios: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

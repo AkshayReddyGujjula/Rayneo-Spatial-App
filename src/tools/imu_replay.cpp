@@ -8,6 +8,7 @@
 //              [--print-every S] [--trace OUT.csv [--trace-hz HZ]]
 //              [--startup-audit STEP [--audit-horizon S] [--audit-out OUT.csv]]
 //              [--confirm S] [--confirm-agree DEG_S] [--cal-window S]
+//              [--episode S] [--episode-gates TILT,PREDICT_DEG,RATIO]
 //
 // --trace writes a decimated row per 1/HZ s (bias, gates, pose, and the
 // calibrated magnetometer heading in the estimate's own earth frame, whose
@@ -16,7 +17,10 @@
 // the first-minute gyro-only drift against the magnetometer (needs a mag
 // calibration in the orientation file). --confirm / --confirm-agree /
 // --cal-window override the startup confirmation period, its agreement
-// tolerance and the startup window length.
+// tolerance and the startup window length. --episode / --episode-gates
+// override the gravity-verified single-episode confirmation (minimum span,
+// 0 disables; horizontal disagreement, predicted gravity swing, observed
+// ratio).
 //
 //              [--hard-iron-track] [--baseline-no-track] [--eval-until S] [--tracker-log]
 //              [--inject-hard-iron x,y,z --inject-from S [--inject-until S]]
@@ -213,13 +217,15 @@ int run_startup_audit(const std::vector<ImuSample>& samples, PoseEstimator::Conf
     std::FILE* out = out_path.empty() ? nullptr : std::fopen(out_path.c_str(), "w");
     if (out) {
         std::fprintf(out, "start_s,done,ready_s,bias_x,bias_y,bias_z,temp_c,drift_deg,reseeds,"
-                          "reseed_s,final_x,final_y,final_z\n");
+                          "reseed_s,final_x,final_y,final_z,episode_reseeds,reverts\n");
     }
     std::vector<float> ready_times;
     std::vector<float> drifts;
     int starts = 0;
     int never = 0;
     unsigned reseed_total = 0;
+    unsigned episode_total = 0;
+    unsigned revert_total = 0;
     const double end_t = t_of(samples.back());
     size_t i0 = 0;
     for (double start = 0.0; start + 60.0 + horizon_s < end_t; start += step_s) {
@@ -296,11 +302,13 @@ int run_startup_audit(const std::vector<ImuSample>& samples, PoseEstimator::Conf
             ++never;
         }
         reseed_total += est.startup_reseeds();
+        episode_total += est.startup_episode_reseeds();
+        revert_total += est.startup_reverts();
         if (out) {
-            std::fprintf(out, "%.1f,%d,%.3f,%.4f,%.4f,%.4f,%.2f,%.3f,%u,%.2f,%.4f,%.4f,%.4f\n", start,
+            std::fprintf(out, "%.1f,%d,%.3f,%.4f,%.4f,%.4f,%.2f,%.3f,%u,%.2f,%.4f,%.4f,%.4f,%u,%u\n", start,
                          ready_seen ? 1 : 0, ready_seen ? t_ready : -1.0, bias.x, bias.y, bias.z,
                          temp, drift, est.startup_reseeds(), reseed_s, final_bias.x, final_bias.y,
-                         final_bias.z);
+                         final_bias.z, est.startup_episode_reseeds(), est.startup_reverts());
         }
     }
     if (out) {
@@ -314,8 +322,9 @@ int run_startup_audit(const std::vector<ImuSample>& samples, PoseEstimator::Conf
         over10 += d > 10.0f ? 1 : 0;
         sum += d;
     }
-    std::printf("startup-audit: %d starts, %d never calibrated within 60 s, %u startup reseeds\n", starts,
-                never, reseed_total);
+    std::printf("startup-audit: %d starts, %d never calibrated within 60 s, %u startup reseeds "
+                "(%u single-episode), %u reverts\n",
+                starts, never, reseed_total, episode_total, revert_total);
     std::printf("startup-audit: ready after p50 %.2f s, p90 %.2f s, p99 %.2f s, max %.2f s\n",
                 percentile(ready_times, 0.5f), percentile(ready_times, 0.9f), percentile(ready_times, 0.99f),
                 percentile(ready_times, 1.0f));
@@ -358,6 +367,9 @@ int main(int argc, char** argv) {
     float audit_horizon = 60.0f;
     std::string audit_out;
     float cal_window = -1.0f;
+    float episode_min_s = -1.0f;
+    Vec3 episode_gates{};  // tilt deg/s, predicted-min deg, observed ratio
+    bool have_episode_gates = false;
     float confirm_s = -1.0f;
     float confirm_agree = -1.0f;
     bool track_hard_iron = false;
@@ -382,6 +394,10 @@ int main(int argc, char** argv) {
             confirm_agree = static_cast<float>(std::atof(argv[++i]));
         } else if (!std::strcmp(a, "--cal-window") && i + 1 < argc) {
             cal_window = static_cast<float>(std::atof(argv[++i]));
+        } else if (!std::strcmp(a, "--episode") && i + 1 < argc) {
+            episode_min_s = static_cast<float>(std::atof(argv[++i]));
+        } else if (!std::strcmp(a, "--episode-gates") && i + 1 < argc) {
+            have_episode_gates = parse_vec(argv[++i], episode_gates);
         } else if (!std::strcmp(a, "--trace") && i + 1 < argc) {
             trace_path = argv[++i];
         } else if (!std::strcmp(a, "--trace-hz") && i + 1 < argc) {
@@ -520,6 +536,14 @@ int main(int argc, char** argv) {
     }
     if (confirm_agree > 0.0f) {
         cfg.startup_confirm_agree_degs = confirm_agree;
+    }
+    if (episode_min_s >= 0.0f) {
+        cfg.startup_episode_min_s = episode_min_s;
+    }
+    if (have_episode_gates) {
+        cfg.startup_episode_tilt_degs = episode_gates.x;
+        cfg.startup_episode_predict_min_deg = episode_gates.y;
+        cfg.startup_episode_observed_ratio = episode_gates.z;
     }
     if (cal_window > 0.0f) {
         cfg.calibration_window_s = cal_window;
