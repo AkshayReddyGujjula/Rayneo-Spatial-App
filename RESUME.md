@@ -142,3 +142,5 @@ Window 3: merge leftovers, final full suite, final report. Stop at 10:30.
   3-4 Opus agents at medium/high, find and fix real defects. Nudge task rayneo-overnight-resume-2 moved to 08:41 to start it.
 - 08:47 The 08:41 nudge ran but never reached this session; user asked at 08:46. Started the code review now (5-hour 0%).
   Four Opus reviewers R6-A..D (estimator+engine, calibration+guide, controller window/state, paint/widgets).
+- 09:18 Code review complete: R6-A..D and follow-ups merged (last 8467772). Clean rebuild 0 warnings, 11/11.
+  AGENTS.md section 10 + REPORT section 8 updated.

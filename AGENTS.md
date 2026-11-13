@@ -472,6 +472,19 @@ reports with all numbers and rejected ideas: `docs/overnight/track-a.md` (estima
   calibration panel: red line along the commanded axis, live ball, 12 deg gate and 25/20/20 deg
   target marks, off-axis/too-fast/wrong-way colouring and hints, steadiness ring, repeat dots,
   retry corrections. `docs/overnight/r5-calibration-guide.md`.
+- **Round 6 (owner request): in-depth code review** of the whole branch by four reviewers
+  (`docs/overnight/r6-review-a.md` .. `-d.md`). Fixed, each with a failing-first test: turn
+  prediction restarted on an IMU reconnect and on the sample a recenter is applied (new pose epoch,
+  `pose_scenarios` 29/30: 23.9 / 12.9 deg overshoot -> 0); orientation_calibrate reads its command
+  line as UTF-8 (`wmain`; non-ASCII config paths saved elsewhere or failed); cancel checked before
+  every save; progress lines always valid UTF-8; console close waits for stream-off; setup guide
+  refused while a calibration runs; console calibrations refused while the sensor is in use; tray
+  start refused under the setup guide; logoff cancels a calibration gracefully (2 s cap); page
+  switch ends a drag with a normal save; Layout page usable at the minimum window size; one
+  go-to-Layout target on Home; slider knob drawn where a press maps; sidebar shows Failed; editor
+  labels keep the angle and never overlap; start refused while the layout file cannot load (the
+  engine would exit 1); complete shortcuts card; glasses guide repaints only on change and follows
+  display changes. `pose_selftest` and scenarios 1-28 printed output unchanged.
 - **Needs a person with the glasses:** the calibration guide overlay (appears, stays click-through,
   ball directions in both guide frames, readability on the optics), the live window's message paths, real startup reseeds
   (engine log `startup confirmation: reseeds=N reverts=M`), the prediction horizon (overshoot vs

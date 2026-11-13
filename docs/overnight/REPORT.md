@@ -112,6 +112,22 @@ axis (15 % off-axis motion tilts the measured axis by about 8.5°), on a reasona
 20-25°), smooth moderate speed and a full return to centre - exactly what the guide shows. The
 calibration maths and pass/fail checks are unchanged.
 
+### 8. In-depth code review of everything (your 08:40 request)
+Four reviewers went through the whole branch (tracking and engine, calibration and guide, app
+window and settings, drawing and layout), proved each suspected bug before fixing it, and added a
+test that fails without each fix. 21 real bugs fixed, among them:
+- the view could be thrown ~24° past centre after the glasses' sensor reconnects, or ~13° when a
+  recenter landed between frames (turn prediction mistook the jump for a fast turn);
+- a config folder with a non-English character made calibration fail or save to the wrong place;
+- reopening the setup guide during a calibration lost it, while it kept holding the sensor;
+- "Open in console" calibration could run beside the workspace and switch its sensor off;
+- Cancel right before the save could still save; logging off left the sensor on;
+- at the smallest window size the Layout page lost its editor and sliders;
+- clicking a slider knob nudged its value; a crashed workspace showed as "Stopped";
+- Home said "Ready to start" with a broken layout file (the engine would exit at once).
+Details per area: `docs/overnight/r6-review-a.md` to `r6-review-d.md`. Everything still needs a
+real run with the glasses; nothing in the review could touch hardware.
+
 ## Your decisions
 - **Calibration repeats in the app: 3** (your call in the morning). In-app head calibration now
   asks for each turn, nod and tilt three times (about a minute and a half in total); the setup
