@@ -64,4 +64,19 @@ PointerDragEnd pointer_on_capture_lost(State& state, int& pending_click_id) {
     return pointer_end_drag(state, pending_click_id);
 }
 
+// WM_MOUSELEAVE: hover and the pressed look end when the pointer leaves the
+// window (a button released outside never reaches us). Both are kept during
+// a captured drag. The click itself is still decided by the pending click id
+// on button-up. Returns true when anything changed (repaint).
+template <typename State>
+bool pointer_on_mouse_leave(State& state) {
+    if (state.drag_active) {
+        return false;
+    }
+    const bool changed = state.hover_id != 0 || state.press_id != 0;
+    state.hover_id = 0;
+    state.press_id = 0;
+    return changed;
+}
+
 }  // namespace gt

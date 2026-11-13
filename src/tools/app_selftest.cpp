@@ -1653,6 +1653,26 @@ void test_ui_input() {
     lost = gt::pointer_on_capture_lost(button_up, pending);
     check(up.ended && up.save_comfort && !lost.ended && !lost.save_comfort,
           "the button-up's own ReleaseCapture does not end (or save) the drag twice");
+
+    // Press a button, drag out and release outside: the button-up never
+    // arrives, so leaving the window must drop the pressed look.
+    PointerFixture pressed;
+    pressed.press_id = 42;
+    pressed.hover_id = 42;
+    check(gt::pointer_on_mouse_leave(pressed) && pressed.press_id == 0 && pressed.hover_id == 0,
+          "leaving the window clears the pressed look and the hover");
+    PointerFixture press_only;
+    press_only.press_id = 42;
+    check(gt::pointer_on_mouse_leave(press_only) && press_only.press_id == 0,
+          "leaving the window clears a press even with no hover (repaint requested)");
+    check(!gt::pointer_on_mouse_leave(press_only), "a second leave changes nothing");
+    PointerFixture dragging;
+    dragging.press_id = 42;
+    dragging.hover_id = 42;
+    dragging.drag_active = true;
+    check(!gt::pointer_on_mouse_leave(dragging) && dragging.press_id == 42 &&
+              dragging.hover_id == 42,
+          "a captured drag keeps its pressed look and hover when the pointer leaves");
 }
 
 int main() {

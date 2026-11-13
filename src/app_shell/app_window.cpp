@@ -907,8 +907,7 @@ void AppWindow::on_mouse_move(int x, int y) {
 
 void AppWindow::on_mouse_leave() {
     tracking_mouse_ = false;
-    if (state_.hover_id != kUiNone && !state_.drag_active) {
-        state_.hover_id = kUiNone;
+    if (pointer_on_mouse_leave(state_)) {
         invalidate();
     }
 }
