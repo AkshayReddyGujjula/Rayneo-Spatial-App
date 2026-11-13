@@ -78,7 +78,9 @@ Build dirs live under `%LOCALAPPDATA%\Temp\rayneo-overnight\` (never inside the 
 - 04:15 R2-C merged (bdaec00; pose_scenarios conflict: kept 24 + 25-27): gravity-verified single-episode
   startup confirmation. Verified: pose_selftest and scenarios 1-24 output identical, only 25-27 appended; 11/11.
   Engine log now reports single-episode reseeds (eeaf37d). AGENTS.md round 2 folded (2a8cdec), REPORT round 2 written.
-  Remaining: merge R3-B, final full suite, final RESUME/REPORT touch.
+  R3-C launched (Opus high): adversarial review of single-episode confirmation + calibration repeats maths.
+- 04:35 R3-B merged (1c09800): 8 visual defects fixed, all text token pairs >= WCAG AA (ui_snapshot now checks). 11/11.
+  Remaining: merge R3-C, final full suite, final RESUME/REPORT touch.
 
 ## Round 2 plan (start at 03:45; window 2 ~03:40-08:40, window 3 ~08:45-10:30 hard stop)
 Window 2, in parallel, each in its own worktree reset onto overnight-claude-improvements:
