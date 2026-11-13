@@ -61,8 +61,14 @@ float layout_slider_value(LayoutField field, float fraction);
 // enter > leave, yaw wrapping) so the result still validates.
 bool set_layout_field(Layout& layout, ScreenLayout& screen, LayoutField field, float value,
                       std::string& error);
+// Whole degrees for user-facing text: "45°", "−45°" (U+2212), never "-0°".
+std::string format_degrees(double value);
 std::string format_layout_field_value(LayoutField field, float value);
+// Technical one-liner for the Diagnostics page ("3 screens | arc -45..45 deg | ...").
 std::string layout_summary(const Layout& layout);
+// Sentence-style summary for normal pages:
+// "3 screens  ·  arc −45° to 45°  ·  46° field of view  ·  120/30/1 fps capture".
+std::string layout_display_summary(const Layout& layout);
 
 // Named user presets: validated Layout files stored as <name>.json inside a
 // presets directory (normally <config>/layouts/presets). The engine keeps

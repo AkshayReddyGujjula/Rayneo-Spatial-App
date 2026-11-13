@@ -329,4 +329,60 @@ std::string engine_status_summary(const EngineStatusFile& status) {
     return summary;
 }
 
+std::string engine_status_display_summary(const EngineStatusFile& status) {
+    if (!status.parsed) {
+        return "Waiting for the engine to report its status";
+    }
+    std::vector<std::string> parts;
+    if (status.mode == kModeWorkspace) {
+        parts.push_back("Workspace");
+    } else if (status.mode == kModePreview) {
+        parts.push_back("Preview");
+    } else if (!status.mode.empty()) {
+        parts.push_back(status.mode);
+    }
+    if (status.state == kStatusFailed) {
+        std::string failed = "stopped with an error";
+        if (!status.error.empty()) {
+            failed += ": " + status.error;
+        }
+        parts.push_back(failed);
+    } else {
+        if (status.state == kStatusStarting) {
+            parts.push_back("starting");
+        }
+        if (status.screens > 0) {
+            parts.push_back(std::to_string(status.screens) + (status.screens == 1 ? " screen" : " screens"));
+        }
+        if (status.fps > 0.0) {
+            char fps[32];
+            std::snprintf(fps, sizeof(fps), "%.0f fps", status.fps);
+            parts.push_back(fps);
+        }
+        if (status.mode == kModeWorkspace) {
+            parts.push_back(status.vdd ? "virtual desktops" : "virtual desktops unavailable");
+        }
+        if (status.detached) {
+            parts.push_back("laptop screen off");
+        }
+        if (!status.imu) {
+            parts.push_back("no head tracking");
+        }
+    }
+    std::string summary;
+    for (const std::string& part : parts) {
+        if (!summary.empty()) {
+            summary += "  ·  ";
+        }
+        summary += part;
+    }
+    if (summary.empty()) {
+        summary = status.state;
+    }
+    if (!summary.empty() && summary.front() >= 'a' && summary.front() <= 'z') {
+        summary.front() = static_cast<char>(summary.front() - 'a' + 'A');
+    }
+    return summary;
+}
+
 }  // namespace gt

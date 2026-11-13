@@ -275,6 +275,22 @@ void test_engine_commands() {
               gt::engine_status_summary(failed_status).find("virtual display startup failed") !=
                   std::string::npos,
           "a failed status carries its reason into the summary");
+    // Normal pages get the sentence-style summary; the technical one above
+    // stays on the Diagnostics page.
+    check(gt::engine_status_display_summary(status_file) ==
+              "Workspace  ·  3 screens  ·  120 fps  ·  virtual desktops  ·  laptop screen off",
+          "the page status summary is plain words with middle dots");
+    check(gt::engine_status_display_summary(failed_status) ==
+              "Stopped with an error: virtual display startup failed",
+          "a failed status reads as a sentence with its reason");
+    gt::EngineStatusFile preview_status;
+    check(gt::parse_engine_status("state=starting\nmode=preview\nscreens=1\nfps=0\nvdd=0\nimu=0\n",
+                                  preview_status, error) &&
+              gt::engine_status_display_summary(preview_status) ==
+                  "Preview  ·  starting  ·  1 screen  ·  no head tracking",
+          "preview, starting, one screen and no head tracking read plainly");
+    check(gt::engine_status_display_summary(gt::EngineStatusFile{}).find('|') == std::string::npos,
+          "no status yet is a sentence too");
 
     // Engine options (Tracking page) -> engine flags.
     const auto value_after = [](const std::vector<std::string>& arguments, const char* flag) {
@@ -601,6 +617,39 @@ void test_field_normalisation() {
           "an unknown field is refused");
     check(gt::layout_summary(layout).find("screens") != std::string::npos,
           "the layout summary names the screen count");
+
+    // User-facing angles read as degrees with a real minus sign (U+2212);
+    // before 2026-11-13 the formatter printed "-45 deg" / "0 deg".
+    check(gt::format_layout_field_value(gt::LayoutField::Yaw, -45.0f) == "−45°" &&
+              gt::format_layout_field_value(gt::LayoutField::Fov, 46.0f) == "46°" &&
+              gt::format_layout_field_value(gt::LayoutField::Pitch, -0.4f) == "0°" &&
+              gt::format_layout_field_value(gt::LayoutField::LeaveDeg, 12.6f) == "13°",
+          "angle fields format as whole degrees with the degree sign and no -0");
+    check(gt::format_layout_field_value(gt::LayoutField::Distance, 2.0f) == "2.00 m" &&
+              gt::format_layout_field_value(gt::LayoutField::ActiveFps, 60.0f) == "60 fps",
+          "distance and frame-rate fields keep their units");
+    gt::Layout triple;
+    triple.fov_deg = 46.0f;
+    for (const float yaw : {-45.0f, 0.0f, 45.0f}) {
+        gt::ScreenLayout s;
+        s.yaw_deg = yaw;
+        triple.screens.push_back(s);
+    }
+    triple.capture_policy.active_fps = 120;
+    triple.capture_policy.mid_fps = 30;
+    triple.capture_policy.idle_fps = 1;
+    check(gt::layout_display_summary(triple) ==
+              "3 screens  ·  arc −45° to 45°  ·  46° field of view  ·  "
+              "120/30/1 fps capture",
+          "the page layout summary is plain words with degree signs");
+    check(gt::layout_summary(triple) == "3 screens | arc -45..45 deg | 46 deg fov | 120/30/1 fps",
+          "the Diagnostics layout summary keeps its technical form");
+    gt::Layout single = triple;
+    single.screens.resize(1);
+    single.screens[0].yaw_deg = 0.0f;
+    check(gt::layout_display_summary(single).rfind("1 screen  ·  at 0°  ·  ", 0) == 0 &&
+              gt::layout_display_summary(gt::Layout{}) == "No screens",
+          "one screen is singular and has a position, not an arc");
 }
 
 bool file_contains(const std::filesystem::path& path, const std::string& needle) {
@@ -1360,7 +1409,8 @@ void test_calibration_progress() {
     timed.consume_line(
         "@@progress {\"flow\":\"orientation\",\"step\":1,\"steps\":4,\"state\":\"waiting\",\"prompt\":\"Still\"}",
         19.01);
-    check(timed.retry_reason == "1.80 deg/s of movement (limit 1.5)" && std::fabs(timed.countdown_s(20.01) - 4.0) < 1e-6,
+    // Shown text uses the degree sign (was "1.80 deg/s ..." before the 2026-11-13 wording pass).
+    check(timed.retry_reason == "1.80°/s of movement (limit 1.5)" &&std::fabs(timed.countdown_s(20.01) - 4.0) < 1e-6,
           "a retry reason survives the next waiting line, and the countdown restarts");
     timed.consume_line("@@progress {\"flow\":\"orientation\",\"step\":2,\"steps\":4,\"state\":\"waiting\",\"prompt\":\"Turn\"}",
                        30.0);
@@ -1395,6 +1445,45 @@ void test_calibration_progress() {
               gt::cal_reason_text("plain words") == "plain words" &&
               gt::cal_reason_text("STREAM_FAILED: timeout").find("motion data") != std::string::npos,
           "reason codes become plain sentences");
+    check(gt::cal_user_units("head movement 0.80 deg/s (limit 1.5)") == "head movement 0.80°/s (limit 1.5)" &&
+              gt::cal_user_units("3 of 3 gestures used, spread 1.2 deg, excursion 30.0 deg") ==
+                  "3 of 3 gestures used, spread 1.2°, excursion 30.0°" &&
+              gt::cal_user_units("turn at least 90 degrees") == "turn at least 90 degrees" &&
+              gt::cal_user_units("the deg word") == "the deg word",
+          "tool text shown in the app uses the degree sign, words are left alone");
+    check(gt::cal_reason_text("AXES_DISAGREE: the steps disagree (up_vs_yaw 6.10 deg, nod_level 5.40 deg, "
+                              "nod_tilt 12.80 deg, handedness 9.95 deg)") == "The steps disagree" &&
+              gt::cal_reason_text("SMALL_EXCURSION: excursion 8.0 deg") == "Excursion 8.0°",
+          "failure text drops the raw axis metrics and uses degree signs");
+
+    // The calibration-saved line: plain words by quality band, raw metrics never shown.
+    const std::string metrics = "up_vs_yaw 6.10 deg, nod_level 5.40 deg, nod_tilt 12.80 deg, handedness 9.95 deg";
+    const std::string good = gt::calibration_saved_text(gt::CalFlow::Orientation, 0.85f, metrics);
+    const std::string fair = gt::calibration_saved_text(gt::CalFlow::Orientation, 0.5f, metrics);
+    const std::string retry = gt::calibration_saved_text(gt::CalFlow::Orientation, 0.1f, metrics);
+    const std::string unknown = gt::calibration_saved_text(gt::CalFlow::Orientation, -1.0f, {});
+    check(good.find("agreed closely") != std::string::npos && fair.find("reasonably well") != std::string::npos &&
+              retry.find("disagreed") != std::string::npos &&
+              unknown == "The new calibration is in use from the next start.",
+          "the saved line follows the Good / Fair / Retry bands");
+    check(good.find("up_vs_yaw") == std::string::npos && fair.find("deg") == std::string::npos &&
+              retry.find("handedness") == std::string::npos,
+          "the saved line never shows the raw metric names");
+    check(gt::calibration_saved_text(gt::CalFlow::Orientation, 0.85f,
+                                     metrics + "; next: calibrate the magnetometer (--mag) for drift-free heading")
+                  .find("Next, calibrate the compass") != std::string::npos &&
+              good.find("compass") == std::string::npos,
+          "the compass follow-up appears only when the tool asks for it");
+    const std::string mag_ok = gt::calibration_saved_text(
+        gt::CalFlow::Mag, 0.9f, "field 51.5 uT, residual 0.80 uT, turn 360 deg, tilt 40 deg, observability 0.120");
+    const std::string mag_thin = gt::calibration_saved_text(
+        gt::CalFlow::Mag, 0.5f,
+        "field 51.5 uT, residual 0.80 uT, turn 200 deg, tilt 10 deg, observability 0.020; for a better result "
+        "repeat and nod up and down and tilt ear to shoulder more");
+    check(mag_ok.find("heading lock is on") != std::string::npos && mag_ok.find("uT") == std::string::npos &&
+              mag_thin.find("run it again and nod up and down and tilt ear to shoulder more.") != std::string::npos &&
+              mag_thin.find("observability") == std::string::npos,
+          "the compass saved line is plain words and keeps the tool's movement advice");
 }
 
 void test_onboarding(const std::filesystem::path& directory) {

@@ -71,7 +71,12 @@ struct EngineStatusFile {
 };
 
 bool parse_engine_status(const std::string& text, EngineStatusFile& status, std::string& error);
+// Technical one-liner for the Diagnostics page ("ready | workspace | 3 screens | ...").
 std::string engine_status_summary(const EngineStatusFile& status);
+// Sentence-style summary for normal pages (Home hero, Readiness rows):
+// "Workspace  ·  3 screens  ·  60 fps  ·  virtual desktops". The monitor index and
+// mode size stay on the Diagnostics page only.
+std::string engine_status_display_summary(const EngineStatusFile& status);
 
 // Freshness gate for the status file: the engine rewrites it every second,
 // so content older than max_age_s (or from the future, or missing its stamp)

@@ -193,14 +193,23 @@ std::string cal_reason_text(const std::string& detail) {
                         "folder is writable."},
         {"LOG_FAILED", "The raw calibration log could not be opened."},
     };
+    // The tool appends its raw axis metrics to a failure; they are diagnostics.
+    const auto tidy = [](std::string text) {
+        const size_t metrics = text.find(" (up_vs_yaw ");
+        if (metrics != std::string::npos) {
+            const size_t close = text.find(')', metrics);
+            text.erase(metrics, close == std::string::npos ? std::string::npos : close + 1 - metrics);
+        }
+        return cal_user_units(text);
+    };
     const size_t colon = detail.find(": ");
     if (colon == std::string::npos || colon == 0) {
-        return detail;
+        return tidy(detail);
     }
     const std::string code = detail.substr(0, colon);
     for (char c : code) {
         if (!((c >= 'A' && c <= 'Z') || c == '_')) {
-            return detail;
+            return tidy(detail);
         }
     }
     for (const Known& known : kKnown) {
@@ -212,7 +221,71 @@ std::string cal_reason_text(const std::string& detail) {
     if (!rest.empty() && rest.front() >= 'a' && rest.front() <= 'z') {
         rest.front() = static_cast<char>(rest.front() - 'a' + 'A');
     }
-    return rest;
+    return tidy(rest);
+}
+
+std::string cal_user_units(const std::string& text) {
+    std::string out;
+    out.reserve(text.size() + 8);
+    size_t i = 0;
+    while (i < text.size()) {
+        // " deg" after a digit, followed by "/s", the end or a non-letter.
+        if (text.compare(i, 4, " deg") == 0 && i > 0 && text[i - 1] >= '0' && text[i - 1] <= '9') {
+            const size_t after = i + 4;
+            const bool word_ends =
+                after >= text.size() || !((text[after] >= 'a' && text[after] <= 'z') ||
+                                          (text[after] >= 'A' && text[after] <= 'Z'));
+            if (word_ends) {
+                out += "°";
+                i = after;
+                continue;
+            }
+        }
+        out += text[i];
+        ++i;
+    }
+    return out;
+}
+
+std::string calibration_saved_text(CalFlow flow, float quality, const std::string& detail) {
+    // Same bands as gt::calibration_quality_label (Good >= 0.7, Fair >= 0.4).
+    const bool known = std::isfinite(quality) && quality >= 0.0f;
+    const bool good = known && quality >= 0.7f;
+    const bool fair = known && !good && quality >= 0.4f;
+    std::string text;
+    if (flow == CalFlow::Mag) {
+        text = "The heading lock is on from the next start, so the screens stay put instead of slowly "
+               "turning.";
+        const char* kAdvice = "for a better result repeat and ";
+        const size_t at = detail.find(kAdvice);
+        if (at != std::string::npos) {
+            std::string advice = detail.substr(at + std::char_traits<char>::length(kAdvice));
+            const size_t end = advice.find(';');
+            if (end != std::string::npos) {
+                advice.erase(end);
+            }
+            if (!advice.empty()) {
+                text += " Coverage was thin: for a better result, run it again and " + advice + ".";
+            }
+        }
+        return text;
+    }
+    if (good) {
+        text = "The steps agreed closely, so your head axes are straight. The new calibration is in use "
+               "from the next start.";
+    } else if (fair) {
+        text = "The steps agreed reasonably well. The new calibration is in use from the next start; if "
+               "the screens tilt when you nod, run it again.";
+    } else if (known) {
+        text = "The steps disagreed with each other. The calibration was saved, but running it again "
+               "should give a straighter result.";
+    } else {
+        text = "The new calibration is in use from the next start.";
+    }
+    if (detail.find("next: calibrate the magnetometer") != std::string::npos) {
+        text += " Next, calibrate the compass for drift-free heading.";
+    }
+    return text;
 }
 
 void CalRunState::begin(CalFlow run_flow, bool auto_mode, double delay_s) {
