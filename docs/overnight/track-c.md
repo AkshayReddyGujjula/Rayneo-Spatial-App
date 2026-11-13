@@ -122,3 +122,47 @@ Complete: all requirements implemented, committed, full suite green (11 tests in
 `ui_snapshot`). Possible follow-ups: per-monitor pages remembered per-session scroll, a stacked
 Layout page for very narrow windows (currently editor and inspector stay side by side down to the
 760 px minimum), and an animated engine-start progress readout once the engine reports phases.
+
+## Integration (tracks A + B + C)
+
+Integration branch on top of `overnight-claude-improvements`; MSVC RelWithDebInfo, warning-clean,
+11/11 ctest at each commit. No glasses: nothing here ran against hardware.
+
+* **Turn prediction** (Track A `--predict-ms`): the Tracking page's unwired "Motion prediction"
+  switch became a *Turn prediction* segment, Off / 20 / 35 / 50 ms, default 35, with Track A's help
+  text. `EngineOptions::predict_ms` is persisted as `engine_options.predict_ms`; a file without it,
+  or with the old `motion_prediction` key (never wired, so ignored), loads as 35; out-of-range hand
+  edits clamp to 0..100. The launch command always passes `--predict-ms N` when head tracking is on
+  (never with `--no-imu`). `kUiMotionPrediction` (1434) is retired, not renumbered.
+* **Earbud magnet compensation (experimental)** (Track B `--mag-track-hard-iron`): Tracking-page
+  switch, default off, persisted as `engine_options.mag_track_hard_iron`; help text says it is
+  measured on recordings only and can react to a real field change.
+* **Heading lock badge**: `parse_engine_status` reads `mag`, `mag_error_deg`, `mag_offset_ut`;
+  `poll_engine` sets `AppState::heading_lock` via `heading_lock_from_status` (new `Acquiring`
+  state). Not reported when no fresh status, no `mag` key (older engine), `imu=0` or an unknown
+  value. Wording follows track-b.md (Gyro only / Finding north / Locked / Interference / Checking).
+* **Calibration wizard vs the real tool** (`orientation_calibrate.cpp`), mismatches found:
+  1. The wizard waited for ENTER ("I'm ready"); a wearer holding a pose cannot reach the keyboard.
+     In-app runs now use `--progress-json --auto --auto-delay 5`, with a "Starts in N s" countdown
+     and a *Start now* button (sends an empty line).
+  2. Cancel sent `q` on stdin, but `--auto` never read stdin, so every cancel ended in
+     TerminateProcess with the IMU stream on. Fixed in the tool: with `--auto` and a piped stdin, a
+     watcher thread (Win32 ReadFile, no CRT lock) maps `q` or EOF to the normal Ctrl+C path (stream
+     off, final `failed`/`cancelled`, exit 1) and an empty line to "start now". Console use is
+     unchanged. Closing the controller mid-run now cancels and waits up to 3 s before terminating.
+  3. A `retry` detail was overwritten by the `waiting` line that follows within milliseconds; it
+     is kept (shown as "Again: ...") until the step changes.
+  4. Reason codes are shown as plain sentences (`cal_reason_text`; setup codes such as NO_DEVICE
+     get a fix-it sentence), exit code 2 names an outdated tool, and a tool-side `cancelled` reads
+     as cancelled. Exit codes 0/1 and the done/failed final line already matched.
+  5. `--mag --output <file>` was already right (the tool reads the orientation from and merges the
+     mag block into the same file). The compass step and card gain an *Earbuds in* switch mapped to
+     `--earbuds` (also on the console launch); it is session-only, not persisted.
+* Tests: `app_selftest` (options -> command line, status keys -> state, old-file loading, tool
+  arguments, countdown, retry reason, plain failures, exit 2); `orientation_calibration_selftest`
+  (stdin command parser). Renders: `tracking-running-1920x1080-150-light`,
+  `tracking-compass-earbuds-1280x800`, `tracking-calibrating-1280x800` (retry + countdown, below
+  the fold), `wizard-4-compass-1280x800`, `wizard-4-compass-countdown-1280x800`,
+  `wizard-3-head-failed-1280x800-light` (NO_DEVICE before step 1).
+* Unverified: the stdin watcher and graceful cancel against real glasses (does the stream really go
+  off, how long the stop takes); whether 5 s is the right reading delay; the live `mag` badge.

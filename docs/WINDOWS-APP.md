@@ -222,7 +222,7 @@ ignored within version 1, while an unsupported version is rejected explicitly.
   "onboarding_complete": true,
   "theme": "dark",
   "last_page": "home",
-  "engine_options": { "motion_prediction": false }
+  "engine_options": { "predict_ms": 35, "mag_track_hard_iron": false }
 }
 ```
 
@@ -241,7 +241,8 @@ ignored within version 1, while an unsupported version is rejected explicitly.
 | `onboarding_complete` | bool (missing = false) | the first-run setup guide was finished or skipped |
 | `theme` | `dark` (default), `light`, `system` | controller colours; `system` follows the Windows app theme |
 | `last_page` | `home`, `layout`, `comfort`, `tracking`, `diagnostics`, `settings` | page shown at launch; an unknown value falls back to Home |
-| `engine_options.motion_prediction` | bool (default false) | engine motion prediction; applies at the next engine start |
+| `engine_options.predict_ms` | int 0..100 (default 35; UI offers 0/20/35/50) | `--predict-ms`: turn prediction horizon, 0 = off; applies at the next engine start. An old `motion_prediction` key is ignored |
+| `engine_options.mag_track_hard_iron` | bool (default false) | `--mag-track-hard-iron`: experimental earbud magnet compensation; applies at the next engine start |
 
 The controller writes this file at runtime (window placement, last mode, last engine error), so a
 dirty working tree after running the app is expected.
