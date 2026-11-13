@@ -1448,9 +1448,21 @@ void test_onboarding(const std::filesystem::path& directory) {
     }
     check(labelled, "every step has a stepper label and a title");
 
-    gt::onboarding_close(flow, config);
-    check(!flow.active && config.onboarding_complete && !gt::onboarding_should_show(config),
-          "finishing (or skipping) closes the guide and marks it complete");
+    {
+        // An app.json that failed to load: the controller runs on defaults
+        // (onboarding_complete false, so the guide opens) while the user's
+        // file stays on disk for them to fix. Finishing or skipping the guide
+        // must not write the defaults over it.
+        gt::OnboardingFlow guide;
+        guide.start();
+        gt::AppConfig defaults_in_use;
+        check(!gt::onboarding_close(guide, defaults_in_use, false) && !guide.active &&
+                  defaults_in_use.onboarding_complete,
+              "closing the guide over an app.json that failed to load does not write the file");
+    }
+    check(gt::onboarding_close(flow, config, true) && !flow.active && config.onboarding_complete &&
+              !gt::onboarding_should_show(config),
+          "finishing (or skipping) closes the guide, marks it complete and saves a valid app.json");
     std::string error;
     gt::AppConfig reloaded;
     check(gt::save_app_config(directory / "onboarding.json", config, error) &&
