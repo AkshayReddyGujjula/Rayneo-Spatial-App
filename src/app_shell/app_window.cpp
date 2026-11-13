@@ -2,6 +2,7 @@
 
 #include "app/engine_protocol.h"
 #include "app_shell/clock.h"
+#include "app_shell/ui_input.h"
 #include "app_shell/ui_orbit.h"
 #include "app_shell/ui_paint.h"
 
@@ -1560,7 +1561,12 @@ void AppWindow::execute(int id, int arg) {
         case kUiStartPreview: {
             const LaunchMode mode = id == kUiStartWorkspace ? LaunchMode::Workspace
                                                             : LaunchMode::Preview;
-            if (!start_engine(state_, mode, error)) {
+            const std::wstring calibration_block =
+                engine_start_calibration_block(calibration_.active());
+            if (!calibration_block.empty()) {
+                state_.set_banner(calibration_block, Severity::Warning);
+                add_event(L"start refused: " + calibration_block);
+            } else if (!start_engine(state_, mode, error)) {
                 state_.set_banner(error, Severity::Error);
                 add_event(L"start refused: " + error);
             } else {

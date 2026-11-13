@@ -27,6 +27,7 @@
 #include "util/utf8_path.h"
 #include "app_shell/telemetry.h"
 #include "app_shell/ui_help.h"
+#include "app_shell/ui_input.h"
 #include "app_shell/ui_orbit.h"
 
 #include <algorithm>
@@ -1583,6 +1584,18 @@ void test_animation() {
     check(gt::anim::animation_timer_wanted(demand), "an engine start still animates while the window is shown");
 }
 
+// Input and engine-start decisions AppWindow delegates to ui_input.h.
+void test_ui_input() {
+    // An in-app calibration (including its post-cancel shutdown wait) owns
+    // the glasses' sensor: an engine start must be refused, not launched.
+    const std::wstring blocked = gt::engine_start_calibration_block(true);
+    check(!blocked.empty(), "an engine start is refused while a calibration is running");
+    check(blocked.find(L"calibration") != std::wstring::npos,
+          "the refusal tells the user the calibration is the reason");
+    check(gt::engine_start_calibration_block(false).empty(),
+          "an engine start is allowed when no calibration is running");
+}
+
 int main() {
     std::printf("app_selftest: controller app model\n");
     std::filesystem::path directory;
@@ -1618,6 +1631,7 @@ int main() {
     test_calibration_progress();
     test_onboarding(directory);
     test_animation();
+    test_ui_input();
 
     std::filesystem::remove_all(directory, directory_error);
     std::printf("app_selftest: %s (%d failures)\n", failures == 0 ? "PASS" : "FAIL", failures);
