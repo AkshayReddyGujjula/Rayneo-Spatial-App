@@ -1758,9 +1758,6 @@ void AppWindow::execute(int id, int arg) {
             }
             break;
         }
-        case kUiEditorDimToggle:
-            state_.editor_3d = !state_.editor_3d;
-            break;
         case kUiEditorFullscreen:
             state_.editor_fullscreen = !state_.editor_fullscreen;
             break;
