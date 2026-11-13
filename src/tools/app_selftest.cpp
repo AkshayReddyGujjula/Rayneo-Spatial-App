@@ -1704,6 +1704,14 @@ void test_ui_input() {
           "the refusal tells the user the calibration is the reason");
     check(gt::engine_start_calibration_block(false).empty(),
           "an engine start is allowed when no calibration is running");
+    // "Open in console" needs the sensor too: refused beside a running
+    // engine and beside an in-app run (also one still shutting down).
+    check(!gt::console_calibration_block(true, false).empty(),
+          "a console calibration is refused while the engine runs");
+    check(!gt::console_calibration_block(false, true).empty(),
+          "a console calibration is refused while an in-app calibration is running");
+    check(gt::console_calibration_block(false, false).empty(),
+          "a console calibration may start when the sensor is free");
 
     // Losing mouse capture mid-drag (Alt+Tab) must end the drag exactly as a
     // button-up would, or the next plain mouse move keeps dragging.

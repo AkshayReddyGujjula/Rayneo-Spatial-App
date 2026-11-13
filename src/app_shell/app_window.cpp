@@ -1548,7 +1548,10 @@ void AppWindow::execute(int id, int arg) {
             invalidate();
             return;
         case kUiCalMagConsole:
-            if (!state_.paths.calibration_tool_found) {
+            if (const std::wstring block = console_calibration_block(state_.engine.busy(), calibration_.active());
+                !block.empty()) {
+                state_.set_banner(block, Severity::Warning);
+            } else if (!state_.paths.calibration_tool_found) {
                 state_.set_banner(L"orientation_calibrate.exe was not found next to this app",
                                   Severity::Error);
             } else if (state_.engine.launch_tool(
@@ -1709,7 +1712,10 @@ void AppWindow::execute(int id, int arg) {
             refresh_health(true);
             break;
         case kUiLaunchCalibration:
-            if (!state_.paths.calibration_tool_found) {
+            if (const std::wstring block = console_calibration_block(state_.engine.busy(), calibration_.active());
+                !block.empty()) {
+                state_.set_banner(block, Severity::Warning);
+            } else if (!state_.paths.calibration_tool_found) {
                 state_.set_banner(L"orientation_calibrate.exe was not found next to this app",
                                   Severity::Error);
             } else if (state_.engine.launch_tool(
