@@ -1687,6 +1687,26 @@ struct PointerFixture {
     int drag_splitter = -1;
 };
 
+// Stand-in for CalibrationRunner in stop_calibration_gracefully().
+struct FakeRunner {
+    bool active_ = false;
+    unsigned long exits_within_ms = 0;
+    unsigned long waited_ms = 0;
+    int cancels = 0;
+    int terminates = 0;
+    bool active() const { return active_; }
+    void cancel() { ++cancels; }
+    bool wait_for_exit(unsigned long ms) {
+        waited_ms = ms;
+        if (cancels > 0 && exits_within_ms <= ms) {
+            active_ = false;
+            return true;
+        }
+        return false;
+    }
+    void terminate() { ++terminates; }
+};
+
 // Stand-in for the AppState members open_setup_guide() touches.
 struct GuideFixture {
     gt::OnboardingFlow onboarding;
@@ -1712,6 +1732,38 @@ void test_ui_input() {
           "a console calibration is refused while an in-app calibration is running");
     check(gt::console_calibration_block(false, false).empty(),
           "a console calibration may start when the sensor is free");
+    // The tray can still reach execute() while the modal setup guide is up.
+    check(!gt::engine_start_guide_block(true).empty(),
+          "an engine start (tray) is refused while the setup guide is open");
+    check(gt::engine_start_guide_block(false).empty(), "an engine start is allowed with the guide closed");
+    // Start/Retry during a cancelled run's shutdown grace used to be ignored
+    // silently; it now explains itself.
+    const std::wstring closing = gt::calibration_start_block(true, false);
+    check(closing.find(L"still closing") != std::wstring::npos,
+          "Start/Retry during a cancelled run's shutdown grace says the old run is still closing");
+    check(!gt::calibration_start_block(true, true).empty(), "a second start during a running calibration is refused");
+    check(gt::calibration_start_block(false, false).empty(), "a calibration may start when none is active");
+
+    // Logoff/shutdown (and window destroy) stop an in-app calibration through
+    // its graceful cancel, bounded, terminating only if it does not exit.
+    FakeRunner graceful;
+    graceful.active_ = true;
+    graceful.exits_within_ms = 300;
+    check(gt::stop_calibration_gracefully(graceful, gt::kEndSessionCalibrationWaitMs) && graceful.cancels == 1 &&
+              graceful.terminates == 0 && graceful.waited_ms == gt::kEndSessionCalibrationWaitMs,
+          "end session cancels the calibration gracefully and does not kill a tool that exits");
+    FakeRunner stuck;
+    stuck.active_ = true;
+    stuck.exits_within_ms = 100000;
+    check(!gt::stop_calibration_gracefully(stuck, gt::kEndSessionCalibrationWaitMs) && stuck.cancels == 1 &&
+              stuck.terminates == 1,
+          "a tool that ignores the cancel is terminated after the bounded wait");
+    FakeRunner none;
+    check(gt::stop_calibration_gracefully(none, gt::kEndSessionCalibrationWaitMs) && none.cancels == 0 &&
+              none.terminates == 0,
+          "with no calibration running the end-session stop does nothing");
+    check(gt::kEndSessionCalibrationWaitMs > 0 && gt::kEndSessionCalibrationWaitMs <= 2500,
+          "the end-session wait stays well under the ~5 s Windows allows");
 
     // Losing mouse capture mid-drag (Alt+Tab) must end the drag exactly as a
     // button-up would, or the next plain mouse move keeps dragging.
@@ -1777,6 +1829,25 @@ void test_ui_input() {
     check(!gt::pointer_on_mouse_leave(dragging) && dragging.press_id == 42 &&
               dragging.hover_id == 42,
           "a captured drag keeps its pressed look and hover when the pointer leaves");
+
+    // Ctrl+1..6 with the button held on a splitter: the page changes under
+    // the drag, so it ends there with the normal save and no click.
+    PointerFixture page_drag;
+    page_drag.press_id = 1203;
+    page_drag.drag_active = true;
+    page_drag.drag_splitter = 3;
+    pending = 1203;
+    const gt::PointerDragEnd paged = gt::pointer_on_page_change(page_drag, pending);
+    check(paged.ended && paged.save_splitter && !page_drag.drag_active && page_drag.drag_splitter == -1 &&
+              page_drag.press_id == 0 && pending == 0,
+          "a page switch mid-drag ends the drag with the normal splitter save and no click");
+    lost = gt::pointer_on_capture_lost(page_drag, pending);
+    check(!lost.ended && !lost.save_splitter,
+          "the ReleaseCapture after a page switch does not end (or save) the drag twice");
+    PointerFixture page_idle;
+    pending = 5;
+    check(!gt::pointer_on_page_change(page_idle, pending).ended && pending == 5,
+          "a page switch with no drag ends nothing");
 
     // "Run setup guide" under a live in-app calibration (started on the
     // Tracking page, then Settings): opening the guide used to clear the run

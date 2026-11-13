@@ -448,6 +448,13 @@ void AppWindow::navigate(AppPage page) {
     if (page == state_.page && !state_.editor_fullscreen) {
         return;
     }
+    // A captured drag (Ctrl+digit with the button held) ends here like a
+    // button-up, normal save included: its control is about to disappear.
+    const PointerDragEnd drag_end = pointer_on_page_change(state_, pending_click_id_);
+    if (drag_end.ended) {
+        ReleaseCapture();
+        finish_drag(drag_end);
+    }
     capture_fade_snapshot();
     state_.page = page;
     state_.editor_fullscreen = false;
@@ -467,6 +474,10 @@ void AppWindow::on_end_session(bool ending) {
     // System shutdown/logoff: ask the engine to quit. No bounded wait here;
     // blocking the session teardown would risk the watchdog. A still
     // starting (windowless) owned engine is terminated outright.
+    // An in-app calibration first gets its graceful cancel (the tool turns
+    // the IMU stream off), bounded well inside the end-session allowance.
+    cal_guide_window_.close();
+    stop_calibration_gracefully(calibration_, kEndSessionCalibrationWaitMs);
     if (state_.engine.busy()) {
         state_.engine.abort_for_session_end();
     }
@@ -561,14 +572,9 @@ void AppWindow::on_destroy() {
     startup_timer_ = false;
     animation_timer_ = false;
     cal_guide_window_.close();
-    if (calibration_.active()) {
-        // Graceful first: the tool turns the IMU stream off on "q"/EOF
-        // within a few hundred ms; terminate only if it does not exit.
-        calibration_.cancel();
-        if (!calibration_.wait_for_exit(3000)) {
-            calibration_.terminate();
-        }
-    }
+    // Graceful first: the tool turns the IMU stream off on "q"/EOF within a
+    // few hundred ms; terminate only if it does not exit.
+    stop_calibration_gracefully(calibration_, 3000);
     tray_.remove();
     release_back_buffer();
     release_fade_buffer();
@@ -1606,9 +1612,14 @@ void AppWindow::execute(int id, int arg) {
         case kUiStartPreview: {
             const LaunchMode mode = id == kUiStartWorkspace ? LaunchMode::Workspace
                                                             : LaunchMode::Preview;
+            const std::wstring guide_block = engine_start_guide_block(state_.onboarding.active);
             const std::wstring calibration_block =
                 engine_start_calibration_block(calibration_.active());
-            if (!calibration_block.empty()) {
+            if (!guide_block.empty()) {
+                // Shown as a toast: the banner is painted under the modal guide.
+                state_.show_toast(guide_block);
+                add_event(L"start refused: " + guide_block);
+            } else if (!calibration_block.empty()) {
                 state_.set_banner(calibration_block, Severity::Warning);
                 add_event(L"start refused: " + calibration_block);
             } else if (!start_engine(state_, mode, error)) {
@@ -1750,9 +1761,6 @@ void AppWindow::execute(int id, int arg) {
         case kUiEditorFullscreen:
             state_.editor_fullscreen = !state_.editor_fullscreen;
             break;
-        case kUiEditorDimToggle:
-            state_.editor_3d = !state_.editor_3d;
-            break;
         case kUiPresetSave: {
             std::string preset_name;
             if (!prompt_preset_name(preset_name)) {
@@ -1873,7 +1881,11 @@ void AppWindow::execute(int id, int arg) {
 }
 
 void AppWindow::start_calibration(CalFlow flow) {
-    if (calibration_.active() || state_.cal_run.running()) {
+    if (const std::wstring block = calibration_start_block(calibration_.active(), state_.cal_run.running());
+        !block.empty()) {
+        state_.show_toast(block);
+        invalidate();
+        update_animation_timer();
         return;
     }
     if (!state_.paths.calibration_tool_found) {

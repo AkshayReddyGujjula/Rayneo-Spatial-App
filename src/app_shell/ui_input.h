@@ -40,6 +40,59 @@ inline std::wstring console_calibration_block(bool engine_busy, bool calibration
     return std::wstring();
 }
 
+// The setup guide never starts the engine, and its calibration steps need
+// the sensor free. Its own pages offer no Start button, but the tray menu
+// (and any other path into execute()) still can: refused while the guide is
+// open. Returns the refusal, or an empty string when the engine may start.
+inline std::wstring engine_start_guide_block(bool setup_guide_active) {
+    if (setup_guide_active) {
+        return L"Finish or skip the setup guide first, then start the workspace.";
+    }
+    return std::wstring();
+}
+
+// Start or Retry on an in-app calibration. `calibration_active` is true from
+// the tool's launch until its process is gone; `run_running` is the panel's
+// running phase. A cancelled run keeps the process for its shutdown grace
+// (the tool turns the IMU stream off), so a click then has to wait: say so
+// instead of ignoring it. Returns the message, or empty when a run may start.
+inline std::wstring calibration_start_block(bool calibration_active, bool run_running) {
+    if (run_running) {
+        return L"A calibration is already running.";
+    }
+    if (calibration_active) {
+        return L"The previous calibration is still closing; try again in a moment.";
+    }
+    return std::wstring();
+}
+
+// Graceful stop of an in-app calibration at logoff/shutdown and on window
+// destroy: cancel() sends "q" and closes stdin, which the tool's --auto
+// stdin watcher maps to its Ctrl+C path (stream off, exit 1; bug 27); only
+// if it has not exited within `wait_ms` is it terminated. `Runner` has
+// active(), cancel(), wait_for_exit(ms) and terminate() (CalibrationRunner).
+// Returns true when the tool exited by itself (or none was running).
+template <typename Runner>
+bool stop_calibration_gracefully(Runner& runner, unsigned long wait_ms) {
+    if (!runner.active()) {
+        return true;
+    }
+    runner.cancel();
+    if (runner.wait_for_exit(wait_ms)) {
+        return true;
+    }
+    runner.terminate();
+    return false;
+}
+
+// WM_ENDSESSION budget for that graceful stop. During logoff/shutdown
+// Windows gives an application only a few seconds (the hung-app /
+// WaitToKillAppTimeout defaults, about 5 s on current builds) before it
+// shows the "this app is preventing shutdown" screen or ends it; the cancel
+// path is documented to take a few hundred ms (not measured on hardware), so
+// 2 s stays well under that and leaves room for the engine request after it.
+inline constexpr unsigned long kEndSessionCalibrationWaitMs = 2000;
+
 // "Run setup guide" (Settings). Opening the guide starts it afresh and clears
 // the calibration panel; doing that under a live in-app calibration would
 // orphan the run: its progress lines are ignored by the cleared (Idle)
@@ -97,6 +150,17 @@ PointerDragEnd pointer_end_drag(State& state, int& pending_click_id) {
 // already ended, and is then a no-op.
 template <typename State>
 PointerDragEnd pointer_on_capture_lost(State& state, int& pending_click_id) {
+    state.press_id = 0;
+    return pointer_end_drag(state, pending_click_id);
+}
+
+// Page switch (Ctrl+1..6, sidebar arrows) while a captured drag is in
+// progress: the dragged control is no longer painted, so the drag ends here
+// exactly as a button-up would, with the normal save of a moved splitter or
+// comfort slider and no click. The caller releases capture (whose
+// WM_CAPTURECHANGED is then a no-op) and performs the saves.
+template <typename State>
+PointerDragEnd pointer_on_page_change(State& state, int& pending_click_id) {
     state.press_id = 0;
     return pointer_end_drag(state, pending_click_id);
 }
