@@ -138,3 +138,5 @@ Window 3: merge leftovers, final full suite, final report. Stop at 10:30.
   and is resumed after the reset (08:40-08:50).
 - 07:48 R5-A merged (ae3dc86): @@live lines + calibration guide on the glasses and PC panel; 11/11 green,
   renders viewed (turn off-axis, countdown). AGENTS.md section 10 + REPORT section 7 updated. 5-hour ~88%.
+- 07:50 User asked: at 08:40 start an in-depth code + correctness review (code-review skill) of everything done,
+  3-4 Opus agents at medium/high, find and fix real defects. Nudge task rayneo-overnight-resume-2 moved to 08:41 to start it.
