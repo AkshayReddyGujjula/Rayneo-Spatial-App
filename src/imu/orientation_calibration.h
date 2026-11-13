@@ -132,7 +132,9 @@ bool load_orientation_calibration(const std::string& path, std::array<float, 9>&
 //   @@progress {"flow":"orientation"|"mag","step":N,"steps":M,
 //               "state":"waiting"|"recording"|"ok"|"retry"|"failed"|"done",
 //               "prompt":"...","detail":"...","quality":Q}
-// with Q in [0, 1] or -1 when not applicable. The final line of a run has
+// with Q in [0, 1] or -1 when not applicable. Strings are JSON-escaped and
+// always valid UTF-8 (a byte that is not well-formed UTF-8 becomes U+FFFD,
+// so the controller's strict parser never drops a line). The final line of a run has
 // state "done" (file written) or "failed". The shape is a contract with the
 // controller's onboarding wizard; extend it only by adding new state values
 // in agreement with that parser, never by changing the existing keys.

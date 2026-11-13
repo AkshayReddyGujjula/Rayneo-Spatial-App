@@ -19,7 +19,7 @@ int band_height(const RECT& area, const CalGuideStyle& style) {
     if (!style.show_text) {
         return 0;
     }
-    return static_cast<int>(static_cast<float>(rh(area)) * (style.glasses ? 0.30f : 0.30f));
+    return static_cast<int>(static_cast<float>(rh(area)) * 0.30f);
 }
 
 int bottom_height(const RECT& area) {

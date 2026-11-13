@@ -378,7 +378,7 @@ older files load unchanged. Details: `docs/overnight/r2-calibration.md`.
 
 ### `@@live` guide lines (added 2026-11-13, round 5)
 
-With `--progress-json` the orientation flow (and the compass flow's still step) also prints
+With `--progress-json` the orientation flow (not the compass flow) also prints
 `@@live {...}` lines at about 22 Hz while a step waits (`--auto` countdown) or records. They are
 display-only: the samples read during the countdown are never recorded, and the maths, gates,
 file and `@@progress` lines are unchanged. One line, exactly (`orientation_calibration_selftest`

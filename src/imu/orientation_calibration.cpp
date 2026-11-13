@@ -847,10 +847,55 @@ OrientationCalibrationResult calibrate_orientation(const CalibrationPhaseData& s
 
 namespace {
 
+// Length of the well-formed UTF-8 sequence starting at value[i] (RFC 3629:
+// no overlongs, no surrogates, nothing above U+10FFFF), or 0 if it is not one.
+size_t utf8_sequence_length(const std::string& value, size_t i) {
+    const auto byte = [&](size_t k) { return static_cast<unsigned char>(value[k]); };
+    const unsigned char lead = byte(i);
+    size_t length = 0;
+    unsigned char low = 0x80;
+    unsigned char high = 0xBF;
+    if (lead >= 0xC2 && lead <= 0xDF) {
+        length = 2;
+    } else if (lead >= 0xE0 && lead <= 0xEF) {
+        length = 3;
+        low = lead == 0xE0 ? 0xA0 : 0x80;
+        high = lead == 0xED ? 0x9F : 0xBF;
+    } else if (lead >= 0xF0 && lead <= 0xF4) {
+        length = 4;
+        low = lead == 0xF0 ? 0x90 : 0x80;
+        high = lead == 0xF4 ? 0x8F : 0xBF;
+    } else {
+        return 0;
+    }
+    if (i + length > value.size() || byte(i + 1) < low || byte(i + 1) > high) {
+        return 0;
+    }
+    for (size_t k = i + 2; k < i + length; ++k) {
+        if (byte(k) < 0x80 || byte(k) > 0xBF) {
+            return 0;
+        }
+    }
+    return length;
+}
+
 void append_json_string(std::string& out, const std::string& value) {
     out += '"';
-    for (const char raw : value) {
-        const unsigned char c = static_cast<unsigned char>(raw);
+    for (size_t i = 0; i < value.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(value[i]);
+        if (c >= 0x80) {
+            // Well-formed UTF-8 passes through unchanged. Anything else (a
+            // localized ANSI system message, say) becomes U+FFFD: one bad
+            // byte must not make the whole line unparseable for the front end.
+            const size_t length = utf8_sequence_length(value, i);
+            if (length == 0) {
+                out += "\xEF\xBF\xBD";
+            } else {
+                out.append(value, i, length);
+                i += length - 1;
+            }
+            continue;
+        }
         switch (c) {
             case '"':
                 out += "\\\"";
@@ -873,7 +918,7 @@ void append_json_string(std::string& out, const std::string& value) {
                     std::snprintf(escaped, sizeof(escaped), "\\u%04x", static_cast<unsigned>(c));
                     out += escaped;
                 } else {
-                    out += static_cast<char>(c);  // UTF-8 bytes pass through unchanged
+                    out += static_cast<char>(c);
                 }
         }
     }

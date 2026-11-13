@@ -43,7 +43,8 @@ per state change on stdout, flushed immediately:
 
 No console needed: `--auto` starts each step after `--auto-delay S` seconds (default 4, 0..60) of
 "waiting" instead of waiting for ENTER. Cancel by Ctrl+C / Ctrl+Break / closing the console (the
-stream-off guard still runs, the last line is `failed` with detail `cancelled`). A GUI parent
+stream-off guard still runs, the last line is `failed` with detail `cancelled`; for a console close
+the handler holds the close, up to 4 s, until that path has finished - R6-B). A GUI parent
 without a console may also just terminate the process; the next tool or engine start sends
 stream-off first anyway. Exit codes: 0 saved, 1 failed or cancelled, 2 bad arguments.
 

@@ -59,9 +59,17 @@ CalGuidePoint cal_guide_axis_point(CalGuideKind kind, float deg, const CalGuideS
 // deg/s gate) to r_min (motionless).
 float cal_guide_ring_radius(float still_rms_degs, float gate_degs, float r_min, float r_max);
 
+// One frame of the glasses guide's ball easing toward the latest live sample
+// (exponential, tau kCalGuideBallTauS, so motion between the ~22 Hz lines
+// stays smooth). Within half a pixel the ball snaps onto the target. Returns
+// whether the ball moved at all, i.e. whether the frame needs a repaint: a
+// still head or a settled ball costs no repaints.
+inline constexpr double kCalGuideBallTauS = 0.05;
+bool cal_guide_ease_ball(CalGuidePoint& ball, const CalGuidePoint& target, double dt_s);
+
 // Everything one frame of the guide needs.
 struct CalGuideView {
-    bool visible = false;  // a head calibration (or the compass's still step) is running
+    bool visible = false;  // a head calibration is running (the compass flow has no live guide)
     bool has_live = false;
     CalLiveSample live;
     int step = 0;

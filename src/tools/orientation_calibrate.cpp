@@ -70,13 +70,40 @@ void start_stdin_watcher() {
     }).detach();
 }
 
+// Manual-reset event set when wmain has unwound past the stream-off guard
+// (on every exit path), so the console-close handler can wait for it.
+HANDLE g_cleanup_done = nullptr;
+
 BOOL WINAPI console_handler(DWORD type) {
-    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT) {
+    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT) {
         g_cancel.store(true);
+        return TRUE;
+    }
+    if (type == CTRL_CLOSE_EVENT) {
+        // Windows ends the process as soon as this handler returns (and after
+        // about 5 s regardless), so only setting g_cancel would skip the
+        // stream-off. Sending it from this thread is not safe: the main thread
+        // may be inside hid_read on the same handle, and the verified command
+        // reads its own ack. Instead cancel, then hold the close here while
+        // the main thread runs its normal cancel path, StreamGuard included.
+        g_cancel.store(true);
+        if (g_cleanup_done != nullptr) {
+            WaitForSingleObject(g_cleanup_done, 4000);
+        }
         return TRUE;
     }
     return FALSE;
 }
+
+// Declared first in wmain, destroyed last: after the stream-off guard, the
+// device close and hid_exit.
+struct CleanupDoneSignal {
+    ~CleanupDoneSignal() {
+        if (g_cleanup_done != nullptr) {
+            SetEvent(g_cleanup_done);
+        }
+    }
+};
 
 struct Options {
     std::string output_path;
@@ -567,8 +594,11 @@ bool capture_motion(gt::GtHidDevice& device, const Options& options, const Progr
                             phase_name(phase), stats.detected, stats.usable, stats.used, stats.rejected,
                             stats.spread_deg, diagnostics.excursion_deg, diagnostics.dominance);
                 char detail[192];
-                std::snprintf(detail, sizeof(detail), "%d of %d gestures used%s, spread %.1f deg, excursion %.1f deg",
-                              stats.used, options.repeats, stats.rejected > 0 ? " (outlier dropped)" : "",
+                // Of the gestures found, not of those asked for: a wearer who
+                // does four when asked for three must not read "4 of 3".
+                std::snprintf(detail, sizeof(detail),
+                              "%d of %d detected gestures used%s, spread %.1f deg, excursion %.1f deg", stats.used,
+                              stats.detected, stats.rejected > 0 ? " (outlier dropped)" : "",
                               stats.spread_deg, diagnostics.excursion_deg);
                 if (stats.used < 2) {
                     std::printf("Only one usable gesture was found, so its consistency cannot be checked.\n");
@@ -612,6 +642,40 @@ int fail_run(const Progress& progress, int step, const std::string& prompt, cons
     std::printf("calibration failed: %s\n", error.c_str());
     progress.emit(step, "failed", prompt, error, -1.0f);
     return 1;
+}
+
+// The recording loops poll g_cancel, but a "q" can land after the last step's
+// final poll, while its samples are analysed. Checked once more right before
+// anything is written: the controller already shows "Nothing was changed".
+bool cancel_requested_before_save() {
+    if (!g_cancel.load()) {
+        return false;
+    }
+    std::printf("cancelled before saving; nothing was changed\n");
+    return true;
+}
+
+// A filesystem error in the system's own words, as UTF-8 for the @@progress
+// line. error_code::message() is the localized text in the ANSI code page,
+// which is not valid UTF-8 on a non-English Windows.
+std::string system_error_utf8(const std::error_code& error) {
+    if (error.category() != std::system_category()) {
+        return error.message();  // CRT errno text: plain ASCII
+    }
+    wchar_t* buffer = nullptr;
+    const DWORD length = FormatMessageW(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
+        static_cast<DWORD>(error.value()), 0, reinterpret_cast<LPWSTR>(&buffer), 0, nullptr);
+    std::wstring text = length > 0 && buffer != nullptr ? std::wstring(buffer, length) : std::wstring();
+    if (buffer != nullptr) {
+        LocalFree(buffer);
+    }
+    while (!text.empty() && (text.back() == L'\r' || text.back() == L'\n' || text.back() == L' ')) {
+        text.pop_back();
+    }
+    const std::string utf8 = gt::utf8_from_wide_text(text);
+    const std::string code = "Windows error " + std::to_string(error.value());
+    return utf8.empty() ? code : utf8 + " (" + code + ")";
 }
 
 // Which motion would pin down the weakest hard-iron direction, in head terms.
@@ -705,6 +769,9 @@ int calibrate_magnetometer(gt::GtHidDevice& device, const Options& options, std:
                       fit.field_ut, fit.residual_rms_ut, fit.rotation_coverage_deg, fit.tilt_coverage_deg,
                       fit.observability);
         if (fit.ok) {
+            if (cancel_requested_before_save()) {
+                return fail_run(progress, 2, motion_prompt, "cancelled");
+            }
             gt::MagCalibration mag;
             mag.valid = true;
             mag.hard_iron_ut = fit.hard_iron_ut;
@@ -875,6 +942,9 @@ int calibrate_orientation_flow(gt::GtHidDevice& device, const Options& options, 
                     result.sensor_to_head[row * 3 + 1], result.sensor_to_head[row * 3 + 2]);
     }
 
+    if (cancel_requested_before_save()) {
+        return fail_run(progress, 4, tilt_prompt, "cancelled");
+    }
     const std::filesystem::path output_path = gt::path_from_utf8(options.output_path);
     if (!output_path.parent_path().empty()) {
         std::error_code directory_error;
@@ -883,7 +953,7 @@ int calibrate_orientation_flow(gt::GtHidDevice& device, const Options& options, 
             std::printf("could not create calibration directory: %s\n",
                         directory_error.message().c_str());
             return fail_run(progress, 4, "Calibration was not saved.",
-                            "SAVE_FAILED: " + directory_error.message());
+                            "SAVE_FAILED: " + system_error_utf8(directory_error));
         }
     }
     if (!gt::save_orientation_calibration(options.output_path, result, error)) {
@@ -943,6 +1013,8 @@ int wmain(int argc, wchar_t** wide_argv) {
     if (options.output_path.empty()) {
         options.output_path = default_output_path();
     }
+    g_cleanup_done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    CleanupDoneSignal cleanup_done;  // before every device guard: destroyed after them
     SetConsoleCtrlHandler(console_handler, TRUE);
     if (options.auto_advance) {
         start_stdin_watcher();
