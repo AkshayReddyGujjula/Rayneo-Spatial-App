@@ -86,6 +86,9 @@ Build dirs live under `%LOCALAPPDATA%\Temp\rayneo-overnight\` (never inside the 
   and scenarios 1-27 output identical. Calibration repeats reviewed, nothing provable. AGENTS.md + REPORT updated. 11/11.
 - 04:42 R4-A launched (Opus high): engine startup phases in the status file + 'hold still' prompt during the
   startup bias window (prevents bug 26 at the source). 5-hour 47%, weekly 63%.
+- ~05:00 R4-A merged (a94d846): status keys phase/phase_progress, heartbeat during takeover, Home startup steps.
+  Reviewed the heartbeat thread myself (mutex-shared, stops before render loop). pose_scenarios identical; 11/11.
+  Clean from-scratch rebuild: 0 warnings, 11/11. AGENTS.md + REPORT updated.
 
 ## Round 2 plan (start at 03:45; window 2 ~03:40-08:40, window 3 ~08:45-10:30 hard stop)
 Window 2, in parallel, each in its own worktree reset onto overnight-claude-improvements:

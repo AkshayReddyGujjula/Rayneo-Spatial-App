@@ -79,6 +79,16 @@ It does nothing while you read (reading output is identical to before).
   up to ~2.8 deg of drift) and fixed it with a new test; the calibration averaging was checked and
   found sound.
 
+### 6. A "Hold your head still" prompt at start-up
+The +35 deg drift in your recording started because your head moved during the 1.3-second moment
+when the app measures the sensor at start-up, and nothing told you to keep still. Now:
+- Before you press Start, Home says to look straight ahead and keep still when asked.
+- While the workspace starts, Home shows the steps: Screens -> Glasses sensor -> Warm-up -> **Hold
+  your head still** (large, with a filling bar that restarts if you move), then it is running.
+  The screen setup step no longer looks frozen during the 13-35 s display takeover.
+- The glasses themselves show no prompt yet (the renderer has no way to draw text). A possible
+  follow-up: keep the screens dimmed until tracking starts, as a "you can move now" cue.
+
 ## Decision for you
 - **Calibration repeats in the app:** should in-app calibration use 3 repeats by default? It adds
   about 21 seconds for the 40% accuracy gain. I left it at 1 because it lengthens the flow; it is a
@@ -87,13 +97,16 @@ It does nothing while you read (reading output is identical to before).
 ## Try this first with the glasses
 1. Open the app: does the setup guide appear, do hover/drag/scroll feel right, does CPU go to ~0 %
    when idle?
-2. Run head calibration from the app: does the countdown give you enough time, does Cancel stop
+2. Start the workspace and watch Home: do the start-up steps advance, does "Hold your head still"
+   appear while you are looking at the PC screen, does the bar restart if you move?
+   (Engine log: `startup phase:` lines.)
+3. Run head calibration from the app: does the countdown give you enough time, does Cancel stop
    cleanly?
-3. Start the workspace a few times: is the view steadier in the first minute? (Engine log line:
+4. Start the workspace a few times: is the view steadier in the first minute? (Engine log line:
    `startup confirmation: reseeds=N reverts=M`.)
-4. Turn your head quickly and stop: if screens bounce past, lower Turn prediction to 20; if they
+5. Turn your head quickly and stop: if screens bounce past, lower Turn prediction to 20; if they
    still trail, try 50.
-5. Calibrate the compass with your earbuds in, then check the compass badge says Locked.
+6. Calibrate the compass with your earbuds in, then check the compass badge says Locked.
 
 ## Where the details are
 `docs/overnight/track-a.md` (tracking), `track-b.md` (calibration, compass, earbuds),
