@@ -57,6 +57,12 @@ public:
     // discontinuity): call reset() explicitly on recenter.
     Quat update(const Quat& raw, float dt_s);
 
+    // The next update's input is a deliberate view step, not head motion
+    // (yaw or pitch tracking switched on or off): restart the prediction's
+    // velocity estimate from that input instead of reading the step as a
+    // turn. The 1-euro and the reading hold are untouched.
+    void restart_prediction() { restart_prediction_ = true; }
+
 private:
     Quat apply_hold(const Quat& target, float dt_s);
     Quat prediction_lead(const Quat& input, float dt_s);
@@ -70,6 +76,7 @@ private:
     // velocity (deg/s).
     Quat prev_raw_{1.0f, 0.0f, 0.0f, 0.0f};
     Vec3 omega_degs_{};
+    bool restart_prediction_ = false;
 };
 
 // Reading-stabilisation presets (the engine's --stabilise and Ctrl+Alt+S):

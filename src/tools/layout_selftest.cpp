@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <process.h>
+#include <string>
 
 namespace {
 
@@ -33,8 +35,11 @@ int main() {
     std::string error;
     check(gt::validate_layout(original, error), "default layout is valid");
 
+    // Per-process name: concurrent runs (two build trees testing at once)
+    // must not share the file or its ".tmp" sibling.
     const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "rayneo-layout-selftest.json";
+        std::filesystem::temp_directory_path() /
+        ("rayneo-layout-selftest-" + std::to_string(_getpid()) + ".json");
     check(gt::save_layout(path.string(), original, error), "layout saves atomically");
     gt::Layout loaded;
     check(gt::load_layout(path.string(), loaded, error), "layout loads");

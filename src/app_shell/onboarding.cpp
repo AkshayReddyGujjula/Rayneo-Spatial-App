@@ -94,9 +94,10 @@ bool onboarding_should_show(const AppConfig& config) {
     return !config.onboarding_complete;
 }
 
-void onboarding_close(OnboardingFlow& flow, AppConfig& config) {
+bool onboarding_close(OnboardingFlow& flow, AppConfig& config, bool config_file_valid) {
     flow.active = false;
     config.onboarding_complete = true;
+    return config_file_valid;
 }
 
 }  // namespace gt

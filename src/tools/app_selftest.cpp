@@ -6,6 +6,14 @@
 // rotation and the telemetry tail reader. No window is created and no driver,
 // display or HID device is touched.
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 #include "app/engine_protocol.h"
 #include "app/view_comfort.h"
 #include "app_shell/app_config.h"
@@ -379,8 +387,7 @@ void test_app_config(const std::filesystem::path& directory) {
     check(gt::validate_app_config(bad, error), "degenerate split shares validate (paint clamps)");
     {
         // A pre-splitter preference file (no "splits" block) loads as automatic.
-        const std::filesystem::path legacy =
-            std::filesystem::temp_directory_path() / "rayneo-legacy-app.json";
+        const std::filesystem::path legacy = directory / "rayneo-legacy-app.json";
         {
             std::ofstream out(legacy, std::ios::binary | std::ios::trunc);
             out << "{\"version\": 1, \"layout_path\": \"a\", \"calibration_path\": \"b\", "
@@ -400,8 +407,7 @@ void test_app_config(const std::filesystem::path& directory) {
     }
     {
         // Malformed splits fail the load instead of crashing the dashboard.
-        const std::filesystem::path broken =
-            std::filesystem::temp_directory_path() / "rayneo-broken-app.json";
+        const std::filesystem::path broken = directory / "rayneo-broken-app.json";
         {
             std::ofstream out(broken, std::ios::binary | std::ios::trunc);
             out << "{\"version\": 1, \"layout_path\": \"a\", \"calibration_path\": \"b\", "
@@ -712,6 +718,32 @@ void test_session_logs(const std::filesystem::path& directory) {
     check(bytes.size() < 4u * 4096u, "the archive is compressed");
 
     check(gt::run_session_archiver(archive_dir) == 0, "an idle archiver exits cleanly");
+
+    // A helper busy with ANOTHER log folder (a second copy of the app, or a
+    // concurrent test run) must not turn this folder's helper away: the queue
+    // lock is per directory. With one machine-wide name the drain below was a
+    // silent no-op and the pending folder stayed behind.
+    {
+        const std::filesystem::path other_archive = directory / "other-logs" / "sessions";
+        const std::wstring own_name = gt::session_archiver_mutex_name(archive_dir);
+        const std::wstring other_name = gt::session_archiver_mutex_name(other_archive);
+        const std::filesystem::path respelled =
+            gt::path_from_utf8(gt::utf8_from_path(archive_dir) + "\\.\\");
+        check(own_name != other_name && own_name == gt::session_archiver_mutex_name(respelled) &&
+                  own_name.rfind(L"Local\\", 0) == 0 && own_name.find(L'\\', 6) == std::wstring::npos,
+              "the archiver lock is named per directory (one folder, one name)");
+        HANDLE foreign = CreateMutexW(nullptr, TRUE, other_name.c_str());
+        start.tm_mday = 6;
+        write_session_files(log_dir, "day6");
+        check(gt::stage_session_logs(log_dir, gt::session_archive_stem(start), error) && error.empty(),
+              "a sixth session is staged while another folder's helper runs");
+        check(gt::run_session_archiver(archive_dir) == 0 && !gt::has_pending_session_logs(archive_dir),
+              "another folder's busy helper does not block this folder's queue");
+        if (foreign != nullptr) {
+            ReleaseMutex(foreign);
+            CloseHandle(foreign);
+        }
+    }
     std::filesystem::remove_all(log_dir, fs_error);
 
     check(gt::format_bytes(0) == "0 B" && gt::format_bytes(2048) == "2.0 KiB" &&
@@ -1416,9 +1448,21 @@ void test_onboarding(const std::filesystem::path& directory) {
     }
     check(labelled, "every step has a stepper label and a title");
 
-    gt::onboarding_close(flow, config);
-    check(!flow.active && config.onboarding_complete && !gt::onboarding_should_show(config),
-          "finishing (or skipping) closes the guide and marks it complete");
+    {
+        // An app.json that failed to load: the controller runs on defaults
+        // (onboarding_complete false, so the guide opens) while the user's
+        // file stays on disk for them to fix. Finishing or skipping the guide
+        // must not write the defaults over it.
+        gt::OnboardingFlow guide;
+        guide.start();
+        gt::AppConfig defaults_in_use;
+        check(!gt::onboarding_close(guide, defaults_in_use, false) && !guide.active &&
+                  defaults_in_use.onboarding_complete,
+              "closing the guide over an app.json that failed to load does not write the file");
+    }
+    check(gt::onboarding_close(flow, config, true) && !flow.active && config.onboarding_complete &&
+              !gt::onboarding_should_show(config),
+          "finishing (or skipping) closes the guide, marks it complete and saves a valid app.json");
     std::string error;
     gt::AppConfig reloaded;
     check(gt::save_app_config(directory / "onboarding.json", config, error) &&
@@ -1512,6 +1556,31 @@ void test_animation() {
     check(!animator.wants_frames(), "the frame request lasts one paint");
     animator.snap(hover, 0.25f);
     check(animator.track(hover, 0.25f) == 0.25f, "snap jumps a value (slider drag)");
+
+    // The animation timer. A frame request is cleared only by the next paint,
+    // and a hidden (tray) or minimized window gets no WM_PAINT: closing the
+    // window to the tray while the status card pulsed (engine starting) used
+    // to leave the 15 ms timer ticking until the window was shown again.
+    gt::anim::AnimationDemand demand;
+    check(!gt::anim::animation_timer_wanted(demand), "an idle window runs no animation timer");
+    demand.wants_frames = true;
+    check(gt::anim::animation_timer_wanted(demand), "a visible window with a frame request animates");
+    demand.window_paints = false;
+    check(!gt::anim::animation_timer_wanted(demand),
+          "a hidden or minimized window runs no animation timer, even with a stale frame request");
+    demand.wants_frames = false;
+    demand.starting = true;
+    demand.toast = true;
+    demand.animating = true;
+    demand.transition = true;
+    demand.fade_pending = true;
+    check(!gt::anim::animation_timer_wanted(demand), "nothing keeps the timer alive while the window cannot paint");
+    demand.window_paints = true;
+    demand.toast = false;
+    demand.animating = false;
+    demand.transition = false;
+    demand.fade_pending = false;
+    check(gt::anim::animation_timer_wanted(demand), "an engine start still animates while the window is shown");
 }
 
 int main() {
@@ -1520,7 +1589,9 @@ int main() {
     std::error_code directory_error;
     for (int attempt = 0; attempt < 100 && directory.empty(); ++attempt) {
         const std::filesystem::path candidate = std::filesystem::temp_directory_path() /
-                                                ("rayneo-app-selftest-" + std::to_string(attempt));
+                                                ("rayneo-app-selftest-" +
+                                                 std::to_string(GetCurrentProcessId()) + "-" +
+                                                 std::to_string(attempt));
         if (std::filesystem::create_directory(candidate, directory_error) && !directory_error) {
             directory = candidate;
         }

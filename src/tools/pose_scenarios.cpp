@@ -1313,6 +1313,52 @@ int main() {
               0.25f);
     }
 
+    std::printf("\n-- scenario 24: a view step (yaw tracking switched back on) is not predicted --\n");
+    {
+        // Switching yaw (or pitch) tracking back on replaces the held twist
+        // with the live one: the smoother's input steps by the yaw the wearer
+        // turned meanwhile, in one frame. That step is not head motion. Read
+        // as a 1800 deg/s velocity it made the prediction throw the view far
+        // past the new pose for several frames. The engine restarts the
+        // prediction on every toggle; the 1-euro still eases the step in.
+        constexpr float kFrameDt = 1.0f / 60.0f;
+        constexpr float kStepDeg = 30.0f;
+        auto run = [&](float predict_s, bool restart) {
+            PoseSmoother smoother;
+            PoseSmoother::Config scfg;
+            apply_reading_hold(kReadingHoldDefault, scfg);
+            scfg.predict_s = predict_s;
+            smoother.configure(scfg);
+            const Quat before{1.0f, 0.0f, 0.0f, 0.0f};
+            const float half = 0.5f * kStepDeg * kPi / 180.0f;
+            const Quat after{std::cos(half), 0.0f, 0.0f, std::sin(half)};
+            for (int f = 0; f < 120; ++f) {
+                smoother.update(before, kFrameDt);
+            }
+            if (restart) {
+                smoother.restart_prediction();
+            }
+            float overshoot = 0.0f;
+            float last = 0.0f;
+            for (int f = 0; f < 120; ++f) {
+                last = quat_to_euler(smoother.update(after, kFrameDt)).yaw_deg;
+                overshoot = std::max(overshoot, std::fabs(last) - kStepDeg);
+            }
+            return std::make_pair(overshoot, last);
+        };
+        const auto plain = run(0.0f, false);
+        const auto unguarded = run(PoseSmoother::Config{}.predict_s, false);
+        const auto guarded = run(PoseSmoother::Config{}.predict_s, true);
+        std::printf("  overshoot past a %.0f deg view step: %.3f deg without prediction, %.3f deg predicted "
+                    "without restart, %.3f deg with restart (settled %.3f deg)\n",
+                    kStepDeg, plain.first, unguarded.first, guarded.first, std::fabs(guarded.second));
+        check(guarded.first <= plain.first + 1e-4f, "a restarted prediction adds no overshoot to a view step",
+              guarded.first, plain.first + 1e-4f);
+        check(std::fabs(guarded.second - plain.second) < 1e-3f,
+              "the view settles exactly as without prediction (hold included)",
+              std::fabs(guarded.second - plain.second), 1e-3f);
+    }
+
     std::printf("\npose_scenarios: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -1901,7 +1901,7 @@ void AppWindow::finish_onboarding(bool skipped) {
         return;
     }
     const int preset = state_.onboarding.preset_choice;
-    onboarding_close(state_.onboarding, state_.config);
+    const bool save_config = onboarding_close(state_.onboarding, state_.config, state_.config_valid);
     state_.cal_run = CalRunState{};
     std::wstring error;
     if (!skipped && preset >= 0) {
@@ -1912,9 +1912,11 @@ void AppWindow::finish_onboarding(bool skipped) {
             state_.set_banner(error, Severity::Error);
         }
     }
-    // The flag is the user's decision, so it is written even when app.json
-    // failed to load earlier (that file was replaced by defaults anyway).
-    if (!save_config_to_disk(state_, error)) {
+    // An app.json that failed to load is still on disk, unchanged, and the
+    // banner asks the user to fix or delete it: writing the in-memory
+    // defaults here would silently discard every preference in it. The guide
+    // then closes for this session only.
+    if (save_config && !save_config_to_disk(state_, error)) {
         state_.set_banner(error, Severity::Warning);
     }
     state_.show_toast(skipped ? L"Setup guide skipped; run it again from Settings any time"
@@ -1995,11 +1997,19 @@ void AppWindow::update_tooltip() {
 }
 
 void AppWindow::update_animation_timer() {
-    const bool toast_active = !state_.toast.empty() && state_.now_s < state_.toast_expiry_s;
-    const bool wanted = state_.starting || toast_active || state_.anim.animating() ||
-                        state_.anim.wants_frames() || state_.page_transition.active(state_.now_s) ||
-                        fade_dc_ != nullptr;
-    if (wanted == animation_timer_ || hwnd_ == nullptr) {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    anim::AnimationDemand demand;
+    demand.window_paints = IsWindowVisible(hwnd_) != FALSE && IsIconic(hwnd_) == FALSE;
+    demand.starting = state_.starting;
+    demand.toast = !state_.toast.empty() && state_.now_s < state_.toast_expiry_s;
+    demand.animating = state_.anim.animating();
+    demand.wants_frames = state_.anim.wants_frames();
+    demand.transition = state_.page_transition.active(state_.now_s);
+    demand.fade_pending = fade_dc_ != nullptr;
+    const bool wanted = anim::animation_timer_wanted(demand);
+    if (wanted == animation_timer_) {
         return;
     }
     animation_timer_ = wanted;

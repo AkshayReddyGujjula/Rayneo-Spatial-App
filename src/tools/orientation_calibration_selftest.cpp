@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <process.h>
 #include <string>
 #include <vector>
 
@@ -326,7 +327,8 @@ int main() {
               "tilt maps only to head Y");
 
         const std::filesystem::path path =
-            std::filesystem::temp_directory_path() / "rayneo-orientation-selftest.json";
+            std::filesystem::temp_directory_path() /
+            ("rayneo-orientation-selftest-" + std::to_string(_getpid()) + ".json");
         std::string error;
         check(gt::save_orientation_calibration(path.string(), result, error), "calibration saves");
         std::array<float, 9> loaded{};
@@ -792,7 +794,8 @@ int main() {
 
     std::printf("orientation_calibration_selftest: reject unsupported file versions\n");
     const std::filesystem::path bad_version_path =
-        std::filesystem::temp_directory_path() / "rayneo-orientation-bad-version.json";
+        std::filesystem::temp_directory_path() /
+        ("rayneo-orientation-bad-version-" + std::to_string(_getpid()) + ".json");
     {
         std::ofstream bad_version(bad_version_path);
         bad_version << "{\"version\":2,\"sensor_to_head\":[1,0,0,0,1,0,0,0,1]}\n";

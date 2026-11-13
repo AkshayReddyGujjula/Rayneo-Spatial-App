@@ -61,8 +61,12 @@ struct OnboardingFlow {
 
 // Show the guide at launch when it has never been completed or dismissed.
 bool onboarding_should_show(const AppConfig& config);
-// Finish or "Skip setup": closes the guide and persists completion in the
-// config (the caller saves app.json).
-void onboarding_close(OnboardingFlow& flow, AppConfig& config);
+// Finish or "Skip setup": closes the guide and marks completion in the
+// config. Returns whether the caller may save app.json: only when the file on
+// disk loaded (config_file_valid). An app.json that failed to load is still
+// the user's file, untouched on disk (the banner asks them to fix or delete
+// it); the defaults in memory must not overwrite it, so the guide then closes
+// for this session only.
+bool onboarding_close(OnboardingFlow& flow, AppConfig& config, bool config_file_valid);
 
 }  // namespace gt
