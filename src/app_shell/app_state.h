@@ -232,6 +232,7 @@ struct AppState {
 
     EngineClient engine;
     EngineStatusFile engine_status;
+    double engine_status_read_s = -1.0;  // now_s of the last status-file read
     DiagnosticsReport diagnostics;
 
     double now_s = 0.0;
@@ -326,6 +327,16 @@ bool recover_display_topology(AppState& state);
 void restore_taskbar_after_churn(AppState& state);
 std::wstring start_block_reason(const AppState& state, LaunchMode mode);
 void poll_engine(AppState& state);
+// Re-reads the engine status file only (part of poll_engine; also run by the
+// faster startup timer while the wearer warms up or holds still; that timer
+// skips the read when the last one is under 0.5 s old, keeping the status
+// file contract's 2 Hz cap).
+void refresh_engine_status(AppState& state);
+// The startup steps to show on Home: visible only while the engine starts or
+// runs and its fresh status reports a startup phase this controller knows.
+StartupView engine_startup_view(const AppState& state);
+// True while the startup timer should run (warm-up or hold still).
+bool engine_startup_fast_poll(const AppState& state);
 void run_expensive_diagnostics(AppState& state);
 void ensure_log_directory(const AppState& state);
 

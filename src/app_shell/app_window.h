@@ -25,6 +25,11 @@ namespace gt::ui {
 
 inline constexpr UINT_PTR kTimerHealth = 1;
 inline constexpr UINT_PTR kTimerAnimation = 2;
+// Status-only refresh at the 2 Hz cap while the engine reports the sensor
+// warm-up or the hold-still measurement (the 1.3 s window is shorter than
+// the default 1 s health poll can follow).
+inline constexpr UINT_PTR kTimerStartup = 3;
+inline constexpr UINT kStartupPollMs = 500;
 inline constexpr UINT kAnimationIntervalMs = 15;
 inline constexpr double kPageTransitionS = 0.22;
 
@@ -85,6 +90,7 @@ private:
     void refresh_health(bool expensive);
     void update_tooltip();
     void update_animation_timer();
+    void update_startup_timer();
     void invalidate();
     void ensure_back_buffer(int width, int height);
     void release_back_buffer();
@@ -130,6 +136,7 @@ private:
     int pending_click_id_ = 0;
     int pending_click_arg_ = 0;
     bool animation_timer_ = false;
+    bool startup_timer_ = false;
     bool tracking_mouse_ = false;
     double last_animation_s_ = 0.0;
 };

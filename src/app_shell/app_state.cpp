@@ -459,6 +459,44 @@ void finish_session_logs(AppState& state) {
 
 }  // namespace
 
+void refresh_engine_status(AppState& state) {
+    // The status file is advisory and may be stale (previous run) or absent
+    // (hand-launched engine without --status): only fresh content is live.
+    if (!state.engine.busy()) {
+        state.engine_status = EngineStatusFile{};
+    } else {
+        EngineStatusFile fresh;
+        std::string tail;
+        std::string read_error;
+        std::string parse_error;
+        const auto now_unix = static_cast<uint64_t>(std::time(nullptr));
+        if (read_text_tail(state.paths.engine_status, 8u << 10, tail, read_error) &&
+            parse_engine_status(tail, fresh, parse_error) &&
+            engine_status_is_fresh(fresh, now_unix, kEngineStatusMaxAgeS)) {
+            state.engine_status = fresh;
+        } else {
+            state.engine_status = EngineStatusFile{};
+        }
+    }
+    state.engine_status_read_s = state.now_s;
+    state.heading_lock = heading_lock_from_status(state.engine_status);
+}
+
+StartupView engine_startup_view(const AppState& state) {
+    const EngineProcessState process = state.engine.snapshot().state;
+    if (!state.engine_status.parsed ||
+        (process != EngineProcessState::Starting && process != EngineProcessState::Running)) {
+        return StartupView{};
+    }
+    return startup_view(parse_engine_phase(state.engine_status.phase), state.engine_status.phase_progress,
+                        state.engine_status.imu);
+}
+
+bool engine_startup_fast_poll(const AppState& state) {
+    const StartupView view = engine_startup_view(state);
+    return view.visible && (view.active_step == 2 || view.hold_still);
+}
+
 void poll_engine(AppState& state) {
     const EngineProcessState previous = state.engine.snapshot().state;
     state.engine.poll(state.now_s);
@@ -510,25 +548,7 @@ void poll_engine(AppState& state) {
         recover_display_topology(state);
     }
 
-    // The status file is advisory and may be stale (previous run) or absent
-    // (hand-launched engine without --status): only fresh content is live.
-    if (!state.engine.busy()) {
-        state.engine_status = EngineStatusFile{};
-    } else {
-        EngineStatusFile fresh;
-        std::string tail;
-        std::string read_error;
-        std::string parse_error;
-        const auto now_unix = static_cast<uint64_t>(std::time(nullptr));
-        if (read_text_tail(state.paths.engine_status, 8u << 10, tail, read_error) &&
-            parse_engine_status(tail, fresh, parse_error) &&
-            engine_status_is_fresh(fresh, now_unix, kEngineStatusMaxAgeS)) {
-            state.engine_status = fresh;
-        } else {
-            state.engine_status = EngineStatusFile{};
-        }
-    }
-    state.heading_lock = heading_lock_from_status(state.engine_status);
+    refresh_engine_status(state);
 
     if (state.engine.snapshot().state == EngineProcessState::Exited && state.engine_status.parsed &&
         state.engine_status.state == kStatusFailed) {
