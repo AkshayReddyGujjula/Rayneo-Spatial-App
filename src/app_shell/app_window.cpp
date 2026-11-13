@@ -483,6 +483,8 @@ void AppWindow::on_timer(UINT_PTR timer_id) {
             state_.now_s - calibration_.cancel_requested_at() > 4.0) {
             calibration_.terminate();
         }
+        // Backstop: closes the glasses guide if the run ended without output.
+        update_cal_guide_window();
         invalidate();
     } else if (timer_id == kTimerStartup) {
         // Status file only, and never sooner than 0.5 s after the last read.
@@ -558,6 +560,7 @@ void AppWindow::on_destroy() {
     KillTimer(hwnd_, kTimerStartup);
     startup_timer_ = false;
     animation_timer_ = false;
+    cal_guide_window_.close();
     if (calibration_.active()) {
         // Graceful first: the tool turns the IMU stream off on "q"/EOF
         // within a few hundred ms; terminate only if it does not exit.
@@ -1905,7 +1908,13 @@ void AppWindow::cancel_calibration() {
     calibration_.cancel();
     calibration_.set_cancel_time(state_.now_s);
     add_event(L"calibration cancelled");
+    update_cal_guide_window();
     invalidate();
+}
+
+void AppWindow::update_cal_guide_window() {
+    const float fov = state_.layout.fov_deg > 5.0f ? state_.layout.fov_deg : kCalGuideDefaultFovDeg;
+    cal_guide_window_.update(state_.cal_run, state_.now_s, fov);
 }
 
 void AppWindow::on_calibration_output() {
@@ -1941,6 +1950,7 @@ void AppWindow::on_calibration_output() {
         // The calibration file may have changed: re-read it now.
         refresh_health(true);
     }
+    update_cal_guide_window();
     invalidate();
 }
 

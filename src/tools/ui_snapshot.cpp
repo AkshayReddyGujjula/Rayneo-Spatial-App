@@ -11,11 +11,16 @@
 // touches a display: diagnostics are filled in by hand.
 
 #include "app_shell/app_state.h"
+#include "app_shell/calibration_guide.h"
+#include "app_shell/ui_cal_guide.h"
 #include "app_shell/ui_help.h"
 #include "app_shell/ui_paint.h"
 #include "app_shell/ui_widgets.h"
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstring>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -212,6 +217,106 @@ void startup_state(gt::AppState& state, const char* phase, double progress) {
     state.engine_status.phase = phase;
     state.engine_status.phase_progress = progress;
     state.heading_lock = gt::HeadingLockState::Unknown;
+}
+
+// Live calibration guide states, fed as the tool's own lines.
+struct GuideCase {
+    std::string name;
+    std::function<void(gt::CalRunState&, double)> setup;
+};
+
+std::string guide_progress(int step, const char* state) {
+    char buffer[256];
+    std::snprintf(buffer, sizeof(buffer),
+                  "@@progress {\"flow\":\"orientation\",\"step\":%d,\"steps\":4,\"state\":\"%s\",\"prompt\":\"%s\","
+                  "\"detail\":\"\",\"quality\":-1}",
+                  step, state,
+                  step == 1   ? "Look straight ahead and hold completely still for 4 seconds."
+                  : step == 2 ? "Slowly turn your head LEFT about 30 degrees, then return to centre. Do this 3 times."
+                  : step == 3 ? "Slowly nod DOWN toward your chest, then return to centre. Do this 3 times."
+                              : "Slowly tilt your head toward your RIGHT shoulder, then return to centre. Do this 3 "
+                                "times.");
+    return buffer;
+}
+
+std::string guide_live(int step, const char* kind, const char* state, float remaining, float yaw, float pitch,
+                       float roll, float along, float off, float rms, float peak, int repeats, const char* hint) {
+    char buffer[512];
+    std::snprintf(buffer, sizeof(buffer),
+                  "@@live {\"step\":%d,\"kind\":\"%s\",\"state\":\"%s\",\"elapsed\":2.00,\"remaining\":%.2f,"
+                  "\"frame\":\"file\",\"yaw\":%.2f,\"pitch\":%.2f,\"roll\":%.2f,\"along\":%.2f,\"off\":%.2f,"
+                  "\"speed\":18.0,\"still_rms\":%.2f,\"still_gate\":1.5,\"gate\":12,\"target\":%d,\"peak\":%.2f,"
+                  "\"repeats\":%d,\"repeats_required\":%d,\"hint\":\"%s\"}",
+                  step, kind, state, static_cast<double>(remaining), static_cast<double>(yaw),
+                  static_cast<double>(pitch), static_cast<double>(roll), static_cast<double>(along),
+                  static_cast<double>(off), static_cast<double>(rms), std::strcmp(kind, "turn") == 0 ? 25 : 20,
+                  static_cast<double>(peak), repeats, std::strcmp(kind, "still") == 0 ? 0 : 3, hint);
+    return buffer;
+}
+
+const std::vector<GuideCase>& guide_cases() {
+    static const std::vector<GuideCase> cases = {
+        {"still", [](gt::CalRunState& run, double now) {
+             run.begin(gt::CalFlow::Orientation, true, 5.0);
+             run.consume_line(guide_progress(1, "recording"), now - 1.0);
+             run.consume_line(guide_live(1, "still", "recording", 1.6f, 0.3f, -0.2f, 0.1f, 0.0f, 0.37f, 0.62f, 0.0f,
+                                         0, "STEADY"),
+                              now);
+         }},
+        {"turn-on-axis", [](gt::CalRunState& run, double now) {
+             run.begin(gt::CalFlow::Orientation, true, 5.0);
+             run.consume_line(guide_progress(2, "recording"), now - 3.0);
+             run.consume_line(guide_live(2, "turn", "recording", 8.4f, 19.0f, -0.6f, 0.4f, 19.0f, 0.72f, 0.4f, 19.0f,
+                                         1, "FURTHER"),
+                              now);
+         }},
+        {"turn-off-axis", [](gt::CalRunState& run, double now) {
+             run.begin(gt::CalFlow::Orientation, true, 5.0);
+             run.consume_line(guide_progress(2, "recording"), now - 3.0);
+             run.consume_line(guide_live(2, "turn", "recording", 8.0f, 16.0f, -5.2f, 1.8f, 16.0f, 5.5f, 0.4f, 16.0f,
+                                         0, "OFF_AXIS"),
+                              now);
+         }},
+        {"nod", [](gt::CalRunState& run, double now) {
+             run.begin(gt::CalFlow::Orientation, true, 5.0);
+             run.consume_line(guide_progress(3, "recording"), now - 5.0);
+             run.consume_line(guide_live(3, "nod", "recording", 6.0f, 0.5f, -21.0f, -0.3f, 21.0f, 0.6f, 0.4f, 21.0f, 2,
+                                         "BACK_TO_CENTRE"),
+                              now);
+         }},
+        {"tilt", [](gt::CalRunState& run, double now) {
+             run.begin(gt::CalFlow::Orientation, true, 5.0);
+             run.consume_line(guide_progress(4, "recording"), now - 2.0);
+             run.consume_line(guide_live(4, "tilt", "recording", 10.0f, 0.8f, 0.4f, 14.0f, 14.0f, 0.9f, 0.4f, 14.0f, 0,
+                                         "FURTHER"),
+                              now);
+         }},
+        {"waiting-countdown", [](gt::CalRunState& run, double now) {
+             run.begin(gt::CalFlow::Orientation, true, 5.0);
+             run.consume_line(guide_progress(2, "waiting"), now - 1.6);
+             run.consume_line(guide_live(2, "turn", "waiting", 3.4f, 0.4f, 0.2f, 0.0f, 0.4f, 0.2f, 0.3f, 0.0f, 0,
+                                         "GET_READY"),
+                              now);
+         }},
+        {"retry-tip", [](gt::CalRunState& run, double now) {
+             run.begin(gt::CalFlow::Orientation, true, 5.0);
+             run.consume_line(guide_progress(2, "recording"), now - 9.0);
+             for (int i = 0; i < 12; ++i) {
+                 run.consume_line(guide_live(2, "turn", "recording", 4.0f, 15.0f, -6.0f, 1.0f, 15.0f, 6.1f, 0.4f,
+                                             15.0f, 1, "OFF_AXIS"),
+                                  now - 3.0);
+             }
+             run.consume_line(
+                 "@@progress {\"flow\":\"orientation\",\"step\":2,\"steps\":4,\"state\":\"retry\",\"prompt\":\"x\","
+                 "\"detail\":\"LOW_DOMINANCE: the turn was not a clean single-axis motion\",\"quality\":0}",
+                 now - 2.0);
+             run.consume_line(guide_progress(2, "waiting"), now - 1.0);
+             run.consume_line(guide_live(2, "turn", "waiting", 4.0f, 0.2f, 0.1f, 0.0f, 0.2f, 0.1f, 0.3f, 0.0f, 0,
+                                         "GET_READY"),
+                              now);
+         }},
+    };
+    return cases;
 }
 
 struct Shot {
@@ -506,7 +611,117 @@ std::vector<Shot> shots() {
                     })});
     list.push_back({"wizard-narrow-820x640", 820, 640, 96, true,
                     wizard(gt::OnboardingStep::GlassesCheck, true, nullptr)});
+    // Live calibration guide in the PC panel (Tracking page and setup guide).
+    for (const GuideCase& guide : guide_cases()) {
+        const auto setup = guide.setup;
+        list.push_back({"tracking-guide-" + guide.name + "-1280x1700", 1280, 1700, 96, true, [setup](AppState& s) {
+                            base_state(s, true);
+                            s.page = AppPage::Tracking;
+                            setup(s.cal_run, s.now_s);
+                        }});
+    }
+    list.push_back({"tracking-guide-turn-off-axis-1280x1700-light", 1280, 1700, 96, false, [](AppState& s) {
+                        base_state(s, true);
+                        s.page = AppPage::Tracking;
+                        guide_cases()[2].setup(s.cal_run, s.now_s);
+                    }});
+    list.push_back({"wizard-3-head-guide-nod-1280x800", 1280, 800, 96, true,
+                    wizard(gt::OnboardingStep::HeadCalibration, true, [](AppState& s) {
+                        s.cal_in_wizard = true;
+                        guide_cases()[3].setup(s.cal_run, s.now_s);
+                    })});
+    list.push_back({"wizard-guide-tilt-narrow-820x640", 820, 640, 96, true,
+                    wizard(gt::OnboardingStep::HeadCalibration, true, [](AppState& s) {
+                        s.cal_in_wizard = true;
+                        guide_cases()[4].setup(s.cal_run, s.now_s);
+                    })});
     return list;
+}
+
+// The glasses window's picture, rendered offscreen at the glasses' 1920x1080.
+void render_glasses_guide(const GuideCase& guide, const std::filesystem::path& out_dir) {
+    const int width = 1920;
+    const int height = 1080;
+    gt::AppState state;
+    guide.setup(state.cal_run, state.now_s);
+    const gt::CalGuideView view = gt::cal_guide_view(state.cal_run, state.now_s);
+    const std::string name = "glasses-guide-" + guide.name;
+    if (!view.visible || view.headline.empty()) {
+        fail(name, "the guide view is not visible or has no headline");
+    }
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HDC screen = GetDC(nullptr);
+    HDC dc = CreateCompatibleDC(screen);
+    HBITMAP bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    ReleaseDC(nullptr, screen);
+    if (dc == nullptr || bitmap == nullptr || bits == nullptr) {
+        fail(name, "could not create the offscreen bitmap");
+        return;
+    }
+    const HGDIOBJ previous = SelectObject(dc, bitmap);
+    const RECT client{0, 0, width, height};
+    gt::ui::GlassesGuideFonts fonts;
+    fonts.create(height);
+    {
+        gt::ui::Canvas canvas(dc, client, gt::ui::dark_theme(), 96);
+        gt::ui::paint_cal_guide(canvas, client, view, gt::ui::glasses_guide_style(fonts), 46.0f);
+    }
+    GdiFlush();
+    // Checks: the background stays black (see-through on the optics), the
+    // red guide line is drawn, and the ball sits where the geometry says.
+    const auto pixel = [&](int x, int y) {
+        const uint32_t value = static_cast<const uint32_t*>(bits)[static_cast<size_t>(y) * width + x];
+        return std::array<int, 3>{static_cast<int>((value >> 16) & 0xff), static_cast<int>((value >> 8) & 0xff),
+                                  static_cast<int>(value & 0xff)};
+    };
+    size_t red = 0;
+    size_t lit = 0;
+    for (int y = 0; y < height; y += 2) {
+        for (int x = 0; x < width; x += 2) {
+            const auto p = pixel(x, y);
+            if (p[0] + p[1] + p[2] > 30) {
+                ++lit;
+            }
+            if (p[0] > 200 && p[1] < 90 && p[2] < 90) {
+                ++red;
+            }
+        }
+    }
+    const auto corner = pixel(width - 3, height - 3);
+    if (corner[0] + corner[1] + corner[2] != 0) {
+        fail(name, "the background is not black");
+    }
+    const size_t samples = static_cast<size_t>(width / 2) * static_cast<size_t>(height / 2);
+    if (lit * 4 > samples) {
+        fail(name, "more than a quarter of the glasses frame is lit");
+    }
+    if (view.live.kind != gt::CalGuideKind::Still && red < 200) {
+        fail(name, "the red guide line is missing");
+    }
+    if (view.has_live) {
+        const gt::CalGuidePoint ball =
+            gt::ui::cal_guide_target_ball(client, view, gt::ui::glasses_guide_style(fonts), 46.0f);
+        const auto p = pixel(std::clamp(static_cast<int>(ball.x), 0, width - 1),
+                             std::clamp(static_cast<int>(ball.y), 0, height - 1));
+        if (p[0] + p[1] + p[2] < 200) {
+            fail(name, "no ball at the computed head position");
+        }
+    }
+    std::printf("  [%s] %s: %dx%d glasses, %zu red / %zu lit samples\n", failures == 0 ? "ok" : "..", name.c_str(),
+                width, height, red, lit);
+    if (!out_dir.empty() && !save_png(bitmap, out_dir / (name + ".png"))) {
+        fail(name, "could not write the PNG");
+    }
+    SelectObject(dc, previous);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
 }
 
 }  // namespace
@@ -538,6 +753,13 @@ int main(int argc, char** argv) {
             continue;
         }
         render(shot, out_dir);
+    }
+    std::printf("ui_snapshot: the calibration guide on the glasses (offscreen)\n");
+    for (const GuideCase& guide : guide_cases()) {
+        if (!only.empty() && ("glasses-guide-" + guide.name).find(only) == std::string::npos) {
+            continue;
+        }
+        render_glasses_guide(guide, out_dir);
     }
     std::printf("ui_snapshot: %s (%d failures)\n", failures == 0 ? "PASS" : "FAIL", failures);
     return failures == 0 ? 0 : 1;

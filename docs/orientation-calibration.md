@@ -375,3 +375,38 @@ of the geometric headroom score and, with repeats, the repeat-consistency score 
 (>= 0.7), Fair (>= 0.4) or Retry recommended. Optional file keys (version stays 1):
 `orientation_quality`, `orientation_repeats`, `orientation_spread_deg`, `mag_quality`, `mag_earbuds`;
 older files load unchanged. Details: `docs/overnight/r2-calibration.md`.
+
+### `@@live` guide lines (added 2026-11-13, round 5)
+
+With `--progress-json` the orientation flow (and the compass flow's still step) also prints
+`@@live {...}` lines at about 22 Hz while a step waits (`--auto` countdown) or records. They are
+display-only: the samples read during the countdown are never recorded, and the maths, gates,
+file and `@@progress` lines are unchanged. One line, exactly (`orientation_calibration_selftest`
+pins it; `src/imu/calibration_live.h`):
+
+```
+@@live {"step":2,"kind":"turn","state":"recording","elapsed":1.25,"remaining":11.75,"frame":"file",
+        "yaw":12.50,"pitch":0.00,"roll":0.25,"along":12.50,"off":0.25,"speed":30.0,"still_rms":0.50,
+        "still_gate":1.5,"gate":12,"target":25,"peak":12.50,"repeats":1,"repeats_required":3,"hint":"FURTHER"}
+```
+
+(one physical line on stdout; wrapped here.)
+
+- `kind` still / turn / nod / tilt; `state` waiting / recording; `remaining` -1 when unknown.
+- Angles: head rotation since the step's start pose in a guide frame. Up = gravity from the still
+  step (before it: the live accelerometer, `frame` "gravity"); forward = the existing calibration
+  file's forward row when the file is valid (`"file"`), else the nominal GT mounting (`"nominal"`);
+  after the nod step the measured nod axis refines it (`"measured"`). yaw + = turned left, pitch + =
+  nodded up, roll + = tilted right. `along` is signed in the commanded direction (left, down, right),
+  `off` the rotation about the other two axes; for the still step `off` is the total.
+- `speed`: low-passed |gyro - bias| (tau 0.1 s). `still_rms`: gyro rms over the trailing 1.5 s (the
+  statistic of the still gate). `gate`: the real 12 deg excursion gate. `target`: the recommendation
+  (turn 25, nod and tilt 20 deg; `axis_quality` gives full travel marks from 25 deg).
+- `repeats`: a display-only count of out-and-back gestures past the gate that came back within 30%
+  of their peak (the splitter's rule); the tool's own analysis still decides what is used.
+- `hint`: GET_READY, STEADY / HOLD (still step, rms below / above 1.0 deg/s), GO, FURTHER,
+  BACK_TO_CENTRE, SLOWER (above 80 deg/s), OFF_AXIS (off above 2.5 deg and above 12% of the reach),
+  WRONG_WAY (below -4 deg), DONE.
+
+The controller draws these as the live guide (glasses window and PC panel); see
+`docs/overnight/r5-calibration-guide.md`.

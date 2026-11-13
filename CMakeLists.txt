@@ -43,6 +43,7 @@ add_library(rayneo_core STATIC
   src/imu/gt_hid.cpp
   src/imu/fusion.cpp
   src/imu/orientation_calibration.cpp
+  src/imu/calibration_live.cpp
   src/imu/pose_estimator.cpp
   src/imu/pose_smoother.cpp
   src/imu/mag_heading.cpp
@@ -75,6 +76,7 @@ add_library(rayneo_app_model STATIC
   src/app_shell/app_config.cpp
   src/app_shell/app_layout.cpp
   src/app_shell/calibration_progress.cpp
+  src/app_shell/calibration_guide.cpp
   src/app_shell/engine_commands.cpp
   src/app_shell/onboarding.cpp
   src/app_shell/session_logs.cpp
@@ -91,6 +93,8 @@ add_library(rayneo_app_ui STATIC
   src/app_shell/app_state.cpp
   src/app_shell/app_window.cpp
   src/app_shell/calibration_runner.cpp
+  src/app_shell/cal_guide_window.cpp
+  src/app_shell/ui_cal_guide.cpp
   src/app_shell/diagnostics.cpp
   src/app_shell/engine_client.cpp
   src/app_shell/paths.cpp

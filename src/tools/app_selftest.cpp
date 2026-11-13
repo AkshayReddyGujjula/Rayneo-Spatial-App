@@ -18,6 +18,7 @@
 #include "app/view_comfort.h"
 #include "app_shell/app_config.h"
 #include "app_shell/app_layout.h"
+#include "app_shell/calibration_guide.h"
 #include "app_shell/calibration_progress.h"
 #include "app_shell/engine_commands.h"
 #include "app_shell/onboarding.h"
@@ -1846,6 +1847,181 @@ void test_startup_phase() {
           "the pre-start hint asks the wearer to keep still");
 }
 
+std::string live_line(const char* kind, const char* state, float yaw, float pitch, float roll, float along, float off,
+                      int repeats, const char* hint, float remaining = 4.0f) {
+    char buffer[512];
+    std::snprintf(buffer, sizeof(buffer),
+                  "@@live {\"step\":2,\"kind\":\"%s\",\"state\":\"%s\",\"elapsed\":1.00,\"remaining\":%.2f,"
+                  "\"frame\":\"file\",\"yaw\":%.2f,\"pitch\":%.2f,\"roll\":%.2f,\"along\":%.2f,\"off\":%.2f,"
+                  "\"speed\":20.0,\"still_rms\":0.50,\"still_gate\":1.5,\"gate\":12,\"target\":25,\"peak\":%.2f,"
+                  "\"repeats\":%d,\"repeats_required\":3,\"hint\":\"%s\"}",
+                  kind, state, static_cast<double>(remaining), static_cast<double>(yaw), static_cast<double>(pitch),
+                  static_cast<double>(roll), static_cast<double>(along), static_cast<double>(off),
+                  static_cast<double>(std::max(0.0f, along)), repeats, hint);
+    return buffer;
+}
+
+bool guide_near(float a, float b, float tolerance = 0.01f) {
+    return std::fabs(a - b) <= tolerance;
+}
+
+void test_calibration_guide() {
+    std::printf("app_selftest: live calibration guide (@@live)\n");
+    gt::CalLiveSample sample;
+    std::string error;
+    // The tool's own pinned line (orientation_calibration_selftest).
+    check(gt::parse_cal_live_line(
+              "@@live {\"step\":2,\"kind\":\"turn\",\"state\":\"recording\",\"elapsed\":1.25,\"remaining\":11.75,"
+              "\"frame\":\"file\",\"yaw\":12.50,\"pitch\":0.00,\"roll\":0.25,\"along\":12.50,\"off\":0.25,"
+              "\"speed\":30.0,\"still_rms\":0.50,\"still_gate\":1.5,\"gate\":12,\"target\":25,\"peak\":12.50,"
+              "\"repeats\":1,\"repeats_required\":3,\"hint\":\"FURTHER\"}\r\n",
+              sample, error) == gt::CalLiveLineKind::Live &&
+              sample.step == 2 && sample.kind == gt::CalGuideKind::Turn && !sample.waiting &&
+              guide_near(sample.remaining_s, 11.75f) && sample.frame == "file" && guide_near(sample.yaw_deg, 12.5f) &&
+              guide_near(sample.roll_deg, 0.25f) && guide_near(sample.off_deg, 0.25f) && guide_near(sample.speed_degs, 30.0f) &&
+              guide_near(sample.gate_deg, 12.0f) && guide_near(sample.target_deg, 25.0f) && sample.repeats == 1 &&
+              sample.repeats_required == 3 && sample.hint == "FURTHER",
+          "a tool @@live line parses field for field");
+    check(gt::parse_cal_live_line("captured 2856 samples (476.0 Hz)", sample, error) == gt::CalLiveLineKind::NotLive &&
+              gt::parse_cal_live_line("@@lively chatter", sample, error) == gt::CalLiveLineKind::NotLive &&
+              gt::parse_cal_live_line("@@progress {\"flow\":\"orientation\",\"state\":\"ok\"}", sample, error) ==
+                  gt::CalLiveLineKind::NotLive,
+          "console text and progress lines are not live lines");
+    check(gt::parse_cal_live_line("@@live {not json", sample, error) == gt::CalLiveLineKind::Malformed &&
+              gt::parse_cal_live_line("@@live {\"kind\":\"spin\",\"state\":\"recording\"}", sample, error) ==
+                  gt::CalLiveLineKind::Malformed &&
+              gt::parse_cal_live_line("@@live {\"kind\":\"nod\",\"state\":\"done\"}", sample, error) ==
+                  gt::CalLiveLineKind::Malformed,
+          "bad JSON, kind or state is malformed");
+    check(gt::parse_cal_live_line("@@live {\"kind\":\"tilt\",\"state\":\"waiting\",\"yaw\":1e9,\"gate\":-3,"
+                                  "\"target\":2,\"hint\":\"bad<hint>\",\"repeats\":-4}",
+                                  sample, error) == gt::CalLiveLineKind::Live &&
+              sample.waiting && guide_near(sample.yaw_deg, 360.0f) && guide_near(sample.gate_deg, 12.0f) &&
+              guide_near(sample.target_deg, 12.0f) && sample.hint.empty() && sample.repeats == 0 &&
+              guide_near(sample.remaining_s, -1.0f),
+          "out-of-range values are clamped, a bad hint is dropped, missing fields default");
+
+    // Run model: live lines update the guide, never the failure report.
+    gt::CalRunState run;
+    run.begin(gt::CalFlow::Orientation, true, 5.0);
+    run.consume_line("@@progress {\"flow\":\"orientation\",\"step\":2,\"steps\":4,\"state\":\"waiting\","
+                     "\"prompt\":\"Turn left\",\"detail\":\"\",\"quality\":-1}",
+                     10.0);
+    check(!gt::cal_guide_view(run, 10.0).visible, "an older tool (no @@live) keeps the text-only view");
+    run.consume_line(live_line("turn", "waiting", 0.2f, 0.1f, 0.0f, 0.2f, 0.1f, 0, "GET_READY", 3.2f), 10.5);
+    gt::CalGuideView view = gt::cal_guide_view(run, 10.5);
+    check(run.tool_has_live && run.has_live && run.recent_output.empty() && run.malformed_lines == 0,
+          "live lines feed the guide and stay out of the console tail");
+    check(view.visible && view.has_live && view.countdown == 4 && view.headline == "Turn left and back" &&
+              view.subline.find("3 times") != std::string::npos && view.tone == gt::CalGuideTone::Neutral,
+          "waiting: step name, how-to with the repeat count, countdown from the tool");
+    check(!gt::cal_guide_view(run, 12.0).has_live && run.live_fresh(11.4) && !run.live_fresh(11.6),
+          "a live sample older than a second is not drawn");
+    run.consume_line("@@progress {\"flow\":\"orientation\",\"step\":2,\"steps\":4,\"state\":\"recording\","
+                     "\"prompt\":\"Turn left\",\"detail\":\"\",\"quality\":-1}",
+                     11.0);
+    run.consume_line(live_line("turn", "recording", 26.0f, 0.5f, 0.3f, 26.0f, 0.6f, 1, "BACK_TO_CENTRE"), 11.1);
+    view = gt::cal_guide_view(run, 11.1);
+    check(view.headline == "Back to centre" && view.subline == "1 of 3" && view.tone == gt::CalGuideTone::Good &&
+              view.countdown == -1,
+          "recording: the live hint is the headline, repeats counted");
+    for (int i = 0; i < 12; ++i) {
+        run.consume_line(live_line("turn", "recording", 20.0f, 6.0f, 1.0f, 20.0f, 6.1f, 1, "OFF_AXIS"), 11.2);
+    }
+    view = gt::cal_guide_view(run, 11.2);
+    check(view.headline == "Keep your head level" && view.tone == gt::CalGuideTone::Warn,
+          "off-axis turn: 'Keep your head level' in the warning colour");
+    run.consume_line("@@progress {\"flow\":\"orientation\",\"step\":2,\"steps\":4,\"state\":\"retry\","
+                     "\"prompt\":\"Turn left\",\"detail\":\"LOW_DOMINANCE: the turn mixed axes\",\"quality\":0}",
+                     12.0);
+    view = gt::cal_guide_view(run, 12.0);
+    check(!run.has_live && view.headline == "Let's try that again" &&
+              run.retry_tip.find("chin level") != std::string::npos && view.tip == run.retry_tip,
+          "retry after an off-axis attempt: the guide names the correction");
+    run.consume_line("@@progress {\"flow\":\"orientation\",\"step\":2,\"steps\":4,\"state\":\"waiting\","
+                     "\"prompt\":\"Turn left\",\"detail\":\"\",\"quality\":-1}",
+                     12.1);
+    check(!run.retry_tip.empty(), "the correction stays for the retried attempt");
+    run.consume_line("@@progress {\"flow\":\"orientation\",\"step\":2,\"steps\":4,\"state\":\"ok\","
+                     "\"prompt\":\"Turn left\",\"detail\":\"\",\"quality\":0.9}",
+                     20.0);
+    check(run.retry_tip.empty() && !run.has_live && gt::cal_guide_view(run, 20.0).headline == "Step done",
+          "a passed step clears the guide and the tip");
+
+    gt::CalLiveSample last;
+    last.kind = gt::CalGuideKind::Nod;
+    last.repeats = 1;
+    last.repeats_required = 3;
+    check(gt::cal_retry_tip(last, 0, 0, 0).find("further") != std::string::npos &&
+              gt::cal_retry_tip(last, 0, 0, 12).find("DOWN") != std::string::npos &&
+              gt::cal_retry_tip(last, 3, 0, 0).find("further") != std::string::npos,
+          "retry tips: too few repeats -> further; wrong way names the direction; brief hints ignored");
+    last.repeats = 3;
+    check(gt::cal_retry_tip(last, 0, 12, 0) == "Move more slowly and smoothly." && gt::cal_retry_tip(last, 0, 0, 0).empty(),
+          "retry tips: too fast -> slower; nothing seen -> no tip");
+
+    // Geometry: degrees -> pixels on a 1920x1080 glasses display, 46 deg FOV.
+    const gt::CalGuideScale turn = gt::cal_guide_scale(gt::CalGuideKind::Turn, 1920.0f, 1080.0f, 46.0f, 25.0f);
+    check(guide_near(turn.px_per_deg, 0.9f * 960.0f / 30.0f, 0.01f),
+          "turn scale fits target + 5 deg in 90% of the half width (28.8 px/deg)");
+    const gt::CalGuideScale wide = gt::cal_guide_scale(gt::CalGuideKind::Turn, 1920.0f, 1080.0f, 46.0f, 5.0f);
+    check(guide_near(wide.px_per_deg, 1920.0f / 46.0f, 0.01f), "a small target keeps the true FOV scale (41.7 px/deg)");
+    const gt::CalGuideScale nod = gt::cal_guide_scale(gt::CalGuideKind::Nod, 1920.0f, 1080.0f, 46.0f, 20.0f);
+    check(guide_near(nod.px_per_deg, 0.9f * 540.0f / 25.0f, 0.01f), "nod scale uses the half height (19.4 px/deg)");
+    check(guide_near(gt::cal_guide_scale(gt::CalGuideKind::Turn, 1920.0f, 1080.0f, 0.0f, 5.0f).px_per_deg, 1920.0f / 46.0f),
+          "an invalid FOV falls back to 46 deg");
+
+    gt::CalLiveSample head;
+    head.kind = gt::CalGuideKind::Turn;
+    head.yaw_deg = 10.0f;
+    head.pitch_deg = -2.0f;
+    gt::CalGuidePoint ball = gt::cal_guide_ball(head, turn, 960.0f, 540.0f, 1920.0f, 1080.0f);
+    check(guide_near(ball.x, 960.0f - 288.0f, 0.1f) && guide_near(ball.y, 540.0f + 57.6f, 0.1f),
+          "turn left moves the ball left; nodding down moves it down (off-axis to scale)");
+    head.yaw_deg = 90.0f;
+    ball = gt::cal_guide_ball(head, turn, 960.0f, 540.0f, 1920.0f, 1080.0f);
+    check(ball.x >= 0.0f && ball.x < 60.0f, "the ball is clamped inside the display");
+    gt::CalLiveSample tilt;
+    tilt.kind = gt::CalGuideKind::Tilt;
+    tilt.roll_deg = 15.0f;
+    gt::CalGuideScale arc = gt::cal_guide_scale(gt::CalGuideKind::Tilt, 1920.0f, 1080.0f, 46.0f, 20.0f);
+    arc.arc_radius = 400.0f;
+    ball = gt::cal_guide_ball(tilt, arc, 960.0f, 700.0f, 1920.0f, 1080.0f);
+    check(guide_near(ball.x, 960.0f + 200.0f, 0.1f) && guide_near(ball.y, 700.0f - 346.41f, 0.1f),
+          "tilt right moves the ball clockwise along the arc (15 deg -> 30 deg drawn)");
+    const gt::CalGuidePoint target = gt::cal_guide_axis_point(gt::CalGuideKind::Nod, 20.0f, nod, 960.0f, 200.0f);
+    check(guide_near(target.x, 960.0f) && guide_near(target.y, 200.0f + 20.0f * nod.px_per_deg, 0.1f),
+          "nod target mark sits below the centre");
+    check(guide_near(gt::cal_guide_ring_radius(0.0f, 1.5f, 10.0f, 100.0f), 10.0f) &&
+              guide_near(gt::cal_guide_ring_radius(0.75f, 1.5f, 10.0f, 100.0f), 55.0f) &&
+              guide_near(gt::cal_guide_ring_radius(3.0f, 1.5f, 10.0f, 100.0f), 100.0f) &&
+              guide_near(gt::cal_guide_ring_radius(std::nanf(""), 1.5f, 10.0f, 100.0f), 100.0f),
+          "steadiness ring tightens with stillness, saturates at the 1.5 deg/s gate");
+
+    gt::CalLiveSample tone;
+    tone.kind = gt::CalGuideKind::Turn;
+    tone.hint = "FURTHER";
+    const bool good = gt::cal_guide_tone(tone) == gt::CalGuideTone::Good;
+    tone.hint = "OFF_AXIS";
+    const bool off = gt::cal_guide_tone(tone) == gt::CalGuideTone::Warn;
+    tone.waiting = true;
+    const bool neutral = gt::cal_guide_tone(tone) == gt::CalGuideTone::Neutral;
+    tone.waiting = false;
+    tone.kind = gt::CalGuideKind::Still;
+    tone.still_rms_degs = 1.2f;
+    const bool shaky = gt::cal_guide_tone(tone) == gt::CalGuideTone::Warn;
+    tone.still_rms_degs = 0.4f;
+    const bool steady = gt::cal_guide_tone(tone) == gt::CalGuideTone::Good;
+    check(good && off && neutral && shaky && steady, "colour state: on-axis/steady good, off-axis/moving warn");
+    check(gt::cal_guide_hint_text(gt::CalGuideKind::Turn, "OFF_AXIS") == "Keep your head level" &&
+              gt::cal_guide_hint_text(gt::CalGuideKind::Nod, "FURTHER") == "Nod further" &&
+              gt::cal_guide_hint_text(gt::CalGuideKind::Tilt, "WRONG_WAY") == "Other way: tilt right" &&
+              gt::cal_guide_hint_text(gt::CalGuideKind::Still, "HOLD") == "Hold still" &&
+              gt::cal_guide_hint_text(gt::CalGuideKind::Turn, "BACK_TO_CENTRE") == "Back to centre" &&
+              gt::cal_guide_hint_text(gt::CalGuideKind::Turn, "SOMETHING_NEW").empty(),
+          "hint text per step");
+}
+
 int main() {
     std::printf("app_selftest: controller app model\n");
     std::filesystem::path directory;
@@ -1880,6 +2056,7 @@ int main() {
     test_view_comfort(directory);
     test_ui_model(directory);
     test_calibration_progress();
+    test_calibration_guide();
     test_onboarding(directory);
     test_animation();
     test_ui_input();

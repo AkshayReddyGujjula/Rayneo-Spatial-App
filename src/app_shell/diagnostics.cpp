@@ -43,6 +43,8 @@ BOOL CALLBACK monitor_enum_proc(HMONITOR handle, HDC, LPRECT, LPARAM data) {
     }
     DisplayInfo entry;
     entry.device_name = info.szDevice;
+    entry.left = info.rcMonitor.left;
+    entry.top = info.rcMonitor.top;
     entry.width = info.rcMonitor.right - info.rcMonitor.left;
     entry.height = info.rcMonitor.bottom - info.rcMonitor.top;
     entry.primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
@@ -154,6 +156,18 @@ std::wstring format_bytes_wide(uint64_t bytes) {
                       static_cast<unsigned long long>(bytes));
     }
     return std::wstring(buffer);
+}
+
+bool find_glasses_monitor_rect(RECT& rect) {
+    std::vector<DisplayInfo> displays;
+    EnumDisplayMonitors(nullptr, nullptr, monitor_enum_proc, reinterpret_cast<LPARAM>(&displays));
+    for (const DisplayInfo& display : displays) {
+        if (display.glasses && !display.virtual_display && display.width > 0 && display.height > 0) {
+            rect = RECT{display.left, display.top, display.left + display.width, display.top + display.height};
+            return true;
+        }
+    }
+    return false;
 }
 
 void collect_display_and_vdd(DiagnosticsReport& report) {

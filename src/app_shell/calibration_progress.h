@@ -55,6 +55,54 @@ enum class CalLineKind {
 
 inline constexpr const char* kCalProgressPrefix = "@@progress";
 
+// Live guide lines (tool with --progress-json, 2026-11-13 and later), about
+// 22 per second while a step waits or records; display only:
+//
+//   @@live {"step":N,"kind":"still"|"turn"|"nod"|"tilt","state":"waiting"|"recording",
+//           "elapsed":S,"remaining":S|-1,"frame":"file"|"measured"|"nominal"|"gravity",
+//           "yaw":D,"pitch":D,"roll":D,"along":D,"off":D,"speed":D,"still_rms":D,
+//           "still_gate":1.5,"gate":12,"target":D,"peak":D,"repeats":N,
+//           "repeats_required":N,"hint":"GET_READY"|"STEADY"|"HOLD"|"GO"|"FURTHER"|
+//           "BACK_TO_CENTRE"|"SLOWER"|"OFF_AXIS"|"WRONG_WAY"|"DONE"}
+//
+// Angles are degrees since the step's start pose: yaw + = turned left,
+// pitch + = nodded up, roll + = tilted right; along is signed in the step's
+// commanded direction. An older tool prints none and the UI falls back to the
+// text-only view.
+inline constexpr const char* kCalLivePrefix = "@@live";
+
+enum class CalGuideKind : int { Still = 0, Turn, Nod, Tilt };
+
+struct CalLiveSample {
+    int step = 0;
+    CalGuideKind kind = CalGuideKind::Still;
+    bool waiting = false;  // "waiting" (countdown) vs "recording"
+    float elapsed_s = 0.0f;
+    float remaining_s = -1.0f;
+    std::string frame;
+    float yaw_deg = 0.0f;
+    float pitch_deg = 0.0f;
+    float roll_deg = 0.0f;
+    float along_deg = 0.0f;
+    float off_deg = 0.0f;
+    float speed_degs = 0.0f;
+    float still_rms_degs = 0.0f;
+    float still_gate_degs = 1.5f;
+    float gate_deg = 12.0f;
+    float target_deg = 25.0f;
+    float peak_deg = 0.0f;
+    int repeats = 0;
+    int repeats_required = 0;
+    std::string hint;
+};
+
+enum class CalLiveLineKind { NotLive, Live, Malformed };
+
+// kind and state are required; numbers default as above (non-finite reads as
+// the default, angles are clamped to +-360 deg); hint is kept only when it is
+// an upper-case code. Never throws.
+CalLiveLineKind parse_cal_live_line(std::string_view line, CalLiveSample& sample, std::string& error);
+
 // The in-app run uses the tool's --auto mode: the wearer is holding a pose
 // and cannot reach the keyboard, so each step starts after a visible
 // countdown. An empty stdin line starts the step early ("Start now"), "q"
@@ -98,6 +146,10 @@ std::string calibration_saved_text(CalFlow flow, float quality, const std::strin
 CalLineKind parse_cal_progress_line(std::string_view line, CalProgressEvent& event,
                                     std::string& error);
 
+// The correction to suggest after a retried motion step, from what the live
+// guide saw during that attempt (empty when nothing specific stands out).
+std::string cal_retry_tip(const CalLiveSample& last, int off_axis_count, int slower_count, int wrong_way_count);
+
 // What the calibration view renders for one run of the tool.
 struct CalRunState {
     enum class Phase {
@@ -127,11 +179,28 @@ struct CalRunState {
     // Why the last attempt of this step was retried; the tool's next line
     // ("waiting") would otherwise erase it before anyone could read it.
     std::string retry_reason;
+    // Live guide (@@live): the latest sample while a step waits or records;
+    // cleared when the step ends (ok / retry / failed / done) or moves on.
+    bool has_live = false;
+    CalLiveSample live;
+    double live_at_s = 0.0;
+    bool tool_has_live = false;  // this tool streams @@live at all
+    // Problem hints seen while the current attempt recorded (for the retry tip).
+    int live_off_axis = 0;
+    int live_slower = 0;
+    int live_wrong_way = 0;
+    CalLiveSample last_recording;  // the last recording sample of the attempt
+    bool has_last_recording = false;
+    // A specific correction for the next attempt, from the guide's hints.
+    std::string retry_tip;
 
     static constexpr size_t kRecentLines = 6;
 
     void begin(CalFlow run_flow, bool auto_mode = false, double delay_s = 0.0);
     void apply(const CalProgressEvent& event, double now_s = 0.0);
+    void apply_live(const CalLiveSample& sample, double now_s = 0.0);
+    // A live sample arrived within the last second.
+    bool live_fresh(double now_s) const { return has_live && now_s - live_at_s <= 1.0; }
     // Parses one stdout line: progress lines update the state, everything
     // else lands in recent_output. Returns the line kind.
     CalLineKind consume_line(const std::string& line, double now_s = 0.0);
