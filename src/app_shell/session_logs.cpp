@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cwchar>
+#include <cwctype>
 #include <fstream>
 #include <system_error>
 
@@ -14,7 +16,7 @@ namespace gt {
 
 namespace {
 
-constexpr const wchar_t* kArchiverMutex = L"Local\\RayNeoSpatialSessionArchiver";
+constexpr const wchar_t* kArchiverMutexPrefix = L"Local\\RayNeoSpatialSessionArchiver-";
 constexpr const char* kPendingPrefix = ".pending-";
 constexpr const char* kErrorFile = "archive-error.txt";
 constexpr int kLegacyRotatedGenerations = 9;
@@ -281,8 +283,35 @@ bool spawn_session_archiver(const std::filesystem::path& archive_dir, std::strin
     return true;
 }
 
+std::wstring session_archiver_mutex_name(const std::filesystem::path& archive_dir) {
+    // One helper per queue directory: the mutex guards that directory's
+    // pending folders, not the machine. FNV-1a over the absolute, normalised,
+    // case-folded path, so one folder spelled two ways maps to one name.
+    std::error_code ignored;
+    std::filesystem::path absolute = std::filesystem::absolute(archive_dir, ignored);
+    if (absolute.empty()) {
+        absolute = archive_dir;
+    }
+    std::wstring key = absolute.lexically_normal().wstring();
+    while (key.size() > 1 && (key.back() == L'\\' || key.back() == L'/')) {
+        key.pop_back();
+    }
+    unsigned long long hash = 14695981039346656037ull;
+    for (wchar_t c : key) {
+        if (c == L'/') {
+            c = L'\\';
+        }
+        hash ^= static_cast<unsigned long long>(std::towlower(c));
+        hash *= 1099511628211ull;
+    }
+    wchar_t hex[17] = {};
+    std::swprintf(hex, 17, L"%016llx", hash);
+    return std::wstring(kArchiverMutexPrefix) + hex;
+}
+
 int run_session_archiver(const std::filesystem::path& archive_dir) {
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, kArchiverMutex);
+    const std::wstring mutex_name = session_archiver_mutex_name(archive_dir);
+    HANDLE mutex = CreateMutexW(nullptr, TRUE, mutex_name.c_str());
     if (mutex == nullptr) {
         return 1;
     }
@@ -303,7 +332,7 @@ int run_session_archiver(const std::filesystem::path& archive_dir) {
             if (list_pending(archive_dir).empty()) {
                 return 0;
             }
-            mutex = CreateMutexW(nullptr, TRUE, kArchiverMutex);
+            mutex = CreateMutexW(nullptr, TRUE, mutex_name.c_str());
             if (mutex == nullptr) {
                 return 1;
             }

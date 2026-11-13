@@ -60,8 +60,14 @@ bool has_pending_session_logs(const std::filesystem::path& archive_dir);
 // Starts the detached helper (this executable with kArchiveSessionsSwitch).
 bool spawn_session_archiver(const std::filesystem::path& archive_dir, std::string& error);
 
+// The named mutex that makes one helper own one archive directory's queue.
+// Separate directories get separate names, so a helper for another log folder
+// (a second copy of the app, a concurrent test run) never turns this one away.
+std::wstring session_archiver_mutex_name(const std::filesystem::path& archive_dir);
+
 // The helper's body: archives every pending folder, prunes, and returns the
-// process exit code. A second concurrent helper exits at once; the running one
+// process exit code. A second concurrent helper for the same directory exits
+// at once; the running one
 // re-checks for new work before it lets go, so no pending folder is missed.
 int run_session_archiver(const std::filesystem::path& archive_dir);
 
