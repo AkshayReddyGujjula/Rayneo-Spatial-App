@@ -74,6 +74,11 @@ Build dirs live under `%LOCALAPPDATA%\Temp\rayneo-overnight\` (never inside the 
   R3-A launched (Opus medium) for the 3 confirmed-unfixed UI bugs in r2-review.md. R2-C told to use scenario 25+.
 - R3-A merged (a685f11): engine start refused during in-app calibration, drag ends on WM_CAPTURECHANGED,
   pressed look cleared on WM_MOUSELEAVE (seam: src/app_shell/ui_input.h). 11/11 green. Waiting on R2-C.
+- 04:12 R3-B launched (Opus high): visual QA of all ui_snapshot renders, fix clear defects only.
+- 04:15 R2-C merged (bdaec00; pose_scenarios conflict: kept 24 + 25-27): gravity-verified single-episode
+  startup confirmation. Verified: pose_selftest and scenarios 1-24 output identical, only 25-27 appended; 11/11.
+  Engine log now reports single-episode reseeds (eeaf37d). AGENTS.md round 2 folded (2a8cdec), REPORT round 2 written.
+  Remaining: merge R3-B, final full suite, final RESUME/REPORT touch.
 
 ## Round 2 plan (start at 03:45; window 2 ~03:40-08:40, window 3 ~08:45-10:30 hard stop)
 Window 2, in parallel, each in its own worktree reset onto overnight-claude-improvements:

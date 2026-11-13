@@ -49,8 +49,31 @@ It does nothing while you read (reading output is identical to before).
 - The Tracking page now shows the compass state live: gyro only, finding north, locked,
   interference, checking a magnetic change.
 
-### 5. Round 2 (03:45 onward)
-_Filled in when the round-2 work is merged._
+### 5. Round 2: review, more accurate calibration, more startup drift fixed
+- **Bugs found by a code review of everything above and fixed, each with a test:**
+  - turn prediction overshot ~13 deg when you switched yaw/pitch tracking back on;
+  - the app kept animating ~66 times a second while hidden in the tray;
+  - the setup guide could overwrite an `app.json` that had failed to load;
+  - the workspace could be started while a calibration was running (both would fight over the
+    glasses' sensor);
+  - a slider/screen drag could stick after Alt+Tab; a button could stay drawn pressed;
+  - two test suites failed when run at the same time (one cause was real: session logs could be
+    left unarchived).
+- **More accurate head calibration (opt-in):** `--repeats N` has you do each turn, nod and tilt N
+  times; outliers are thrown out and the rest averaged. Simulated error 1.9 -> 1.1 deg with 3
+  repeats (about 21 s longer). After every calibration the app now shows **Calibration quality:
+  Good / Fair / Retry recommended**.
+- **More startup drift fixed:** if the "hold still" moment caught a slow head roll and you then
+  sit still for 10 s or more, the app now uses gravity to prove the startup reading was wrong and
+  fixes it straight away. On your recording's own start: 60-second drift 20.3 -> 14.7 deg, three
+  minutes 32.8 -> 16.0 deg. Trade-off, measured and bounded: if a bad start *and* a very slow
+  level turn happen in the same still period, it can learn the turn (+3 deg in the worst
+  simulated case).
+
+## Decision for you
+- **Calibration repeats in the app:** should in-app calibration use 3 repeats by default? It adds
+  about 21 seconds for the 40% accuracy gain. I left it at 1 because it lengthens the flow; it is a
+  two-line change (`calibration_tool_arguments` in `src/app_shell/calibration_progress.cpp`).
 
 ## Try this first with the glasses
 1. Open the app: does the setup guide appear, do hover/drag/scroll feel right, does CPU go to ~0 %
