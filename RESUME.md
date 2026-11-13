@@ -72,6 +72,8 @@ Build dirs live under `%LOCALAPPDATA%\Temp\rayneo-overnight\` (never inside the 
   (concurrent selftests, prediction overshoot on tracking toggle = scenario 24, hidden-window animation timer,
   setup guide overwriting a failed app.json). 11/11 green; 18x parallel selftest runs 0 failures.
   R3-A launched (Opus medium) for the 3 confirmed-unfixed UI bugs in r2-review.md. R2-C told to use scenario 25+.
+- R3-A merged (a685f11): engine start refused during in-app calibration, drag ends on WM_CAPTURECHANGED,
+  pressed look cleared on WM_MOUSELEAVE (seam: src/app_shell/ui_input.h). 11/11 green. Waiting on R2-C.
 
 ## Round 2 plan (start at 03:45; window 2 ~03:40-08:40, window 3 ~08:45-10:30 hard stop)
 Window 2, in parallel, each in its own worktree reset onto overnight-claude-improvements:
