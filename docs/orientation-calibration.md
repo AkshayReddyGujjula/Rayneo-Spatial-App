@@ -359,3 +359,19 @@ with the validation gates above.
 - `scratch/calib_design.py` - prototype + Monte-Carlo validation (run:
   `C:\Python314\python.exe scratch\calib_design.py`).
 - `scratch/calib_run_output.txt` - captured prototype output (if present).
+
+## 10. Tool options added 2026-11-13 (overnight run, synthetic verification only)
+
+| Option | Effect |
+|---|---|
+| `--progress-json` | Also prints one `@@progress {...}` JSON line per state change (flow, step, steps, state, prompt, detail, quality). The controller's in-app calibration reads these. Shape pinned by `orientation_calibration_selftest`; full contract in `docs/overnight/track-b.md` section 1. |
+| `--auto`, `--auto-delay S` | No keyboard: each step starts after S s (default 4, 0..60). With a piped stdin, `q` or EOF cancels cleanly (stream off, exit 1) and an empty line starts the step now. |
+| `--repeats N` | 1..5, default 1. Each turn, nod and tilt is recorded N times in one take (6 s + 3.5 s per extra gesture), split into out-and-back gestures, outliers beyond max(8 deg, 3x median deviation) dropped, the rest averaged on the sphere before the unchanged basis construction. Modelled error 1.90 -> 1.14 deg mean (N = 3), 0.91 deg (N = 5). Default path is bit-identical (within 1e-6) to before. |
+| `--mag --earbuds` | Records that the compass was calibrated with earbuds in (`mag_earbuds`). Calibrate the compass the way you wear the glasses: head-fixed earbud magnets then become part of the hard-iron offset. |
+
+Quality: every `ok`/`done` line carries a 0..1 score. The stored `orientation_quality` is the lower
+of the geometric headroom score and, with repeats, the repeat-consistency score `1 - spread / 8 deg`
+(capped at 0.6 when a step has fewer than two usable gestures). The controller shows it as Good
+(>= 0.7), Fair (>= 0.4) or Retry recommended. Optional file keys (version stays 1):
+`orientation_quality`, `orientation_repeats`, `orientation_spread_deg`, `mag_quality`, `mag_earbuds`;
+older files load unchanged. Details: `docs/overnight/r2-calibration.md`.
