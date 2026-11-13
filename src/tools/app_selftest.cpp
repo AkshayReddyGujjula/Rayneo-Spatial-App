@@ -1462,6 +1462,25 @@ void test_calibration_progress() {
                   failed_run.phase == gt::CalRunState::Phase::Idle && failed_run.failure.empty(),
               "clearing the panel resets a finished run");
     }
+    {
+        // R6-B: the tool now replaces ill-formed UTF-8 with U+FFFD (pinned in
+        // orientation_calibration_selftest). The parser is strict, so that
+        // is what keeps a localized SAVE_FAILED line from being dropped.
+        gt::CalProgressEvent final_event;
+        std::string final_error;
+        check(gt::parse_cal_progress_line("@@progress {\"flow\":\"orientation\",\"step\":4,\"steps\":4,"
+                                          "\"state\":\"failed\",\"prompt\":\"Calibration was not saved.\","
+                                          "\"detail\":\"SAVE_FAILED: Acc\xEF\xBF\xBDs refus\xEF\xBF\xBD.\","
+                                          "\"quality\":-1}",
+                                          final_event, final_error) == gt::CalLineKind::Progress &&
+                  final_event.state == gt::CalStepState::Failed &&
+                  final_event.detail.rfind("SAVE_FAILED: ", 0) == 0,
+              "a final failed line with U+FFFD in its detail parses");
+        check(gt::parse_cal_progress_line("@@progress {\"flow\":\"orientation\",\"step\":4,\"steps\":4,"
+                                          "\"state\":\"failed\",\"detail\":\"SAVE_FAILED: Acc\xE8s\"}",
+                                          final_event, final_error) == gt::CalLineKind::Malformed,
+              "raw ANSI bytes would make that line malformed (why the tool sanitises)");
+    }
     check(gt::cal_reason_text("SMALL_EXCURSION: turn further") == "Turn further" &&
               gt::cal_reason_text("plain words") == "plain words" &&
               gt::cal_reason_text("STREAM_FAILED: timeout").find("motion data") != std::string::npos,

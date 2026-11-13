@@ -890,6 +890,39 @@ int main() {
         p.quality = std::numeric_limits<float>::quiet_NaN();
         check(gt::format_calibration_progress(p).find("\"quality\":-1}") != std::string::npos,
               "non-finite quality reports -1");
+        // R6-B: a localized ANSI system message (cp1252 "Acces refuse" with
+        // accents) in SAVE_FAILED made the final line invalid UTF-8, which the
+        // controller's strict parser drops. Ill-formed bytes become U+FFFD;
+        // well-formed UTF-8 (2- and 4-byte here) passes through unchanged.
+        p.quality = -1.0f;
+        p.detail = "SAVE_FAILED: Acc\xE8s refus\xE9. \xC2\xB0 \xF0\x9F\x98\x80 \xC0\xAF \xED\xA0\x80 \xE2\x82";
+        const std::string mixed = gt::format_calibration_progress(p);
+        const std::string fffd = "\xEF\xBF\xBD";
+        check(mixed.find("\"detail\":\"SAVE_FAILED: Acc" + fffd + "s refus" + fffd + ". \xC2\xB0 \xF0\x9F\x98\x80 " +
+                         fffd + fffd + " " + fffd + fffd + fffd + " " + fffd + fffd + "\"") != std::string::npos,
+              "ill-formed UTF-8 in a detail becomes U+FFFD; well-formed UTF-8 is kept");
+        // Independent strict check (RFC 3629) of the whole line.
+        bool well_formed = true;
+        for (size_t i = 0; i < mixed.size() && well_formed;) {
+            const unsigned char c = static_cast<unsigned char>(mixed[i]);
+            size_t n = c < 0x80 ? 1 : (c >= 0xC2 && c <= 0xDF) ? 2 : (c >= 0xE0 && c <= 0xEF) ? 3
+                                                                   : (c >= 0xF0 && c <= 0xF4) ? 4 : 0;
+            if (n == 0 || i + n > mixed.size()) {
+                well_formed = false;
+                break;
+            }
+            const unsigned char second = n > 1 ? static_cast<unsigned char>(mixed[i + 1]) : 0x80;
+            if ((c == 0xE0 && second < 0xA0) || (c == 0xED && second > 0x9F) || (c == 0xF0 && second < 0x90) ||
+                (c == 0xF4 && second > 0x8F)) {
+                well_formed = false;
+            }
+            for (size_t k = 1; k < n; ++k) {
+                const unsigned char cont = static_cast<unsigned char>(mixed[i + k]);
+                well_formed = well_formed && cont >= 0x80 && cont <= 0xBF;
+            }
+            i += n;
+        }
+        check(well_formed, "every @@progress line is well-formed UTF-8");
     }
 
     std::printf("orientation_calibration_selftest: piped stdin control (--auto)\n");
