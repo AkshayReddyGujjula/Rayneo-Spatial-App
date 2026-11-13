@@ -254,11 +254,32 @@ std::vector<Shot> shots() {
     list.push_back({"tracking-calibrating-1280x800", 1280, 800, 96, true, [](AppState& s) {
                         base_state(s, true);
                         s.page = AppPage::Tracking;
-                        s.cal_run.begin(gt::CalFlow::Orientation);
+                        // Real tool shape (--auto): a retry, then the countdown.
+                        s.cal_run.begin(gt::CalFlow::Orientation, true, 5.0);
                         s.cal_run.consume_line(
-                            "@@progress {\"flow\":\"orientation\",\"step\":2,\"steps\":5,\"state\":\"waiting\","
-                            "\"prompt\":\"Look straight ahead and hold still\",\"detail\":\"Keep your torso "
-                            "facing forward.\",\"quality\":0.82}");
+                            "@@progress {\"flow\":\"orientation\",\"step\":2,\"steps\":4,\"state\":\"retry\","
+                            "\"prompt\":\"x\",\"detail\":\"SMALL_EXCURSION: turn further left, about 30 degrees, "
+                            "then back to centre\",\"quality\":0}",
+                            s.now_s - 2.2);
+                        s.cal_run.consume_line(
+                            "@@progress {\"flow\":\"orientation\",\"step\":2,\"steps\":4,\"state\":\"waiting\","
+                            "\"prompt\":\"Slowly turn your head LEFT about 30 degrees, then return to centre. Do not "
+                            "tilt or nod. Slow and smooth is fine.\",\"detail\":\"\",\"quality\":-1}",
+                            s.now_s - 2.2);
+                    }});
+    list.push_back({"tracking-compass-earbuds-1280x800", 1280, 800, 96, true, [](AppState& s) {
+                        base_state(s, true);
+                        s.page = AppPage::Tracking;
+                        s.cal_earbuds = true;
+                        s.config.engine.mag_track_hard_iron = true;
+                        s.scroll[gt::kScrollPage].offset = 2000;
+                        s.scroll[gt::kScrollPage].max_offset = 2000;  // clamped by the paint pass
+                        s.cal_run.begin(gt::CalFlow::Mag, true, 5.0);
+                        s.cal_run.consume_line(
+                            "@@progress {\"flow\":\"mag\",\"step\":2,\"steps\":2,\"state\":\"recording\","
+                            "\"prompt\":\"Now nod up and down, tilt ear to shoulder both ways, and look far left, far "
+                            "right, up and down until the timer ends.\",\"detail\":\"15 of 45 s\",\"quality\":-1}",
+                            s.now_s);
                     }});
     list.push_back({"tracking-running-1920x1080-150-light", 1920, 1080, 144, false,
                     page(AppPage::Tracking, true, true)});
@@ -298,21 +319,36 @@ std::vector<Shot> shots() {
     list.push_back({"wizard-3-head-recording-1920x1080-150", 1920, 1080, 144, true,
                     wizard(gt::OnboardingStep::HeadCalibration, true, [](AppState& s) {
                         s.cal_in_wizard = true;
-                        s.cal_run.begin(gt::CalFlow::Orientation);
+                        s.cal_run.begin(gt::CalFlow::Orientation, true, 5.0);
                         s.cal_run.consume_line(
-                            "@@progress {\"flow\":\"orientation\",\"step\":3,\"steps\":5,\"state\":\"recording\","
+                            "@@progress {\"flow\":\"orientation\",\"step\":3,\"steps\":4,\"state\":\"recording\","
                             "\"prompt\":\"Slowly nod down and back up\",\"detail\":\"Move only your head.\","
                             "\"quality\":0.64}");
                     })});
     list.push_back({"wizard-3-head-failed-1280x800-light", 1280, 800, 96, false,
                     wizard(gt::OnboardingStep::HeadCalibration, true, [](AppState& s) {
                         s.cal_in_wizard = true;
-                        s.cal_run.begin(gt::CalFlow::Orientation);
-                        s.cal_run.consume_line("unknown or incomplete option: --progress-json");
+                        s.cal_run.begin(gt::CalFlow::Orientation, true, 5.0);
+                        s.cal_run.consume_line(
+                            "@@progress {\"flow\":\"orientation\",\"step\":1,\"steps\":4,\"state\":\"failed\","
+                            "\"prompt\":\"Connect the glasses and try again.\",\"detail\":\"NO_DEVICE: no RayNeo GT "
+                            "HID device found\",\"quality\":-1}");
+                        s.cal_run.consume_line("no RayNeo GT HID device found; connect the glasses and retry");
                         s.cal_run.process_exited(1);
                     })});
     list.push_back({"wizard-4-compass-1280x800", 1280, 800, 96, true,
                     wizard(gt::OnboardingStep::MagCalibration, true, nullptr)});
+    list.push_back({"wizard-4-compass-countdown-1280x800", 1280, 800, 96, true,
+                    wizard(gt::OnboardingStep::MagCalibration, true, [](AppState& s) {
+                        s.cal_in_wizard = true;
+                        s.cal_earbuds = true;
+                        s.cal_run.begin(gt::CalFlow::Mag, true, 5.0);
+                        s.cal_run.consume_line(
+                            "@@progress {\"flow\":\"mag\",\"step\":1,\"steps\":2,\"state\":\"waiting\","
+                            "\"prompt\":\"Look straight ahead and hold completely still for 4 seconds.\","
+                            "\"detail\":\"\",\"quality\":-1}",
+                            s.now_s - 1.4);
+                    })});
     list.push_back({"wizard-5-layout-1280x800", 1280, 800, 96, true,
                     wizard(gt::OnboardingStep::LayoutPreset, true, [](AppState& s) {
                         s.onboarding.preset_choice = static_cast<int>(gt::LayoutPreset::QuadArc);

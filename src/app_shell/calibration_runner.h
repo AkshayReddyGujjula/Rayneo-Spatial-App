@@ -5,10 +5,11 @@
 //
 // A reader thread splits the tool's stdout into lines and posts notify_message
 // to the window whenever lines or the exit arrive (no polling). The UI thread
-// drains them with take(). stdin stays open so "I'm ready" can answer the
-// tool's ENTER prompt; cancel() answers "q" and closes stdin (the tool's own
-// cancel path, which turns the IMU stream back off), and terminate() is the
-// last resort after a grace period.
+// drains them with take(). The tool runs in --auto mode with stdin piped:
+// an empty line starts a waiting step early ("Start now"); cancel() sends "q"
+// and closes stdin, which the tool turns into its own cancel path (IMU stream
+// off, final "failed"/"cancelled" line, exit 1). terminate() is the last
+// resort after a grace period.
 
 #include <windows.h>
 
@@ -33,6 +34,8 @@ public:
     bool send_line(const std::string& line);
     void cancel();
     void terminate();
+    // Waits up to timeout_ms for the tool to exit by itself (after cancel()).
+    bool wait_for_exit(DWORD timeout_ms) const;
     bool active() const { return process_ != nullptr; }
     double cancel_requested_at() const { return cancel_at_s_; }
     void set_cancel_time(double now_s) { cancel_at_s_ = now_s; }

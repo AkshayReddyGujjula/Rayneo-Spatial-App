@@ -1294,6 +1294,74 @@ void test_calibration_progress() {
     check(noisy.recent_output.size() == gt::CalRunState::kRecentLines &&
               noisy.recent_output.back() == "line 39",
           "recent console output is bounded to the newest lines");
+
+    // In-app runs use the tool's --auto mode (orientation_calibrate.cpp).
+    const std::vector<std::string> head_args =
+        gt::calibration_tool_arguments(gt::CalFlow::Orientation, "C:\\c\\orientation.json", true);
+    check(head_args == std::vector<std::string>{"--progress-json", "--auto", "--auto-delay", "5", "--output",
+                                                "C:\\c\\orientation.json"},
+          "head calibration runs --progress-json --auto --auto-delay 5 --output FILE (no --earbuds)");
+    check(gt::calibration_tool_arguments(gt::CalFlow::Mag, "o.json", false) ==
+                  std::vector<std::string>{"--progress-json", "--auto", "--auto-delay", "5", "--mag", "--output",
+                                           "o.json"} &&
+              gt::calibration_tool_arguments(gt::CalFlow::Mag, "o.json", true) ==
+                  std::vector<std::string>{"--progress-json", "--auto", "--auto-delay", "5", "--mag", "--earbuds",
+                                           "--output", "o.json"},
+          "compass calibration adds --mag, and --earbuds only when Earbuds in is on");
+
+    gt::CalRunState timed;
+    timed.begin(gt::CalFlow::Orientation, true, 5.0);
+    check(timed.countdown_s(0.0) < 0.0, "no countdown before the tool reports a waiting step");
+    timed.consume_line(
+        "@@progress {\"flow\":\"orientation\",\"step\":1,\"steps\":4,\"state\":\"waiting\",\"prompt\":\"Still\"}",
+        10.0);
+    check(std::fabs(timed.countdown_s(12.0) - 3.0) < 1e-9 && timed.countdown_s(20.0) == 0.0,
+          "a waiting step counts down the --auto delay from when it arrived");
+    timed.consume_line(
+        "@@progress {\"flow\":\"orientation\",\"step\":1,\"steps\":4,\"state\":\"recording\",\"prompt\":\"Still\"}",
+        15.0);
+    check(timed.countdown_s(16.0) < 0.0, "recording has no countdown");
+    timed.consume_line("@@progress {\"flow\":\"orientation\",\"step\":1,\"steps\":4,\"state\":\"retry\","
+                       "\"prompt\":\"Still\",\"detail\":\"HOLD_STILL: 1.80 deg/s of movement (limit 1.5)\",\"quality\":0}",
+                       19.0);
+    timed.consume_line(
+        "@@progress {\"flow\":\"orientation\",\"step\":1,\"steps\":4,\"state\":\"waiting\",\"prompt\":\"Still\"}",
+        19.01);
+    check(timed.retry_reason == "1.80 deg/s of movement (limit 1.5)" && std::fabs(timed.countdown_s(20.01) - 4.0) < 1e-6,
+          "a retry reason survives the next waiting line, and the countdown restarts");
+    timed.consume_line("@@progress {\"flow\":\"orientation\",\"step\":2,\"steps\":4,\"state\":\"waiting\",\"prompt\":\"Turn\"}",
+                       30.0);
+    check(timed.retry_reason.empty(), "the retry reason belongs to its step only");
+    gt::CalRunState keyed;
+    keyed.begin(gt::CalFlow::Orientation);
+    keyed.consume_line("@@progress {\"flow\":\"orientation\",\"step\":1,\"steps\":4,\"state\":\"waiting\"}", 1.0);
+    check(keyed.awaiting_user() && keyed.countdown_s(2.0) < 0.0, "keyboard mode shows no countdown");
+
+    gt::CalRunState no_device;
+    no_device.begin(gt::CalFlow::Mag, true, 5.0);
+    no_device.consume_line("@@progress {\"flow\":\"mag\",\"step\":1,\"steps\":2,\"state\":\"failed\",\"prompt\":\"x\","
+                           "\"detail\":\"NO_DEVICE: no RayNeo GT HID device found\",\"quality\":-1}");
+    no_device.process_exited(1);
+    check(no_device.phase == gt::CalRunState::Phase::Failed &&
+              no_device.failure.find("glasses were not found") != std::string::npos,
+          "a failure before step 1 is reported in plain words");
+    gt::CalRunState tool_cancel;
+    tool_cancel.begin(gt::CalFlow::Orientation, true, 5.0);
+    tool_cancel.consume_line("@@progress {\"flow\":\"orientation\",\"step\":2,\"steps\":4,\"state\":\"failed\","
+                             "\"prompt\":\"x\",\"detail\":\"cancelled\"}");
+    tool_cancel.process_exited(1);
+    check(tool_cancel.phase == gt::CalRunState::Phase::Cancelled, "the tool's own cancelled line reads as cancelled");
+    gt::CalRunState old_tool;
+    old_tool.begin(gt::CalFlow::Orientation, true, 5.0);
+    old_tool.consume_line("unknown or incomplete option: --auto");
+    old_tool.process_exited(2);
+    check(old_tool.phase == gt::CalRunState::Phase::Failed &&
+              old_tool.failure.find("does not understand") != std::string::npos,
+          "exit code 2 (bad arguments) names an outdated tool");
+    check(gt::cal_reason_text("SMALL_EXCURSION: turn further") == "Turn further" &&
+              gt::cal_reason_text("plain words") == "plain words" &&
+              gt::cal_reason_text("STREAM_FAILED: timeout").find("motion data") != std::string::npos,
+          "reason codes become plain sentences");
 }
 
 void test_onboarding(const std::filesystem::path& directory) {

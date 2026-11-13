@@ -159,6 +159,10 @@ void CalibrationRunner::cancel() {
     close_handle(stdin_write_);
 }
 
+bool CalibrationRunner::wait_for_exit(DWORD timeout_ms) const {
+    return process_ == nullptr || WaitForSingleObject(process_, timeout_ms) == WAIT_OBJECT_0;
+}
+
 void CalibrationRunner::terminate() {
     if (process_ != nullptr) {
         TerminateProcess(process_, 1);

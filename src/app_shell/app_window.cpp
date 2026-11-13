@@ -529,8 +529,12 @@ void AppWindow::on_destroy() {
     KillTimer(hwnd_, kTimerAnimation);
     animation_timer_ = false;
     if (calibration_.active()) {
+        // Graceful first: the tool turns the IMU stream off on "q"/EOF
+        // within a few hundred ms; terminate only if it does not exit.
         calibration_.cancel();
-        calibration_.terminate();
+        if (!calibration_.wait_for_exit(3000)) {
+            calibration_.terminate();
+        }
     }
     tray_.remove();
     release_back_buffer();
@@ -1504,9 +1508,14 @@ void AppWindow::execute(int id, int arg) {
             if (!state_.paths.calibration_tool_found) {
                 state_.set_banner(L"orientation_calibrate.exe was not found next to this app",
                                   Severity::Error);
-            } else if (state_.engine.launch_tool(state_.paths.calibration_executable,
-                                                 {"--mag", "--output", narrow_utf8(state_.paths.calibration_path)},
-                                                 tool_error)) {
+            } else if (state_.engine.launch_tool(
+                           state_.paths.calibration_executable,
+                           state_.cal_earbuds
+                               ? std::vector<std::string>{"--mag", "--earbuds", "--output",
+                                                          narrow_utf8(state_.paths.calibration_path)}
+                               : std::vector<std::string>{"--mag", "--output",
+                                                          narrow_utf8(state_.paths.calibration_path)},
+                           tool_error)) {
                 state_.show_toast(L"Compass calibration started in its own console window");
                 add_event(L"launched orientation_calibrate.exe --mag in a console window");
             } else {
@@ -1827,13 +1836,11 @@ void AppWindow::start_calibration(CalFlow flow) {
         invalidate();
         return;
     }
-    std::vector<std::string> arguments{"--progress-json", "--output",
-                                       narrow_utf8(state_.paths.calibration_path)};
-    if (flow == CalFlow::Mag) {
-        arguments.insert(arguments.begin(), "--mag");
-    }
+    const std::vector<std::string> arguments =
+        calibration_tool_arguments(flow, narrow_utf8(state_.paths.calibration_path), state_.cal_earbuds);
     state_.cal_in_wizard = state_.onboarding.active;
-    state_.cal_run.begin(flow);
+    state_.cal_run.begin(flow, true, static_cast<double>(kCalAutoDelayS));
+    state_.cal_run.state_since_s = state_.now_s;
     std::string error;
     if (!calibration_.start(state_.paths.calibration_executable, arguments, hwnd_, calibration_message_, error)) {
         state_.cal_run.start_failed(error);
@@ -1864,7 +1871,7 @@ void AppWindow::on_calibration_output() {
     state_.now_s = steady_now_s();
     CalibrationRunner::Drain drain = calibration_.take();
     for (const std::string& line : drain.lines) {
-        state_.cal_run.consume_line(line);
+        state_.cal_run.consume_line(line, state_.now_s);
     }
     if (drain.exited) {
         state_.cal_run.process_exited(drain.exit_code);

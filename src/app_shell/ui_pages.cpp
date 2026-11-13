@@ -585,7 +585,14 @@ int tracking_card_calibration(Ui& ui, int left, int top, int width, CalFlow flow
     const int desc_h = wrapped_text_height(ui.c.dc(), ui.f.small, inner_w, description);
     const int blocker_h = blocker.empty() ? 0 : ui.px(space::md) + wrapped_text_height(ui.c.dc(), ui.f.small, inner_w, blocker);
     const int run_h = run_here ? ui.px(space::lg) + paint_calibration_run(ui, left + pad, 0, inner_w, false) : 0;
-    const int height = pad + ui.px(30) + desc_h + ui.px(space::lg) + ui.px(size::control) + blocker_h + run_h + pad;
+    const std::wstring earbuds_desc = L"Turn on if you wear in-ear earbuds for this calibration.";
+    const int earbuds_text_w = inner_w - ui.px(size::switch_w) - help_mark_width(ui.dpi) - ui.px(space::lg) * 2;
+    const int earbuds_h =
+        mag ? std::max(ui.px(44), ui.px(24) + wrapped_text_height(ui.c.dc(), ui.f.small, earbuds_text_w, earbuds_desc)) +
+                  ui.px(space::lg)
+            : 0;
+    const int height =
+        pad + ui.px(30) + desc_h + ui.px(space::lg) + earbuds_h + ui.px(size::control) + blocker_h + run_h + pad;
     RECT frame = rect_of(left, top, width, height);
     card(ui, frame);
     ui.c.text(ui.f.title, ui.t.text, rect_of(left + pad, top + pad, inner_w, ui.px(28)), title);
@@ -596,6 +603,11 @@ int tracking_card_calibration(Ui& ui, int left, int top, int width, CalFlow flow
     ui.c.text(ui.f.small, ui.t.text_dim, rect_of(left + pad, y, inner_w, desc_h), description,
               DT_LEFT | DT_TOP | DT_WORDBREAK);
     y += desc_h + ui.px(space::lg);
+    if (mag) {
+        switch_row(ui, kUiCalEarbuds, left + pad, y, inner_w, L"Earbuds in", earbuds_desc, s.cal_earbuds, !run_active,
+                   kHelpTools, kRowCalEarbuds, HelpTopic::CalibrationEarbuds);
+        y += earbuds_h;
+    }
     const int help_w = help_mark_width(ui.dpi);
     const bool can_start = tool && !busy && !run_active && (!mag || report.calibration_valid);
     int x = left + pad;
@@ -882,12 +894,16 @@ int paint_calibration_run(Ui& ui, int left, int top, int width, bool draw) {
         const float phase = draw ? pulse_phase(ui, true) : -1.0f;
         const std::wstring step_text =
             run.steps > 0 ? format_wide(L"Step %d of %d", std::max(1, run.step), run.steps) : L"Starting";
+        const double countdown = run.countdown_s(ui.s.now_s);
+        const std::wstring countdown_text =
+            countdown > 0.0 ? format_wide(L"Starts in %d s", static_cast<int>(std::ceil(countdown)))
+                            : std::wstring(L"Starting now");
         const wchar_t* state_text = L"Starting";
         COLORREF state_color = t.text_dim;
         if (run.has_event) {
             switch (run.state) {
                 case CalStepState::Waiting:
-                    state_text = L"Waiting for you";
+                    state_text = countdown >= 0.0 ? countdown_text.c_str() : L"Waiting for you";
                     state_color = t.accent;
                     break;
                 case CalStepState::Recording:
@@ -924,9 +940,12 @@ int paint_calibration_run(Ui& ui, int left, int top, int width, bool draw) {
                                         ? wide_from_utf8(run.prompt)
                                         : std::wstring(L"Starting the calibration tool. Put the glasses on.");
         text_block(ui.f.title, t.text, prompt);
-        if (!run.detail.empty()) {
+        if (!run.retry_reason.empty() && run.state != CalStepState::Ok) {
             y += ui.px(space::xs);
-            text_block(ui.f.body, t.text_dim, wide_from_utf8(run.detail));
+            text_block(ui.f.body, t.warning, L"Again: " + wide_from_utf8(run.retry_reason));
+        } else if (!run.detail.empty() && run.state != CalStepState::Waiting) {
+            y += ui.px(space::xs);
+            text_block(ui.f.body, t.text_dim, wide_from_utf8(cal_reason_text(run.detail)));
         }
         if (run.quality >= 0.0f) {
             y += ui.px(space::md);
@@ -945,8 +964,10 @@ int paint_calibration_run(Ui& ui, int left, int top, int width, bool draw) {
         if (draw) {
             int x = left;
             if (run.awaiting_user()) {
+                // --auto: the step starts by itself; this only skips the wait.
                 RECT ready = rect_of(x, y, ui.px(150), ui.px(size::control));
-                button(ui, kUiCalContinue, ready, L"I'm ready", ButtonStyle::Primary, true, glyph::play);
+                button(ui, kUiCalContinue, ready, run.auto_advance ? L"Start now" : L"I'm ready",
+                       ButtonStyle::Primary, true, glyph::play);
                 x = ready.right + ui.px(space::md);
             }
             RECT cancel = rect_of(x, y, ui.px(120), ui.px(size::control));

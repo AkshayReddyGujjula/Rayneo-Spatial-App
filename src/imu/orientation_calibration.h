@@ -95,6 +95,14 @@ struct CalibrationProgress {
 constexpr const char* kProgressPrefix = "@@progress ";
 std::string format_calibration_progress(const CalibrationProgress& progress);
 
+// Front-end control over a piped stdin in --auto mode (the in-app wizard has
+// no console to send Ctrl+C to): "q" cancels the run through the normal path
+// (stream off, a final "failed"/"cancelled" line, exit 1), an empty line
+// starts the current waiting step now instead of after the countdown. Other
+// lines are ignored. CR/LF and surrounding blanks are ignored.
+enum class CalibrationStdinCommand { None, StartNow, Cancel };
+CalibrationStdinCommand parse_calibration_stdin_line(const std::string& line);
+
 // Heuristic 0..1 quality scores for guidance (not acceptance gates; the gates
 // in calibrate_orientation / fit_mag_hard_iron decide pass/fail).
 // Still: 1 at a motionless head, 0 at the 1.5 deg/s rejection limit.

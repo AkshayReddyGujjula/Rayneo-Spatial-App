@@ -258,6 +258,18 @@ int main() {
               "non-finite quality reports -1");
     }
 
+    std::printf("orientation_calibration_selftest: piped stdin control (--auto)\n");
+    check(gt::parse_calibration_stdin_line("q") == gt::CalibrationStdinCommand::Cancel &&
+              gt::parse_calibration_stdin_line("Q\r") == gt::CalibrationStdinCommand::Cancel &&
+              gt::parse_calibration_stdin_line(" q \r\n") == gt::CalibrationStdinCommand::Cancel,
+          "q cancels (CR/LF and blanks ignored)");
+    check(gt::parse_calibration_stdin_line("") == gt::CalibrationStdinCommand::StartNow &&
+              gt::parse_calibration_stdin_line("\r") == gt::CalibrationStdinCommand::StartNow,
+          "an empty line starts the waiting step now");
+    check(gt::parse_calibration_stdin_line("quit") == gt::CalibrationStdinCommand::None &&
+              gt::parse_calibration_stdin_line("x") == gt::CalibrationStdinCommand::None,
+          "anything else is ignored");
+
     std::printf("orientation_calibration_selftest: guidance quality scores\n");
     {
         check(gt::still_quality(0.0f) == 1.0f && gt::still_quality(1.5f) == 0.0f &&
