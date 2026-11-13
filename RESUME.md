@@ -136,3 +136,5 @@ Window 3: merge leftovers, final full suite, final report. Stop at 10:30.
      calibration selftests unchanged. Never run hardware/the engine/the UI live.
 - 07:22 User said start now, stop at 95%. R5-A (Opus high) launched for the live calibration guide; it stops at 95% with notes
   and is resumed after the reset (08:40-08:50).
+- 07:48 R5-A merged (ae3dc86): @@live lines + calibration guide on the glasses and PC panel; 11/11 green,
+  renders viewed (turn off-axis, countdown). AGENTS.md section 10 + REPORT section 7 updated. 5-hour ~88%.

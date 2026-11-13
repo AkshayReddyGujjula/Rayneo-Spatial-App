@@ -462,7 +462,18 @@ reports with all numbers and rejected ideas: `docs/overnight/track-a.md` (estima
   `layout_display_summary`, `format_degrees`, `calibration_saved_text`); Diagnostics, logs, the
   status file and tool output keep the technical forms (`engine_status_summary`, `layout_summary`).
   Non-ASCII glyphs (degree sign, middle dot, U+2212 minus) are written as `\u` escapes.
-- **Needs a person with the glasses:** the live window's message paths, real startup reseeds
+- **Round 5 (owner request):** in-app head calibration uses `--repeats 3`; live calibration guide.
+  With `--progress-json` the tool emits display-only `@@live {...}` lines (~22 Hz) during waiting
+  and recording (`src/imu/calibration_live.*`; contract in `docs/orientation-calibration.md`
+  section 10); gates, maths, result file and `@@progress` unchanged. During `--auto` countdowns the
+  tool now reads (never records) IMU samples for the live view. The controller draws the guide in
+  a black, click-through, non-activating topmost window on the glasses monitor
+  (`cal_guide_window.*`, `find_glasses_monitor_rect`, virtual displays excluded) and in the PC
+  calibration panel: red line along the commanded axis, live ball, 12 deg gate and 25/20/20 deg
+  target marks, off-axis/too-fast/wrong-way colouring and hints, steadiness ring, repeat dots,
+  retry corrections. `docs/overnight/r5-calibration-guide.md`.
+- **Needs a person with the glasses:** the calibration guide overlay (appears, stays click-through,
+  ball directions in both guide frames, readability on the optics), the live window's message paths, real startup reseeds
   (engine log `startup confirmation: reseeds=N reverts=M`), the prediction horizon (overshoot vs
   trail on a quick turn), calibration cancel turning the stream off, the 5 s auto delay, the
   compass badge.

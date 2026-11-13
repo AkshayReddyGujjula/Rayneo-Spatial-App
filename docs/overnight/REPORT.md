@@ -94,6 +94,24 @@ when the app measures the sensor at start-up, and nothing told you to keep still
 - The glasses themselves show no prompt yet (the renderer has no way to draw text). A possible
   follow-up: keep the screens dimmed until tracking starts, as a "you can move now" cue.
 
+### 7. A live guide while you calibrate (your morning request)
+While head calibration runs, the glasses show a guide on a black (see-through) background:
+- a **red line** for the movement the step wants (across for the turn, up-down for the nod, an arc
+  for the tilt) and a **ball that follows your head** live;
+- a grey mark at the minimum (12°) and a green target mark (25° turn, 20° nod and tilt), plus a
+  marker at the furthest point you reached;
+- the ball turns **amber** when you drift off the line (e.g. tilting while you turn), go the wrong
+  way or move too fast, with a big hint: "Keep your head level", "Turn further", "Slower",
+  "Back to centre";
+- a ring that tightens as you hold still for the still step, dots for each of the 3 repeats, and a
+  countdown that explains how to do the next step;
+- after a failed attempt, one specific correction based on what went wrong.
+The same guide appears smaller in the calibration panel on the PC. Research behind it (cited in
+`docs/overnight/r5-calibration-guide.md`): accuracy depends most on keeping each movement about one
+axis (15 % off-axis motion tilts the measured axis by about 8.5°), on a reasonable range (about
+20-25°), smooth moderate speed and a full return to centre - exactly what the guide shows. The
+calibration maths and pass/fail checks are unchanged.
+
 ## Your decisions
 - **Calibration repeats in the app: 3** (your call in the morning). In-app head calibration now
   asks for each turn, nod and tilt three times (about a minute and a half in total); the setup
@@ -105,7 +123,8 @@ when the app measures the sensor at start-up, and nothing told you to keep still
 2. Start the workspace and watch Home: do the start-up steps advance, does "Hold your head still"
    appear while you are looking at the PC screen, does the bar restart if you move?
    (Engine log: `startup phase:` lines.)
-3. Run head calibration from the app: does the countdown give you enough time, does Cancel stop
+3. Run head calibration from the app: does the guide appear in the glasses, does the ball move the
+   right way for turn, nod and tilt, does the countdown give you enough time, does Cancel stop
    cleanly?
 4. Start the workspace a few times: is the view steadier in the first minute? (Engine log line:
    `startup confirmation: reseeds=N reverts=M`.)
