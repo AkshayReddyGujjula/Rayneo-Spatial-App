@@ -448,6 +448,15 @@ reports with all numbers and rejected ideas: `docs/overnight/track-a.md` (estima
 - **Round 3:** UI fixes (bug 31), a visual QA pass (all theme text pairs >= WCAG AA, checked by
   `ui_snapshot`; `docs/overnight/r3-ui-qa.md`), and an independent maths review that found bug 32
   (`docs/overnight/r3-maths-review.md`; calibration repeats reviewed, nothing provable).
+- **Round 4:** startup phases. New optional status keys `phase` (preparing / takeover /
+  waiting_display / connecting / imu_warmup / hold_still / tracking / running / restoring) and
+  `phase_progress` (0..1; the hold-still window resets on motion or a >= 50 ms gap). A heartbeat
+  thread repeats the last status once a second while the main thread is blocked in the takeover or
+  the glasses-display wait (it shares the status write mutex, never touches `g_status`, and stops
+  before the render loop). Home shows Screens -> Glasses sensor -> Warm-up -> **Hold your head
+  still**, to prevent the contaminated startup window of bug 26 at the source. The glasses show no
+  prompt (the renderer has no text path). Read-only accessors only: estimator output unchanged.
+  `docs/overnight/r4-startup-phases.md`.
 - **Needs a person with the glasses:** the live window's message paths, real startup reseeds
   (engine log `startup confirmation: reseeds=N reverts=M`), the prediction horizon (overshoot vs
   trail on a quick turn), calibration cancel turning the stream off, the 5 s auto delay, the
