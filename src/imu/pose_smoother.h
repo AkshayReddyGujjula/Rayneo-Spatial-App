@@ -2,6 +2,8 @@
 
 #include "imu/fusion.h"
 
+#include <cstdint>
+
 namespace gt {
 
 // Rotation angle of a quaternion in degrees, accurate for tiny angles.
@@ -63,6 +65,21 @@ public:
     // turn. The 1-euro and the reading hold are untouched.
     void restart_prediction() { restart_prediction_ = true; }
 
+    // The pose source's session epoch for the next update's input
+    // (ImuSource::orientation). A new epoch is a new IMU connection, whose
+    // estimator publishes from a fresh reference: the view steps from the
+    // last pose of the old session (frozen while the glasses reconnected and
+    // recalibrated) to straight ahead. That step is not head motion, so the
+    // prediction restarts exactly as for restart_prediction(); the 1-euro and
+    // the reading hold still ease the step in as before.
+    void note_source_epoch(uint32_t epoch) {
+        if (have_source_epoch_ && epoch != source_epoch_) {
+            restart_prediction_ = true;
+        }
+        source_epoch_ = epoch;
+        have_source_epoch_ = true;
+    }
+
 private:
     Quat apply_hold(const Quat& target, float dt_s);
     Quat prediction_lead(const Quat& input, float dt_s);
@@ -77,6 +94,9 @@ private:
     Quat prev_raw_{1.0f, 0.0f, 0.0f, 0.0f};
     Vec3 omega_degs_{};
     bool restart_prediction_ = false;
+    // Last source epoch seen (note_source_epoch); kept across reset().
+    uint32_t source_epoch_ = 0;
+    bool have_source_epoch_ = false;
 };
 
 // Reading-stabilisation presets (the engine's --stabilise and Ctrl+Alt+S):
