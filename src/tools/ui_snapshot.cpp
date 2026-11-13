@@ -15,6 +15,7 @@
 #include "app_shell/ui_cal_guide.h"
 #include "app_shell/ui_help.h"
 #include "app_shell/ui_paint.h"
+#include "app_shell/ui_paint_internal.h"
 #include "app_shell/ui_widgets.h"
 
 #include <algorithm>
@@ -128,6 +129,29 @@ void check_contrast() {
                                           std::pair<const char*, COLORREF>{"warning", t.warning},
                                           std::pair<const char*, COLORREF>{"error", t.error}}) {
             report(std::string(name) + " on its badge", color, gt::ui::mix(t.surface, color, tint), 4.5);
+        }
+    }
+}
+
+// Arrangement-editor screen labels keep the angle for the longest id the
+// layout accepts (64 characters) and stay a readable length.
+void check_editor_labels() {
+    std::printf("ui_snapshot: arrangement editor labels\n");
+    for (const std::string& id : {std::string("centre"), std::string(56, 'a'), std::string(64, 'w')}) {
+        gt::ScreenLayout screen;
+        screen.id = id;
+        screen.yaw_deg = -45.0f;
+        const std::wstring label = gt::ui::detail::editor_screen_label(screen);
+        const std::wstring tail = L"-45°";
+        const bool angle = label.size() >= tail.size() && label.compare(label.size() - tail.size(), tail.size(), tail) == 0;
+        std::printf("  [%s] id of %zu chars -> label of %zu chars\n", angle && label.size() <= 32 ? "ok" : "..",
+                    id.size(), label.size());
+        if (!angle) {
+            fail("editor-label", "a " + std::to_string(id.size()) + "-character id loses the angle");
+        }
+        if (label.size() > 32) {
+            fail("editor-label", "a " + std::to_string(id.size()) + "-character id makes a " +
+                                     std::to_string(label.size()) + "-character label");
         }
     }
 }
@@ -893,6 +917,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     check_contrast();
+    check_editor_labels();
     std::printf("ui_snapshot: offscreen renders of the controller UI\n");
     for (const Shot& shot : shots()) {
         if (!only.empty() && shot.name.find(only) == std::string::npos) {

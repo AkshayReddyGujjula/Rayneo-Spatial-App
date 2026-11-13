@@ -100,6 +100,15 @@ float editor_yaw_from_point(const EditorGeometry& geometry, POINT point) {
 }
 
 namespace detail {
+
+std::wstring editor_screen_label(const ScreenLayout& screen) {
+    // Ids may be up to 64 characters: shorten the id, never the angle (a
+    // fixed 64-wide swprintf buffer used to drop the angle, and the label
+    // overran the canvas).
+    return ellipsize(wide_from_utf8(screen.id), 24) +
+           format_wide(L"  %.0f°", static_cast<double>(screen.yaw_deg));
+}
+
 namespace {
 
 void paint_editor_2d(Ui& ui, const RECT& canvas_rect, bool labels) {
@@ -172,10 +181,7 @@ void paint_editor_2d(Ui& ui, const RECT& canvas_rect, bool labels) {
         if (!labels) {
             continue;
         }
-        wchar_t label[64];
-        const std::wstring id_text = wide_from_utf8(screen.id);
-        std::swprintf(label, std::size(label), L"%s  %.0f°", id_text.c_str(),
-                      static_cast<double>(screen.yaw_deg));
+        const std::wstring label = editor_screen_label(screen);
         // The label sits beside the screen along its outward normal, far
         // enough that the text box clears the (possibly angled) line and the
         // selection halo. Preference: outward, inward (towards the wearer),
@@ -317,9 +323,7 @@ void paint_editor_3d(Ui& ui, const RECT& canvas_rect) {
                           235);
         ui.c.polyline(points, 5, static_cast<float>(selected ? ui.px(3) : ui.px(2)), selected ? t.text : tint);
         const OrbitPoint centre = orbit_project(view, camera, quad.center, canvas_rect);
-        wchar_t label[64];
-        const std::wstring id_text = wide_from_utf8(screen.id);
-        std::swprintf(label, std::size(label), L"%s  %.0f°", id_text.c_str(), static_cast<double>(screen.yaw_deg));
+        const std::wstring label = editor_screen_label(screen);
         // A foreshortened quad can be narrower than its label: a soft plate
         // keeps the text readable where it crosses the screen's outline.
         HFONT label_font = selected ? ui.f.small_strong : ui.f.small;

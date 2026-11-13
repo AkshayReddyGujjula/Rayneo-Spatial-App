@@ -165,6 +165,9 @@ const wchar_t* severity_glyph(Severity severity);
 // height used; with draw == false it only measures.
 int paint_calibration_run(Ui& ui, int left, int top, int width, bool draw);
 
+// "id  yaw°" label of a screen in the arrangement editor (2D and 3D).
+std::wstring editor_screen_label(const ScreenLayout& screen);
+
 // Small top-down arc thumbnail of a layout (Home, setup guide).
 void paint_arc_preview(Ui& ui, const RECT& rect, const Layout& layout, int selected);
 
