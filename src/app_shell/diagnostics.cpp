@@ -195,7 +195,15 @@ void collect_calibration(const Paths& paths, DiagnosticsReport& report) {
     std::string error;
     if (gt::load_orientation_calibration(narrow_utf8(paths.calibration_path), matrix, error)) {
         report.calibration_valid = true;
-        report.calibration_detail = L"valid, saved " + file_timestamp_text(paths.calibration_path) +
+        // Optional quality stored by the tool since 2026-11-13 (older files: unknown).
+        gt::OrientationCalibrationInfo info;
+        std::string info_error;
+        std::wstring quality;
+        if (gt::load_orientation_calibration_info(narrow_utf8(paths.calibration_path), info, info_error) &&
+            info.quality >= 0.0f) {
+            quality = L"quality " + wide_from_utf8(gt::calibration_quality_label(info.quality)) + L", ";
+        }
+        report.calibration_detail = L"valid, " + quality + L"saved " + file_timestamp_text(paths.calibration_path) +
                                     L" | " + join_rows(matrix);
     } else if (report.calibration_present) {
         report.calibration_valid = false;

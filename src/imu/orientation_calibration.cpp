@@ -188,32 +188,36 @@ OrientationCalibrationResult fail(std::string code, std::string message) {
     return result;
 }
 
-bool extract_axis(const CalibrationPhaseData& phase, const Vec3& bias_body, float command_sign,
-                  CalibrationAxisDiagnostics& output, std::string& code, std::string& message) {
+std::vector<Vec3> corrected_gyro(const CalibrationPhaseData& phase, const Vec3& bias_body) {
     std::vector<Vec3> corrected;
     corrected.reserve(phase.samples.size());
-    size_t first_active = phase.samples.size();
-    size_t last_active = 0;
     for (size_t i = 0; i < phase.samples.size(); ++i) {
         const Vec3 gyro = subtract(package_to_body(phase.samples[i].gyro_degs), bias_body);
         corrected.push_back(gyro);
     }
+    return corrected;
+}
 
-    // Find one contiguous motion using on/off hysteresis. A short below-threshold
-    // gap is retained so the zero crossing between the out and return halves does
-    // not split a valid motion. If the user makes multiple separate motions, keep
-    // the run with the most angular-rate energy instead of merging them.
+struct MotionRun {
+    size_t first = 0;
+    size_t last = 0;
+    float energy = 0.0f;
+};
+
+// Contiguous motions using on/off hysteresis. A short below-threshold gap is
+// retained so the zero crossing between the out and return halves does not
+// split a valid motion.
+std::vector<MotionRun> find_motion_runs(const CalibrationPhaseData& phase,
+                                        const std::vector<Vec3>& corrected) {
+    std::vector<MotionRun> runs;
     bool in_run = false;
     size_t run_start = 0;
     size_t run_last_above_off = 0;
     float below_off_seconds = 0.0f;
     float run_energy = 0.0f;
-    float best_energy = -1.0f;
     auto finish_run = [&]() {
-        if (in_run && run_last_above_off > run_start && run_energy > best_energy) {
-            first_active = run_start;
-            last_active = run_last_above_off;
-            best_energy = run_energy;
+        if (in_run && run_last_above_off > run_start) {
+            runs.push_back(MotionRun{run_start, run_last_above_off, run_energy});
         }
         in_run = false;
         below_off_seconds = 0.0f;
@@ -243,12 +247,13 @@ bool extract_axis(const CalibrationPhaseData& phase, const Vec3& bias_body, floa
         }
     }
     finish_run();
-    if (first_active >= phase.samples.size() || last_active <= first_active) {
-        code = "NO_MOTION";
-        message = "not enough motion detected - try the step again";
-        return false;
-    }
+    return runs;
+}
 
+// Axis and gates for one motion [first_active, last_active] of the phase.
+bool analyze_segment(const CalibrationPhaseData& phase, const std::vector<Vec3>& corrected,
+                     size_t first_active, size_t last_active, float command_sign,
+                     CalibrationAxisDiagnostics& output, std::string& code, std::string& message) {
     float duration = 0.0f;
     for (size_t i = first_active + 1; i <= last_active; ++i) {
         duration += sample_dt(phase.samples[i - 1], phase.samples[i]);
@@ -344,7 +349,248 @@ bool extract_axis(const CalibrationPhaseData& phase, const Vec3& bias_body, floa
     return true;
 }
 
+bool extract_axis(const CalibrationPhaseData& phase, const Vec3& bias_body, float command_sign,
+                  CalibrationAxisDiagnostics& output, std::string& code, std::string& message) {
+    const std::vector<Vec3> corrected = corrected_gyro(phase, bias_body);
+    // If the user makes multiple separate motions, keep the run with the most
+    // angular-rate energy instead of merging them (the first one on a tie).
+    const std::vector<MotionRun> runs = find_motion_runs(phase, corrected);
+    size_t first_active = phase.samples.size();
+    size_t last_active = 0;
+    float best_energy = -1.0f;
+    for (const MotionRun& run : runs) {
+        if (run.energy > best_energy) {
+            first_active = run.first;
+            last_active = run.last;
+            best_energy = run.energy;
+        }
+    }
+    if (first_active >= phase.samples.size() || last_active <= first_active) {
+        code = "NO_MOTION";
+        message = "not enough motion detected - try the step again";
+        return false;
+    }
+    return analyze_segment(phase, corrected, first_active, last_active, command_sign, output, code,
+                           message);
+}
+
+// --- Repeated gestures -------------------------------------------------------
+
+// A gesture must swing at least this far before a return to centre can end it.
+constexpr float kSplitMinPeakDeg = 0.5f * kMinExcursionDeg;
+// "Back at centre": within this fraction of the gesture's peak excursion.
+constexpr float kSplitReturnFraction = 0.3f;
+// Outlier rejection among repeats (3+ gestures): a gesture further than
+// max(floor, scale * median deviation) from the medoid gesture is dropped.
+constexpr float kRepeatOutlierFloorDeg = 8.0f;
+constexpr float kRepeatOutlierMedianScale = 3.0f;
+// Repeat spread (rms, deg) at which the consistency quality reaches 0.
+constexpr float kRepeatSpreadZeroQualityDeg = 8.0f;
+// Consistency that repeats were asked for but could not show (an axis with
+// fewer than two usable gestures) is capped here: at most "Fair".
+constexpr float kUnverifiedConsistencyQuality = 0.6f;
+
+// Principal rotation axis of [first, last], signed so its first half projects
+// positive (the "out" half of an out-and-back gesture).
+Vec3 run_principal_axis(const std::vector<Vec3>& corrected, size_t first, size_t last) {
+    std::vector<Vec3> segment(corrected.begin() + static_cast<std::ptrdiff_t>(first),
+                              corrected.begin() + static_cast<std::ptrdiff_t>(last + 1));
+    const Vec3 centre = mean(segment);
+    Mat3 covariance{};
+    for (const Vec3& value : segment) {
+        const Vec3 d = subtract(value, centre);
+        const float c[3]{d.x, d.y, d.z};
+        for (int row = 0; row < 3; ++row) {
+            for (int col = 0; col < 3; ++col) {
+                covariance.m[row][col] += c[row] * c[col];
+            }
+        }
+    }
+    Vec3 axis = jacobi_eigen(covariance).vectors[0];
+    float first_half = 0.0f;
+    const size_t half = std::max<size_t>(1, segment.size() / 2);
+    for (size_t i = 0; i < half; ++i) {
+        first_half += dot(segment[i], axis);
+    }
+    return first_half < 0.0f ? scale(axis, -1.0f) : axis;
+}
+
+// Splits one motion run into its out-and-back gestures. The angle about the
+// run's principal axis is integrated; a gesture ends once it has swung at
+// least kSplitMinPeakDeg, come back within kSplitReturnFraction of its peak
+// and stopped returning (a pause at centre or the start of the next swing).
+// A trailing piece that never swings kSplitMinPeakDeg is dropped (settling).
+std::vector<MotionRun> split_gestures(const CalibrationPhaseData& phase, const std::vector<Vec3>& corrected,
+                                      const MotionRun& run) {
+    std::vector<MotionRun> gestures;
+    const Vec3 axis = run_principal_axis(corrected, run.first, run.last);
+    size_t start = run.first;
+    float angle = 0.0f;
+    float peak = 0.0f;
+    float peak_sign = 0.0f;
+    for (size_t i = run.first + 1; i <= run.last; ++i) {
+        const float rate = dot(corrected[i], axis);
+        angle += rate * sample_dt(phase.samples[i - 1], phase.samples[i]);
+        if (std::fabs(angle) > peak) {
+            peak = std::fabs(angle);
+            peak_sign = angle < 0.0f ? -1.0f : 1.0f;
+        }
+        if (peak >= kSplitMinPeakDeg && std::fabs(angle) <= kSplitReturnFraction * peak &&
+            rate * peak_sign >= 0.0f) {
+            gestures.push_back(MotionRun{start, i, 0.0f});
+            start = i;
+            angle = 0.0f;
+            peak = 0.0f;
+        }
+    }
+    if (run.last > start && peak >= kSplitMinPeakDeg) {
+        gestures.push_back(MotionRun{start, run.last, 0.0f});
+    }
+    return gestures;
+}
+
 }  // namespace
+
+Vec3 combine_axis_repeats(const std::vector<Vec3>& axes, AxisRepeatStats& stats, std::vector<bool>* kept) {
+    stats.usable = static_cast<int>(axes.size());
+    stats.used = 0;
+    stats.rejected = 0;
+    stats.spread_deg = 0.0f;
+    stats.max_rejected_deg = 0.0f;
+    std::vector<bool> keep(axes.size(), true);
+    if (axes.size() >= 3) {
+        // The medoid (least total angle to the others) is a robust centre: a
+        // single wild gesture cannot drag it the way it drags the mean.
+        size_t medoid = 0;
+        float best_total = std::numeric_limits<float>::max();
+        for (size_t i = 0; i < axes.size(); ++i) {
+            float total = 0.0f;
+            for (size_t j = 0; j < axes.size(); ++j) {
+                total += i == j ? 0.0f : angle_deg(axes[i], axes[j]);
+            }
+            if (total < best_total) {
+                best_total = total;
+                medoid = i;
+            }
+        }
+        std::vector<float> deviations;
+        for (size_t i = 0; i < axes.size(); ++i) {
+            if (i != medoid) {
+                deviations.push_back(angle_deg(axes[i], axes[medoid]));
+            }
+        }
+        std::vector<float> sorted = deviations;
+        std::sort(sorted.begin(), sorted.end());
+        const float median = sorted[(sorted.size() - 1) / 2];
+        const float limit = std::max(kRepeatOutlierFloorDeg, kRepeatOutlierMedianScale * median);
+        for (size_t i = 0; i < axes.size(); ++i) {
+            const float deviation = angle_deg(axes[i], axes[medoid]);
+            if (i != medoid && deviation > limit) {
+                keep[i] = false;
+                ++stats.rejected;
+                stats.max_rejected_deg = std::max(stats.max_rejected_deg, deviation);
+            }
+        }
+    }
+    // Chordal mean on the sphere: the normalised sum of the kept unit axes.
+    Vec3 sum;
+    for (size_t i = 0; i < axes.size(); ++i) {
+        if (keep[i]) {
+            sum = add(sum, normalized(axes[i]));
+            ++stats.used;
+        }
+    }
+    const Vec3 result = normalized(sum);
+    float square_sum = 0.0f;
+    for (size_t i = 0; i < axes.size(); ++i) {
+        if (keep[i]) {
+            const float deviation = angle_deg(axes[i], result);
+            square_sum += deviation * deviation;
+        }
+    }
+    stats.spread_deg = stats.used > 1 ? std::sqrt(square_sum / static_cast<float>(stats.used)) : 0.0f;
+    if (kept != nullptr) {
+        *kept = keep;
+    }
+    return result;
+}
+
+bool analyze_motion_repeats(const CalibrationPhaseData& phase, const Vec3& bias_body, float command_sign,
+                            CalibrationAxisDiagnostics& combined, AxisRepeatStats& stats,
+                            std::string& code, std::string& message,
+                            std::vector<CalibrationAxisDiagnostics>* gestures) {
+    stats = AxisRepeatStats{};
+    combined = CalibrationAxisDiagnostics{};
+    if (gestures != nullptr) {
+        gestures->clear();
+    }
+    if (phase.samples.size() < 100) {
+        code = "TOO_FEW_SAMPLES";
+        message = "this step did not record enough IMU samples - try it again";
+        return false;
+    }
+    if (!valid_samples(phase)) {
+        code = "INVALID_SAMPLE";
+        message = "the IMU stream contained a non-finite sensor value";
+        return false;
+    }
+    const std::vector<Vec3> corrected = corrected_gyro(phase, bias_body);
+    std::vector<CalibrationAxisDiagnostics> usable;
+    std::string first_code;
+    std::string first_message;
+    CalibrationAxisDiagnostics first_failure;
+    for (const MotionRun& run : find_motion_runs(phase, corrected)) {
+        for (const MotionRun& gesture : split_gestures(phase, corrected, run)) {
+            ++stats.detected;
+            CalibrationAxisDiagnostics diagnostics;
+            std::string gesture_code;
+            std::string gesture_message;
+            if (analyze_segment(phase, corrected, gesture.first, gesture.last, command_sign, diagnostics,
+                                gesture_code, gesture_message)) {
+                usable.push_back(diagnostics);
+            } else if (first_code.empty()) {
+                first_code = gesture_code;
+                first_message = gesture_message;
+                first_failure = diagnostics;
+            }
+        }
+    }
+    if (usable.empty()) {
+        code = first_code.empty() ? std::string("NO_MOTION") : first_code;
+        message = first_message.empty() ? std::string("not enough motion detected - try the step again")
+                                        : first_message;
+        combined = first_failure;
+        return false;
+    }
+    std::vector<Vec3> axes;
+    for (const CalibrationAxisDiagnostics& gesture : usable) {
+        axes.push_back(gesture.axis_body);
+    }
+    std::vector<bool> kept;
+    combined.axis_body = combine_axis_repeats(axes, stats, &kept);
+    for (size_t i = 0; i < usable.size(); ++i) {
+        if (!kept[i]) {
+            continue;
+        }
+        const float n = static_cast<float>(stats.used);
+        combined.active_seconds += usable[i].active_seconds;
+        combined.active_samples += usable[i].active_samples;
+        combined.excursion_deg += usable[i].excursion_deg / n;
+        combined.dominance += usable[i].dominance / n;
+        combined.perpendicular_rms_degs += usable[i].perpendicular_rms_degs / n;
+    }
+    if (gestures != nullptr) {
+        *gestures = usable;
+    }
+    return true;
+}
+
+float repeat_consistency_quality(const AxisRepeatStats& stats) {
+    if (stats.used < 2) {
+        return -1.0f;
+    }
+    return std::max(0.0f, std::min(1.0f, 1.0f - stats.spread_deg / kRepeatSpreadZeroQualityDeg));
+}
 
 bool analyze_motion_phase(const CalibrationPhaseData& phase, const Vec3& bias_body,
                           float command_sign, CalibrationAxisDiagnostics& diagnostics,
@@ -437,6 +683,14 @@ OrientationCalibrationResult calibrate_orientation(const CalibrationPhaseData& s
                                                    const CalibrationPhaseData& yaw,
                                                    const CalibrationPhaseData& nod,
                                                    const CalibrationPhaseData& tilt) {
+    return calibrate_orientation(still, yaw, nod, tilt, OrientationCalibrationOptions{});
+}
+
+OrientationCalibrationResult calibrate_orientation(const CalibrationPhaseData& still,
+                                                   const CalibrationPhaseData& yaw,
+                                                   const CalibrationPhaseData& nod,
+                                                   const CalibrationPhaseData& tilt,
+                                                   const OrientationCalibrationOptions& options) {
     if (still.phase != CalibrationPhase::Still || yaw.phase != CalibrationPhase::Yaw ||
         nod.phase != CalibrationPhase::Nod || tilt.phase != CalibrationPhase::Tilt) {
         return fail("WRONG_PHASE", "calibration phases were supplied in the wrong order");
@@ -480,9 +734,46 @@ OrientationCalibrationResult calibrate_orientation(const CalibrationPhaseData& s
     result.still_gyro_rms_degs = still_rms;
     std::string code;
     std::string message;
-    if (!analyze_motion_phase(yaw, bias_body, +1.0f, result.yaw, code, message) ||
-        !analyze_motion_phase(nod, bias_body, -1.0f, result.nod, code, message) ||
-        !analyze_motion_phase(tilt, bias_body, +1.0f, result.tilt, code, message)) {
+    if (options.repeats > 1) {
+        result.repeats_requested = options.repeats;
+        if (!analyze_motion_repeats(yaw, bias_body, +1.0f, result.yaw, result.yaw_repeats, code, message) ||
+            !analyze_motion_repeats(nod, bias_body, -1.0f, result.nod, result.nod_repeats, code, message) ||
+            !analyze_motion_repeats(tilt, bias_body, +1.0f, result.tilt, result.tilt_repeats, code, message)) {
+            result.code = code;
+            result.message = message;
+            return result;
+        }
+        // Consistency: rms spread over the axes that have repeat evidence; an
+        // axis without two usable gestures caps the score (unverified).
+        float square_sum = 0.0f;
+        float error_square_sum = 0.0f;
+        int evidenced = 0;
+        bool unverified = false;
+        for (const AxisRepeatStats* stats : {&result.yaw_repeats, &result.nod_repeats, &result.tilt_repeats}) {
+            if (stats->used >= 2) {
+                square_sum += stats->spread_deg * stats->spread_deg;
+                // Standard error of a mean direction from n gestures.
+                error_square_sum +=
+                    stats->spread_deg * stats->spread_deg / static_cast<float>(stats->used - 1);
+                ++evidenced;
+            } else {
+                unverified = true;
+            }
+        }
+        if (evidenced > 0) {
+            result.repeat_spread_deg = std::sqrt(square_sum / static_cast<float>(evidenced));
+            result.axis_error_estimate_deg = std::sqrt(error_square_sum / static_cast<float>(evidenced));
+            result.consistency_quality =
+                std::max(0.0f, std::min(1.0f, 1.0f - result.repeat_spread_deg / kRepeatSpreadZeroQualityDeg));
+        } else {
+            result.consistency_quality = kUnverifiedConsistencyQuality;
+        }
+        if (unverified) {
+            result.consistency_quality = std::min(result.consistency_quality, kUnverifiedConsistencyQuality);
+        }
+    } else if (!analyze_motion_phase(yaw, bias_body, +1.0f, result.yaw, code, message) ||
+               !analyze_motion_phase(nod, bias_body, -1.0f, result.nod, code, message) ||
+               !analyze_motion_phase(tilt, bias_body, +1.0f, result.tilt, code, message)) {
         result.code = code;
         result.message = message;
         return result;
@@ -660,8 +951,30 @@ float orientation_quality(const OrientationCalibrationResult& result) {
     return result.ok ? headroom : 0.0f;
 }
 
+float calibration_quality(const OrientationCalibrationResult& result) {
+    const float base = orientation_quality(result);
+    if (!result.ok || result.repeats_requested <= 1 || result.consistency_quality < 0.0f) {
+        return base;
+    }
+    return std::min(base, result.consistency_quality);
+}
+
+const char* calibration_quality_label(float quality) {
+    if (!std::isfinite(quality) || quality < 0.0f) {
+        return "";
+    }
+    if (quality >= 0.7f) {
+        return "Good";
+    }
+    if (quality >= 0.4f) {
+        return "Fair";
+    }
+    return "Retry recommended";
+}
+
 static bool write_calibration_file(const std::string& path, const std::array<float, 9>& sensor_to_head,
-                                   const MagCalibration& mag, std::string& error) {
+                                   const OrientationCalibrationInfo& info, const MagCalibration& mag,
+                                   std::string& error) {
     const std::filesystem::path destination = path_from_utf8(path);
     std::filesystem::path temporary = destination;
     temporary += ".tmp";
@@ -679,6 +992,16 @@ static bool write_calibration_file(const std::string& path, const std::array<flo
         output << sensor_to_head[i];
     }
     output << "\n  ]";
+    // Optional metadata (version stays 1: older readers ignore unknown keys).
+    if (info.quality >= 0.0f && std::isfinite(info.quality)) {
+        output << std::setprecision(3) << ",\n  \"orientation_quality\": " << clamp01(info.quality);
+    }
+    if (info.repeats > 1) {
+        output << ",\n  \"orientation_repeats\": " << info.repeats;
+    }
+    if (info.spread_deg >= 0.0f && std::isfinite(info.spread_deg)) {
+        output << std::setprecision(3) << ",\n  \"orientation_spread_deg\": " << info.spread_deg;
+    }
     if (mag.valid) {
         output << std::setprecision(3) << ",\n  \"mag_hard_iron_ut\": [" << mag.hard_iron_ut.x << ", "
                << mag.hard_iron_ut.y << ", " << mag.hard_iron_ut.z << "],\n  \"mag_field_ut\": "
@@ -733,7 +1056,11 @@ bool save_orientation_calibration(const std::string& path, const OrientationCali
     if (!load_mag_calibration(path, existing_mag, ignored)) {
         existing_mag = MagCalibration{};
     }
-    return write_calibration_file(path, result.sensor_to_head, existing_mag, error);
+    OrientationCalibrationInfo info;
+    info.quality = calibration_quality(result);
+    info.repeats = result.repeats_requested > 1 ? result.repeats_requested : 1;
+    info.spread_deg = result.repeat_spread_deg;
+    return write_calibration_file(path, result.sensor_to_head, info, existing_mag, error);
 }
 
 bool save_mag_calibration(const std::string& path, const MagCalibration& mag, std::string& error) {
@@ -741,7 +1068,57 @@ bool save_mag_calibration(const std::string& path, const MagCalibration& mag, st
     if (!load_orientation_calibration(path, matrix, error)) {
         return false;
     }
-    return write_calibration_file(path, matrix, mag, error);
+    // Keep the orientation metadata: the two calibrations are separate steps.
+    OrientationCalibrationInfo info;
+    std::string ignored;
+    if (!load_orientation_calibration_info(path, info, ignored)) {
+        info = OrientationCalibrationInfo{};
+    }
+    return write_calibration_file(path, matrix, info, mag, error);
+}
+
+namespace {
+
+// Value after "key": in text, or NaN when the key is absent or not a number.
+float find_number_key(const std::string& text, const char* quoted_key) {
+    const size_t key = text.find(quoted_key);
+    if (key == std::string::npos) {
+        return std::numeric_limits<float>::quiet_NaN();
+    }
+    const size_t colon = text.find(':', key);
+    if (colon == std::string::npos) {
+        return std::numeric_limits<float>::quiet_NaN();
+    }
+    const char* begin = text.c_str() + colon + 1;
+    char* end = nullptr;
+    const float value = std::strtof(begin, &end);
+    return end == begin ? std::numeric_limits<float>::quiet_NaN() : value;
+}
+
+}  // namespace
+
+bool load_orientation_calibration_info(const std::string& path, OrientationCalibrationInfo& info,
+                                       std::string& error) {
+    info = OrientationCalibrationInfo{};
+    std::ifstream input(path_from_utf8(path), std::ios::in);
+    if (!input) {
+        error = "could not open calibration file";
+        return false;
+    }
+    const std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    const float quality = find_number_key(text, "\"orientation_quality\"");
+    if (std::isfinite(quality) && quality >= 0.0f && quality <= 1.0f) {
+        info.quality = quality;
+    }
+    const float repeats = find_number_key(text, "\"orientation_repeats\"");
+    if (std::isfinite(repeats) && repeats >= 1.0f && repeats <= 100.0f) {
+        info.repeats = static_cast<int>(repeats);
+    }
+    const float spread = find_number_key(text, "\"orientation_spread_deg\"");
+    if (std::isfinite(spread) && spread >= 0.0f && spread <= 180.0f) {
+        info.spread_deg = spread;
+    }
+    return true;
 }
 
 bool load_mag_calibration(const std::string& path, MagCalibration& mag, std::string& error) {

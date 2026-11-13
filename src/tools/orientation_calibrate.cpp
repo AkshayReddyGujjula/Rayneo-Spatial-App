@@ -5,6 +5,7 @@
 #include <hidapi.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -17,6 +18,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <utility>
 
 namespace {
 
@@ -84,6 +86,8 @@ struct Options {
     double auto_delay_s = 4.0;
     // Recorded with the earbuds (or other head-worn magnets) in place.
     bool earbuds = false;
+    // Gestures per motion step (1 = the original single gesture).
+    int repeats = 1;
 };
 
 // Front-end reporting for one calibration flow.
@@ -141,6 +145,9 @@ void print_usage() {
         "                     calibration); enables the drift-free heading lock\n"
         "  --earbuds          (with --mag) record that in-ear earbuds were worn; calibrate\n"
         "                     the way you normally work so their magnets are absorbed\n"
+        "  --repeats N        do each turn / nod / tilt N times in one recording (1-5,\n"
+        "                     default 1); the axes are averaged with outlier rejection\n"
+        "                     and their consistency is scored (3 recommended)\n"
         "  --progress-json    also print one '@@progress {json}' line per state change\n"
         "  --auto             no keyboard: each step starts after --auto-delay seconds\n"
         "  --auto-delay S     seconds to read each instruction in --auto mode (default 4);\n"
@@ -159,6 +166,12 @@ bool parse_args(int argc, char** argv, Options& options) {
             options.mag_only = true;
         } else if (std::strcmp(argv[i], "--earbuds") == 0) {
             options.earbuds = true;
+        } else if (std::strcmp(argv[i], "--repeats") == 0 && i + 1 < argc) {
+            options.repeats = std::atoi(argv[++i]);
+            if (options.repeats < 1 || options.repeats > 5) {
+                std::printf("--repeats must be between 1 and 5\n");
+                return false;
+            }
         } else if (std::strcmp(argv[i], "--progress-json") == 0) {
             options.progress_json = true;
         } else if (std::strcmp(argv[i], "--auto") == 0) {
@@ -376,7 +389,7 @@ bool capture_still(gt::GtHidDevice& device, const Options& options, const Progre
 }
 
 bool capture_motion(gt::GtHidDevice& device, const Options& options, const Progress& progress, int step,
-                    gt::CalibrationPhase phase, float command_sign, const char* prompt, double seconds,
+                    gt::CalibrationPhase phase, float command_sign, const std::string& prompt, double seconds,
                     const gt::Vec3& bias_body, gt::CalibrationPhaseData& data, std::ofstream& csv,
                     std::string& error) {
     for (int attempt = 1; attempt <= 3; ++attempt) {
@@ -391,7 +404,27 @@ bool capture_motion(gt::GtHidDevice& device, const Options& options, const Progr
         gt::CalibrationAxisDiagnostics diagnostics;
         std::string code;
         std::string message;
-        if (gt::analyze_motion_phase(data, bias_body, command_sign, diagnostics, code, message)) {
+        if (options.repeats > 1) {
+            gt::AxisRepeatStats stats;
+            if (gt::analyze_motion_repeats(data, bias_body, command_sign, diagnostics, stats, code, message)) {
+                const float consistency = gt::repeat_consistency_quality(stats);
+                const float quality =
+                    (std::min)(gt::axis_quality(diagnostics), consistency >= 0.0f ? consistency : 0.6f);
+                std::printf("[cal] phase=%s ok: gestures detected=%d usable=%d used=%d rejected=%d "
+                            "spread=%.2fdeg excursion=%.1fdeg dominance=%.1f\n",
+                            phase_name(phase), stats.detected, stats.usable, stats.used, stats.rejected,
+                            stats.spread_deg, diagnostics.excursion_deg, diagnostics.dominance);
+                char detail[192];
+                std::snprintf(detail, sizeof(detail), "%d of %d gestures used%s, spread %.1f deg, excursion %.1f deg",
+                              stats.used, options.repeats, stats.rejected > 0 ? " (outlier dropped)" : "",
+                              stats.spread_deg, diagnostics.excursion_deg);
+                if (stats.used < 2) {
+                    std::printf("Only one usable gesture was found, so its consistency cannot be checked.\n");
+                }
+                progress.emit(step, "ok", prompt, detail, quality);
+                return true;
+            }
+        } else if (gt::analyze_motion_phase(data, bias_body, command_sign, diagnostics, code, message)) {
             std::printf("[cal] phase=%s ok: active=%.2fs excursion=%.1fdeg dominance=%.1f\n",
                         phase_name(phase), diagnostics.active_seconds, diagnostics.excursion_deg,
                         diagnostics.dominance);
@@ -586,25 +619,38 @@ int calibrate_orientation_flow(gt::GtHidDevice& device, const Options& options, 
         "Slowly tilt your head toward your RIGHT shoulder as far as is "
         "comfortable, then return to centre. About 15-20 degrees is plenty.";
 
+    // --repeats N: the same gesture N times in one longer recording (about
+    // 3.5 s per extra out-and-back); a pause at centre is optional.
+    const std::string repeat_suffix =
+        options.repeats > 1 ? " Do this " + std::to_string(options.repeats) +
+                                  " times, coming back to centre each time."
+                            : std::string();
+    const std::string yaw_prompt = kYawPrompt + repeat_suffix;
+    const std::string nod_prompt = kNodPrompt + repeat_suffix;
+    const std::string tilt_prompt = kTiltPrompt + repeat_suffix;
+    const double motion_seconds = 6.0 + 3.5 * static_cast<double>(options.repeats - 1);
+
     gt::Vec3 bias_body;
     if (!capture_still(device, options, progress, 1, still, bias_body, csv, error)) {
         return fail_run(progress, 1, kStillPrompt, error);
     }
-    if (!capture_motion(device, options, progress, 2, gt::CalibrationPhase::Yaw, +1.0f, kYawPrompt, 6.0,
-                        bias_body, yaw, csv, error)) {
-        return fail_run(progress, 2, kYawPrompt, error);
+    if (!capture_motion(device, options, progress, 2, gt::CalibrationPhase::Yaw, +1.0f, yaw_prompt,
+                        motion_seconds, bias_body, yaw, csv, error)) {
+        return fail_run(progress, 2, yaw_prompt, error);
     }
-    if (!capture_motion(device, options, progress, 3, gt::CalibrationPhase::Nod, -1.0f, kNodPrompt, 6.0,
-                        bias_body, nod, csv, error)) {
-        return fail_run(progress, 3, kNodPrompt, error);
+    if (!capture_motion(device, options, progress, 3, gt::CalibrationPhase::Nod, -1.0f, nod_prompt,
+                        motion_seconds, bias_body, nod, csv, error)) {
+        return fail_run(progress, 3, nod_prompt, error);
     }
-    if (!capture_motion(device, options, progress, 4, gt::CalibrationPhase::Tilt, +1.0f, kTiltPrompt, 6.0,
-                        bias_body, tilt, csv, error)) {
-        return fail_run(progress, 4, kTiltPrompt, error);
+    if (!capture_motion(device, options, progress, 4, gt::CalibrationPhase::Tilt, +1.0f, tilt_prompt,
+                        motion_seconds, bias_body, tilt, csv, error)) {
+        return fail_run(progress, 4, tilt_prompt, error);
     }
 
+    gt::OrientationCalibrationOptions calibration_options;
+    calibration_options.repeats = options.repeats;
     const gt::OrientationCalibrationResult result =
-        gt::calibrate_orientation(still, yaw, nod, tilt);
+        gt::calibrate_orientation(still, yaw, nod, tilt, calibration_options);
     std::printf("[cal] begin v1 mag=off\n");
     std::printf("[cal] phase=still n=%zu gyro_rms=%.3fdeg/s\n", still.samples.size(),
                 result.still_gyro_rms_degs);
@@ -620,6 +666,27 @@ int calibrate_orientation_flow(gt::GtHidDevice& device, const Options& options, 
                   "up_vs_yaw %.2f deg, nod_level %.2f deg, nod_tilt %.2f deg, handedness %.2f deg",
                   result.up_vs_yaw_deg, result.nod_level_error_deg, result.nod_tilt_error_deg,
                   result.handedness_error_deg);
+    std::string summary = consistency;
+    if (result.repeats_requested > 1) {
+        for (const auto& [name, stats] : {std::pair<const char*, const gt::AxisRepeatStats*>{"yaw", &result.yaw_repeats},
+                                          {"nod", &result.nod_repeats},
+                                          {"tilt", &result.tilt_repeats}}) {
+            std::printf("[cal] repeats phase=%s detected=%d usable=%d used=%d rejected=%d spread=%.2fdeg%s\n",
+                        name, stats->detected, stats->usable, stats->used, stats->rejected, stats->spread_deg,
+                        stats->rejected > 0 ? " (outlier dropped)" : "");
+        }
+        char repeats_text[192];
+        if (result.repeat_spread_deg >= 0.0f) {
+            std::snprintf(repeats_text, sizeof(repeats_text),
+                          "; %d repeats: spread %.2f deg, estimated axis error %.2f deg", result.repeats_requested,
+                          result.repeat_spread_deg, result.axis_error_estimate_deg);
+        } else {
+            std::snprintf(repeats_text, sizeof(repeats_text), "; %d repeats requested, consistency not measurable",
+                          result.repeats_requested);
+        }
+        std::printf("[cal] consistency%s, score %.2f\n", repeats_text + 1, result.consistency_quality);
+        summary += repeats_text;
+    }
     if (!result.ok) {
         std::printf("[cal] FAIL %s: %s\n", result.code.c_str(), result.message.c_str());
         std::printf("No calibration file was changed. Repeat the tool and follow the named step carefully.\n");
@@ -653,7 +720,14 @@ int calibrate_orientation_flow(gt::GtHidDevice& device, const Options& options, 
         std::printf("calibration succeeded but could not be saved: %s\n", error.c_str());
         return fail_run(progress, 4, "Calibration was not saved.", "SAVE_FAILED: " + error);
     }
-    std::printf("[cal] result ok\nSaved %s\n", options.output_path.c_str());
+    const float quality = gt::calibration_quality(result);
+    std::printf("[cal] result ok\nCalibration quality: %s (%.2f)\nSaved %s\n", gt::calibration_quality_label(quality),
+                quality, options.output_path.c_str());
+    if (quality < 0.4f) {
+        std::printf("The steps disagreed with each other. The file was saved, but repeating the calibration%s "
+                    "should give a straighter result.\n",
+                    options.repeats > 1 ? "" : " (ideally with --repeats 3)");
+    }
     gt::MagCalibration mag;
     std::string mag_error;
     std::string next;
@@ -661,8 +735,7 @@ int calibrate_orientation_flow(gt::GtHidDevice& device, const Options& options, 
         std::printf("Next: run orientation_calibrate.exe --mag once for drift-free heading.\n");
         next = "; next: calibrate the magnetometer (--mag) for drift-free heading";
     }
-    progress.emit(4, "done", "Orientation calibration saved.", std::string(consistency) + next,
-                  gt::orientation_quality(result));
+    progress.emit(4, "done", "Orientation calibration saved.", summary + next, quality);
     return 0;
 }
 
