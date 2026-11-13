@@ -274,12 +274,14 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                     case kHotkeyToggleYaw:
                         g_app->yaw_tracking = !g_app->yaw_tracking;
                         g_app->capture_yaw_hold = !g_app->yaw_tracking;
+                        g_app->view_smoother.restart_prediction();  // the view steps; not a turn
                         std::printf("  yaw tracking %s\n",
                                     g_app->yaw_tracking ? "on" : "off (view holds yaw)");
                         break;
                     case kHotkeyTogglePitch:
                         g_app->pitch_tracking = !g_app->pitch_tracking;
                         g_app->capture_pitch_hold = !g_app->pitch_tracking;
+                        g_app->view_smoother.restart_prediction();
                         std::printf("  pitch tracking %s\n",
                                     g_app->pitch_tracking ? "on" : "off (view holds pitch)");
                         break;
@@ -316,6 +318,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             if (g_app != nullptr) {
                 g_app->yaw_tracking = !g_app->yaw_tracking;
                 g_app->capture_yaw_hold = !g_app->yaw_tracking;
+                g_app->view_smoother.restart_prediction();
                 std::printf("  yaw tracking %s (controller)\n",
                             g_app->yaw_tracking ? "on" : "off (view holds yaw)");
             }
@@ -324,6 +327,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             if (g_app != nullptr) {
                 g_app->pitch_tracking = !g_app->pitch_tracking;
                 g_app->capture_pitch_hold = !g_app->pitch_tracking;
+                g_app->view_smoother.restart_prediction();
                 std::printf("  pitch tracking %s (controller)\n",
                             g_app->pitch_tracking ? "on" : "off (view holds pitch)");
             }

@@ -142,12 +142,19 @@ Quat PoseSmoother::update(const Quat& raw, float dt_s) {
         have_sample_ = true;
         prev_raw_ = input;
         omega_degs_ = Vec3{};
+        restart_prediction_ = false;
         return smoothed_;
     }
     // The velocity estimate always runs, so enabling prediction live never
     // starts from a stale previous pose. The lead is applied to the output,
     // after the 1-euro and the hold, so neither filter sees it: their own
     // behaviour (and the reading metrics) is unchanged.
+    if (restart_prediction_) {
+        // A deliberate view step: velocity restarts from this input.
+        prev_raw_ = input;
+        omega_degs_ = Vec3{};
+        restart_prediction_ = false;
+    }
     const Quat lead = prediction_lead(input, dt_s);
     Quat target = input;
     if (quat_dot(smoothed_, target) < 0.0f) {
