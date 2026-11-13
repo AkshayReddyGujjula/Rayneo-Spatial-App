@@ -50,3 +50,13 @@ Every row in track-c's table is where it claims. The items it does not mention a
 Refresh on only two pages, the missing mode chip, the 14-event cap, the dropped Space/wheel/Ctrl+Alt+Q
 hints and the sidebar Failed state (now fixed). Every id that HEAD registers has a handler in `execute()`
 or a pointer path. The only id handled but never painted is `kUiEditorDimToggle`.
+
+## Follow-up (coordinator items 1-3, on top of merge `10ff87a`)
+
+| Commit | Item | Result |
+|---|---|---|
+| `5d3b593` | 1. Shortcuts card | Added Ctrl+Alt+Q (engine quit; Ctrl+Shift+\ is the same action), Space/Enter, the mouse wheel, PgUp/PgDn with Home/End, and Esc. Checked against `register_global_hotkeys` (spatial_desk.cpp) and `AppWindow::on_key_down` / `on_mouse_wheel`. The card also claimed "also R in the engine window" for recenter, which was false: the engine ignores WM_KEYDOWN on purpose. That claim is removed. The only hotkey documented but not in the code is the "`R` / Ctrl+Alt+R recenters" in AGENTS.md section 4; the code has only Ctrl+Shift+R. AGENTS.md is not mine to edit; flagged. Text only; render checked. |
+| `3342bc2` | 2. Start with a broken layout file | CONFIRMED contradiction, and main is the same. The engine runs the same `gt::load_layout()` on the same path before any display takeover and exits 1 with "layout load failed" in both modes. `start_block_reason` now returns a layout-file reason when `diagnostics.layout_ok` is false; Save and apply already refreshes that flag. A missing head-tracking sensor is left alone on purpose: `ImuSource` retries `open_first()` and reconnects, so the engine runs and tracking opens when the sensor answers. The test is in ui_snapshot because app_selftest does not link the UI library that holds `start_block_reason`: home-layout-problem asserts both start hotspots are disabled and both modes have a reason. 4 failures before the fix; PASS after. |
+| `a47f93d` | 3. 2D editor labels overlap at the minimum size | Fixed. Placement moved into `editor_2d_labels()` with the same search. The selected screen is placed first. A label with no clear spot is retried without its angle; an unselected one that still has no spot is skipped. The selected label always shows. ui_snapshot checks every 2D Layout shot: labels inside the canvas, no overlaps, none over a caption. The old fallback failed at 744x521 and at 200% (screens 0/1 and 1/2 overlap, screen 1 covers a caption); PASS now. |
+
+ctest 11/11 on the final tree.

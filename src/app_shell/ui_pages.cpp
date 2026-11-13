@@ -928,13 +928,19 @@ int settings_card_shortcuts(Ui& ui, int left, int top, int width) {
         const wchar_t* action;
     };
     static const Shortcut kShortcuts[] = {
-        {L"Ctrl+Shift+R", L"Recenter (also R in the engine window)"},
+        // Engine hotkeys (spatial_desk.cpp register_global_hotkeys), then
+        // this window's keys (AppWindow::on_key_down / on_mouse_wheel).
+        {L"Ctrl+Shift+R", L"Recenter head tracking"},
         {L"Ctrl+Alt+Y / P", L"Toggle yaw / pitch tracking"},
         {L"Ctrl+Alt+S", L"Cycle reading stabilisation"},
         {L"Ctrl+Alt+F", L"Cursor to the centre screen"},
-        {L"Ctrl+Shift+\\", L"Exit the workspace"},
+        {L"Ctrl+Alt+Q", L"Exit the workspace (or Ctrl+Shift+\\)"},
         {L"Ctrl+1 ... 6", L"Switch pages in this window"},
         {L"Tab / arrows", L"Move focus / adjust the focused control"},
+        {L"Space / Enter", L"Press the focused control"},
+        {L"PgUp / PgDn", L"Bigger steps; Home / End jump to the ends"},
+        {L"Mouse wheel", L"Scroll; zoom in the 3D arrangement view"},
+        {L"Esc", L"Leave the fullscreen editor, or close the window"},
         {L"Ctrl+S", L"Save and apply the layout"},
     };
     const int pad = ui.px(space::xl);

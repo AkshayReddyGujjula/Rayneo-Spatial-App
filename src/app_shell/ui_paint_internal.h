@@ -168,6 +168,19 @@ int paint_calibration_run(Ui& ui, int left, int top, int width, bool draw);
 // "id  yaw°" label of a screen in the arrangement editor (2D and 3D).
 std::wstring editor_screen_label(const ScreenLayout& screen);
 
+// Where the 2D editor puts its screen labels: never over each other or the
+// fixed captions, never outside the canvas. A crowded canvas drops the
+// angle, then unselected labels; the selected screen's label always shows.
+struct EditorLabel {
+    size_t index = 0;
+    std::wstring text;
+    RECT rect{};
+    bool selected = false;
+};
+std::vector<RECT> editor_2d_captions(const EditorGeometry& geometry, UINT dpi);
+std::vector<EditorLabel> editor_2d_labels(HDC dc, const FontSet& fonts, const Layout& layout,
+                                          size_t selected_screen, const RECT& canvas_rect, UINT dpi);
+
 // Small top-down arc thumbnail of a layout (Home, setup guide).
 void paint_arc_preview(Ui& ui, const RECT& rect, const Layout& layout, int selected);
 

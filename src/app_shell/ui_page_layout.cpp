@@ -109,9 +109,140 @@ std::wstring editor_screen_label(const ScreenLayout& screen) {
            format_wide(L"  %.0f°", static_cast<double>(screen.yaw_deg));
 }
 
+// Geometry of the 2D editor's fixed captions (the -90/0/90 yaw ticks, then
+// "you"), which screen labels must not cover.
+std::vector<RECT> editor_2d_captions(const EditorGeometry& geometry, UINT dpi) {
+    std::vector<RECT> captions;
+    for (const int angle_deg : {-90, 0, 90}) {
+        const float angle = static_cast<float>(angle_deg) * kPi / 180.0f;
+        const int label_radius = scale_px(52, dpi);
+        captions.push_back(
+            rect_of(geometry.head.x + static_cast<int>(std::sin(angle) * label_radius) - scale_px(20, dpi),
+                    geometry.head.y - static_cast<int>(std::cos(angle) * label_radius) - scale_px(18, dpi),
+                    scale_px(40, dpi), scale_px(16, dpi)));
+    }
+    captions.push_back(rect_of(geometry.head.x - scale_px(40, dpi), geometry.head.y + scale_px(8, dpi),
+                               scale_px(80, dpi), scale_px(16, dpi)));
+    return captions;
+}
+
+std::vector<EditorLabel> editor_2d_labels(HDC dc, const FontSet& fonts, const Layout& layout,
+                                          size_t selected_screen, const RECT& canvas_rect, UINT dpi) {
+    const EditorGeometry geometry = editor_geometry(layout, canvas_rect, dpi);
+    std::vector<RECT> blockers = editor_2d_captions(geometry, dpi);
+    std::vector<EditorLabel> placed;
+    // The selected screen's label is placed first, so it gets the best spot
+    // and the others avoid it.
+    std::vector<size_t> order;
+    if (selected_screen < layout.screens.size()) {
+        order.push_back(selected_screen);
+    }
+    for (size_t index = 0; index < layout.screens.size(); ++index) {
+        if (index != selected_screen) {
+            order.push_back(index);
+        }
+    }
+    const auto inside_canvas = [&](const RECT& r) {
+        return r.left >= canvas_rect.left && r.right <= canvas_rect.right && r.top >= canvas_rect.top &&
+               r.bottom <= canvas_rect.bottom;
+    };
+    const auto clamp_into_canvas = [&](RECT r) {
+        OffsetRect(&r, std::max(0L, canvas_rect.left - r.left), std::max(0L, canvas_rect.top - r.top));
+        OffsetRect(&r, std::min(0L, canvas_rect.right - r.right), std::min(0L, canvas_rect.bottom - r.bottom));
+        return r;
+    };
+    const auto collides = [&](const RECT& r) {
+        for (const RECT& other : blockers) {
+            RECT intersection{};
+            RECT inflated = r;
+            InflateRect(&inflated, scale_px(2, dpi), scale_px(1, dpi));
+            if (IntersectRect(&intersection, &inflated, &other) != 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const size_t index : order) {
+        const ScreenLayout& screen = layout.screens[index];
+        const bool selected = index == selected_screen;
+        const float yaw = screen.yaw_deg * kPi / 180.0f;
+        const POINT center = editor_screen_center(screen, geometry);
+        const float thickness = static_cast<float>(selected ? scale_px(7, dpi) : scale_px(5, dpi));
+        HFONT label_font = selected ? fonts.small_strong : fonts.small;
+        const int label_h = scale_px(18, dpi);
+        const float nx = std::sin(yaw);
+        const float ny = -std::cos(yaw);
+        // The label sits beside the screen along its outward normal, far
+        // enough that the text box clears the (possibly angled) line and the
+        // selection halo. Preference: outward, inward (towards the wearer),
+        // then outward or inward pushed back inside the canvas; the first
+        // one inside the canvas that collides with no other label wins.
+        // Returns whether the spot found for this text is clear.
+        const auto place = [&](const std::wstring& text, RECT& label_rect) {
+            const int label_w = text_width(dc, label_font, text) + scale_px(8, dpi);
+            const float clearance = std::fabs(nx) * static_cast<float>(label_w) * 0.5f +
+                                    std::fabs(ny) * static_cast<float>(label_h) * 0.5f +
+                                    (thickness + (selected ? static_cast<float>(scale_px(12, dpi)) : 0.0f)) * 0.5f +
+                                    static_cast<float>(scale_px(6, dpi));
+            const auto label_at = [&](float direction) {
+                const int lx = center.x + static_cast<int>(std::lround(nx * clearance * direction));
+                const int ly = center.y + static_cast<int>(std::lround(ny * clearance * direction));
+                return rect_of(lx - label_w / 2, ly - label_h / 2, label_w, label_h);
+            };
+            const RECT candidates[] = {label_at(1.0f), label_at(-1.0f), clamp_into_canvas(label_at(1.0f)),
+                                       clamp_into_canvas(label_at(-1.0f))};
+            label_rect = candidates[2];
+            for (const RECT& candidate : candidates) {
+                if (inside_canvas(candidate) && !collides(candidate)) {
+                    label_rect = candidate;
+                    return true;
+                }
+            }
+            // Crowded layouts: step the label down until it is clear, but
+            // never out of the canvas (a clipped label is worse than a close one).
+            const int step = scale_px(17, dpi);
+            for (int attempt = 0; attempt < 8; ++attempt) {
+                RECT next = label_rect;
+                OffsetRect(&next, 0, step * (attempt + 1));
+                if (!inside_canvas(next)) {
+                    break;
+                }
+                if (!collides(next)) {
+                    label_rect = next;
+                    return true;
+                }
+            }
+            return false;
+        };
+        // A crowded canvas (narrow window) first drops the angle, then an
+        // unselected screen's label (its chip in the inspector still names
+        // it). The selected screen's label always shows.
+        EditorLabel label;
+        label.index = index;
+        label.selected = selected;
+        label.text = editor_screen_label(screen);
+        bool clear = place(label.text, label.rect);
+        if (!clear) {
+            const std::wstring short_text = ellipsize(wide_from_utf8(screen.id), 24);
+            RECT short_rect{};
+            if (place(short_text, short_rect)) {
+                label.text = short_text;
+                label.rect = short_rect;
+                clear = true;
+            }
+        }
+        if (!clear && !selected) {
+            continue;
+        }
+        blockers.push_back(label.rect);
+        placed.push_back(label);
+    }
+    return placed;
+}
+
 namespace {
 
-void paint_editor_2d(Ui& ui, const RECT& canvas_rect, bool labels) {
+void paint_editor_2d(Ui& ui, const RECT& canvas_rect) {
     const AppState& s = ui.s;
     const Theme& t = ui.t;
     const EditorGeometry geometry = editor_geometry(s.layout, canvas_rect, ui.dpi);
@@ -121,34 +252,22 @@ void paint_editor_2d(Ui& ui, const RECT& canvas_rect, bool labels) {
         ui.c.arc(geometry.head.x, geometry.head.y, static_cast<float>(metres) * geometry.scale, 180.0f, 180.0f,
                  1.0f, t.grid);
     }
-    std::vector<RECT> blockers;
-    if (labels) {
-        for (int angle_deg = -90; angle_deg <= 90; angle_deg += 15) {
-            const float angle = static_cast<float>(angle_deg) * kPi / 180.0f;
-            const float inner = static_cast<float>(ui.px(10));
-            ui.c.line(static_cast<float>(geometry.head.x), static_cast<float>(geometry.head.y),
-                      static_cast<float>(geometry.head.x) + std::sin(angle) * inner,
-                      static_cast<float>(geometry.head.y) - std::cos(angle) * inner, 1.0f, t.border_strong);
-            if (angle_deg == -90 || angle_deg == 0 || angle_deg == 90) {
-                const int label_radius = ui.px(52);
-                wchar_t label[8];
-                std::swprintf(label, std::size(label), L"%d°", angle_deg);
-                RECT text_rect = rect_of(geometry.head.x + static_cast<int>(std::sin(angle) * label_radius) - ui.px(20),
-                                         geometry.head.y - static_cast<int>(std::cos(angle) * label_radius) - ui.px(18),
-                                         ui.px(40), ui.px(16));
-                ui.c.text(ui.f.caption, t.text_faint, text_rect, label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                blockers.push_back(text_rect);
-            }
-        }
+    for (int angle_deg = -90; angle_deg <= 90; angle_deg += 15) {
+        const float angle = static_cast<float>(angle_deg) * kPi / 180.0f;
+        const float inner = static_cast<float>(ui.px(10));
+        ui.c.line(static_cast<float>(geometry.head.x), static_cast<float>(geometry.head.y),
+                  static_cast<float>(geometry.head.x) + std::sin(angle) * inner,
+                  static_cast<float>(geometry.head.y) - std::cos(angle) * inner, 1.0f, t.border_strong);
+    }
+    const std::vector<RECT> captions = editor_2d_captions(geometry, ui.dpi);
+    const wchar_t* const tick_texts[] = {L"-90°", L"0°", L"90°"};
+    for (size_t i = 0; i < std::size(tick_texts); ++i) {
+        ui.c.text(ui.f.caption, t.text_faint, captions[i], tick_texts[i], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     // The wearer.
     ui.c.fill_circle(geometry.head.x, geometry.head.y, static_cast<float>(ui.px(10)), t.accent, 50);
     ui.c.fill_circle(geometry.head.x, geometry.head.y, static_cast<float>(ui.px(5)), t.accent);
-    if (labels) {
-        RECT head_label = rect_of(geometry.head.x - ui.px(40), geometry.head.y + ui.px(8), ui.px(80), ui.px(16));
-        ui.c.text(ui.f.caption, t.text_faint, head_label, L"you", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        blockers.push_back(head_label);
-    }
+    ui.c.text(ui.f.caption, t.text_faint, captions[3], L"you", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     for (size_t index = 0; index < s.layout.screens.size(); ++index) {
         const ScreenLayout& screen = s.layout.screens[index];
         const float yaw = screen.yaw_deg * kPi / 180.0f;
@@ -158,7 +277,7 @@ void paint_editor_2d(Ui& ui, const RECT& canvas_rect, bool labels) {
         const float dx = std::cos(yaw) * half_width;
         const float dy = std::sin(yaw) * half_width;
         const COLORREF tint = screen_tint(screen);
-        const bool selected = labels && index == s.selected_screen;
+        const bool selected = index == s.selected_screen;
         const float thickness = static_cast<float>(selected ? ui.px(7) : ui.px(5));
         const float x0 = static_cast<float>(center.x) - dx;
         const float y0 = static_cast<float>(center.y) - dy;
@@ -178,77 +297,11 @@ void paint_editor_2d(Ui& ui, const RECT& canvas_rect, bool labels) {
                 ui.c.ring(end.x, end.y, r, static_cast<float>(ui.px(2)), t.text);
             }
         }
-        if (!labels) {
-            continue;
-        }
-        const std::wstring label = editor_screen_label(screen);
-        // The label sits beside the screen along its outward normal, far
-        // enough that the text box clears the (possibly angled) line and the
-        // selection halo. Preference: outward, inward (towards the wearer),
-        // then outward or inward pushed back inside the canvas; the first
-        // one inside the canvas that collides with no other label wins.
-        HFONT label_font = selected ? ui.f.small_strong : ui.f.small;
-        const int label_w = text_width(ui.c.dc(), label_font, label) + ui.px(8);
-        const int label_h = ui.px(18);
-        const float nx = std::sin(yaw);
-        const float ny = -std::cos(yaw);
-        const float clearance = std::fabs(nx) * static_cast<float>(label_w) * 0.5f +
-                                std::fabs(ny) * static_cast<float>(label_h) * 0.5f +
-                                (thickness + (selected ? static_cast<float>(ui.px(12)) : 0.0f)) * 0.5f +
-                                static_cast<float>(ui.px(6));
-        const auto label_at = [&](float direction) {
-            const int lx = center.x + static_cast<int>(std::lround(nx * clearance * direction));
-            const int ly = center.y + static_cast<int>(std::lround(ny * clearance * direction));
-            return rect_of(lx - label_w / 2, ly - label_h / 2, label_w, label_h);
-        };
-        const auto inside_canvas = [&](const RECT& r) {
-            return r.left >= canvas_rect.left && r.right <= canvas_rect.right && r.top >= canvas_rect.top &&
-                   r.bottom <= canvas_rect.bottom;
-        };
-        const auto clamp_into_canvas = [&](RECT r) {
-            OffsetRect(&r, std::max(0L, canvas_rect.left - r.left), std::max(0L, canvas_rect.top - r.top));
-            OffsetRect(&r, std::min(0L, canvas_rect.right - r.right), std::min(0L, canvas_rect.bottom - r.bottom));
-            return r;
-        };
-        const auto collides = [&](const RECT& r) {
-            for (const RECT& placed : blockers) {
-                RECT intersection{};
-                RECT inflated = r;
-                InflateRect(&inflated, ui.px(2), ui.px(1));
-                if (IntersectRect(&intersection, &inflated, &placed) != 0) {
-                    return true;
-                }
-            }
-            return false;
-        };
-        const RECT candidates[] = {label_at(1.0f), label_at(-1.0f), clamp_into_canvas(label_at(1.0f)),
-                                   clamp_into_canvas(label_at(-1.0f))};
-        RECT label_rect = candidates[2];
-        bool free_spot = false;
-        for (const RECT& candidate : candidates) {
-            if (inside_canvas(candidate) && !collides(candidate)) {
-                label_rect = candidate;
-                free_spot = true;
-                break;
-            }
-        }
-        // Crowded layouts: step the label down until it is clear, but never
-        // out of the canvas (a clipped label is worse than a close one).
-        const int step = ui.px(17);
-        for (int attempt = 0; !free_spot && attempt < 8; ++attempt) {
-            RECT next = label_rect;
-            OffsetRect(&next, 0, step * (attempt + 1));
-            if (!inside_canvas(next)) {
-                break;
-            }
-            if (!collides(next)) {
-                label_rect = next;
-                free_spot = true;
-            }
-        }
-        blockers.push_back(label_rect);
-        ui.c.text(label_font, selected ? t.text : t.text_dim, label_rect, label,
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    for (const EditorLabel& label :
+         editor_2d_labels(ui.c.dc(), ui.f, s.layout, s.selected_screen, canvas_rect, ui.dpi)) {
+        ui.c.text(label.selected ? ui.f.small_strong : ui.f.small, label.selected ? t.text : t.text_dim, label.rect,
+                  label.text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     ui.c.pop_clip();
 }
@@ -561,7 +614,7 @@ void paint_editor_card(Ui& ui, const RECT& frame) {
         if (s.editor_3d) {
             paint_editor_3d(ui, canvas_rect);
         } else {
-            paint_editor_2d(ui, canvas_rect, true);
+            paint_editor_2d(ui, canvas_rect);
         }
         if (s.focus_visible && s.focus_id == kUiEditorCanvas) {
             draw_focus_ring(ui.c, canvas_rect, ui.px(radius::md));

@@ -81,6 +81,13 @@ std::wstring start_block_reason(const AppState& state, LaunchMode mode) {
         return L"spatial_desk.exe was not found next to this app; build the engine or run "
                L"scripts\\stage-portable.ps1";
     }
+    // The engine loads the same file with the same load_layout() before it
+    // touches any display and exits with "layout load failed" (both modes),
+    // so a start the Layout file check already rejects can only fail.
+    if (!state.diagnostics.layout_ok) {
+        return L"the layout file cannot be used (" + state.diagnostics.layout_detail +
+               L"); fix it on the Layout page and Save and apply";
+    }
     const bool head_tracking =
         mode == LaunchMode::Workspace ||
         (mode == LaunchMode::Preview && !state.config.preview_without_head_tracking);

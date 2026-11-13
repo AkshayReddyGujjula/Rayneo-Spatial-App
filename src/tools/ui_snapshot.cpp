@@ -499,6 +499,43 @@ void render(const Shot& shot, const std::filesystem::path& out_dir) {
                      [](const gt::ui::Hotspot& h) { return h.id == gt::kUiEditorCanvas; })) {
         fail(shot.name, "the Layout page painted no arrangement editor");
     }
+    // 2D editor labels: inside the canvas, clear of each other and of the
+    // fixed captions (yaw ticks, "you"), and the selected screen's is shown.
+    const auto canvas_spot = std::find_if(hotspots.begin(), hotspots.end(),
+                                          [](const gt::ui::Hotspot& h) { return h.id == gt::kUiEditorCanvas; });
+    if (state.page == gt::AppPage::Layout && !state.editor_3d && !state.onboarding.active &&
+        canvas_spot != hotspots.end()) {
+        const RECT canvas_rect = canvas_spot->full;
+        const auto labels = gt::ui::detail::editor_2d_labels(dc, fonts, state.layout, state.selected_screen,
+                                                             canvas_rect, shot.dpi);
+        const auto captions = gt::ui::detail::editor_2d_captions(
+            gt::ui::editor_geometry(state.layout, canvas_rect, shot.dpi), shot.dpi);
+        bool selected_shown = state.selected_screen >= state.layout.screens.size();
+        for (size_t i = 0; i < labels.size(); ++i) {
+            const RECT& a = labels[i].rect;
+            selected_shown = selected_shown || labels[i].selected;
+            if (a.left < canvas_rect.left || a.right > canvas_rect.right || a.top < canvas_rect.top ||
+                a.bottom > canvas_rect.bottom) {
+                fail(shot.name, "editor label of screen " + std::to_string(labels[i].index) + " leaves the canvas");
+            }
+            RECT overlap{};
+            for (size_t j = i + 1; j < labels.size(); ++j) {
+                if (IntersectRect(&overlap, &a, &labels[j].rect) != 0) {
+                    fail(shot.name, "editor labels of screens " + std::to_string(labels[i].index) + " and " +
+                                        std::to_string(labels[j].index) + " overlap");
+                }
+            }
+            for (const RECT& caption : captions) {
+                if (!labels[i].selected && IntersectRect(&overlap, &a, &caption) != 0) {
+                    fail(shot.name, "editor label of screen " + std::to_string(labels[i].index) +
+                                        " covers a caption");
+                }
+            }
+        }
+        if (!selected_shown) {
+            fail(shot.name, "the selected screen's editor label is missing");
+        }
+    }
     std::printf("  [%s] %s: %dx%d @%u%% %s, %d interactive\n", failures == 0 ? "ok" : "..",
                 shot.name.c_str(), shot.width, shot.height, shot.dpi * 100 / 96, shot.dark ? "dark" : "light",
                 interactive);
@@ -782,6 +819,25 @@ std::vector<Shot> shots() {
                         s.diagnostics.layout_ok = false;
                         s.diagnostics.layout_detail = L"config/layouts/default.json: screen 2 overlaps screen 1";
                         s.page = AppPage::Home;
+                    },
+                    // The engine exits with "layout load failed" on this file in
+                    // either mode, so Home must not offer a start.
+                    [](const std::string& name, const AppState& s, const uint32_t*, const auto& hotspots) {
+                        for (const int id : {static_cast<int>(gt::kUiStartWorkspace),
+                                             static_cast<int>(gt::kUiStartPreview)}) {
+                            const auto spot = std::find_if(hotspots.begin(), hotspots.end(),
+                                                           [id](const gt::ui::Hotspot& h) { return h.id == id; });
+                            if (spot == hotspots.end() || spot->enabled) {
+                                fail(name, "start button " + std::to_string(id) +
+                                               " is offered although the layout file cannot load");
+                            }
+                        }
+                        const gt::LaunchMode modes[] = {gt::LaunchMode::Workspace, gt::LaunchMode::Preview};
+                        for (const gt::LaunchMode mode : modes) {
+                            if (gt::start_block_reason(s, mode).empty()) {
+                                fail(name, "start_block_reason is empty with a broken layout file");
+                            }
+                        }
                     }});
     // The smallest window the controller allows (760x560 outer, about
     // 744x521 client), every page, with six user presets: the Layout page
