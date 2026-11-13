@@ -100,7 +100,8 @@ void ImuSource::run() {
     }
     bool raw_log_opened = false;
     // Session epoch of the published pose (see orientation(epoch)): each
-    // connection's estimator starts from a fresh reference.
+    // connection's estimator starts from a fresh reference, and so does each
+    // applied recenter.
     uint32_t session_epoch = 0;
     while (running_.load()) {
         // Until this connection delivers its first sample the wearer is
@@ -163,6 +164,11 @@ void ImuSource::run() {
         while (running_.load()) {
             if (recenter_request_.exchange(false)) {
                 estimator.recenter();
+                // The next published pose is the recentered one: a view step,
+                // not a turn. The engine resets its smoother when it requests
+                // the recenter, but its frame may still sample the pose from
+                // before this point; the new epoch arrives with the step itself.
+                ++session_epoch;
             }
             uint8_t buffer[64] = {};
             const int n = device.read_report(buffer, sizeof(buffer), 100);

@@ -1654,6 +1654,57 @@ int main() {
               std::fabs(guarded.second - plain.second), 1e-3f);
     }
 
+    std::printf("\n-- scenario 30: a recenter that lands one frame after the smoother reset --\n");
+    {
+        // The engine resets the smoother when it asks ImuSource to recenter,
+        // but the IMU thread applies the recenter only at its next loop and
+        // publishes the recentered pose a sample later (2-4 ms, up to the
+        // 100 ms read timeout on a USB stall). A frame sampled inside that
+        // interval reseeds the smoother with the pre-recenter pose, so the
+        // view steps one frame later, which the prediction read as a turn.
+        // ImuSource starts a new session epoch when the recenter is applied,
+        // so the epoch changes on the stepped pose itself.
+        constexpr float kFrameDt = 1.0f / 60.0f;
+        constexpr float kStepDeg = 30.0f;
+        auto run = [&](float predict_s, bool epoch_on_recenter) {
+            PoseSmoother smoother;
+            PoseSmoother::Config scfg;
+            apply_reading_hold(kReadingHoldDefault, scfg);
+            scfg.predict_s = predict_s;
+            smoother.configure(scfg);
+            const float half = 0.5f * kStepDeg * kPi / 180.0f;
+            const Quat before{std::cos(half), 0.0f, 0.0f, std::sin(half)};
+            const Quat recentered{1.0f, 0.0f, 0.0f, 0.0f};
+            for (int f = 0; f < 120; ++f) {
+                smoother.note_source_epoch(1);
+                smoother.update(before, kFrameDt);
+            }
+            smoother.reset();  // the engine's recenter handler
+            smoother.note_source_epoch(1);
+            smoother.update(before, kFrameDt);  // sampled before the IMU applied it
+            const uint32_t epoch = epoch_on_recenter ? 2u : 1u;
+            float overshoot = 0.0f;
+            float last = 0.0f;
+            for (int f = 0; f < 120; ++f) {
+                smoother.note_source_epoch(epoch);
+                last = quat_to_euler(smoother.update(recentered, kFrameDt)).yaw_deg;
+                overshoot = std::max(overshoot, -last);  // past straight ahead
+            }
+            return std::make_pair(overshoot, last);
+        };
+        const auto plain = run(0.0f, false);
+        const auto unguarded = run(PoseSmoother::Config{}.predict_s, false);
+        const auto guarded = run(PoseSmoother::Config{}.predict_s, true);
+        std::printf("  overshoot past straight ahead after a late %.0f deg recenter: %.3f deg without "
+                    "prediction, %.3f deg predicted with no recenter epoch, %.3f deg with it (settled %.3f deg)\n",
+                    kStepDeg, plain.first, unguarded.first, guarded.first, std::fabs(guarded.second));
+        check(guarded.first <= plain.first + 1e-4f, "a late recenter step adds no predicted overshoot",
+              guarded.first, plain.first + 1e-4f);
+        check(std::fabs(guarded.second - plain.second) < 1e-3f,
+              "the view settles exactly as without prediction (hold included)",
+              std::fabs(guarded.second - plain.second), 1e-3f);
+    }
+
     std::printf("\npose_scenarios: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

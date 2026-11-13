@@ -71,7 +71,10 @@ public:
     // last pose of the old session (frozen while the glasses reconnected and
     // recalibrated) to straight ahead. That step is not head motion, so the
     // prediction restarts exactly as for restart_prediction(); the 1-euro and
-    // the reading hold still ease the step in as before.
+    // the reading hold still ease the step in as before. An applied recenter
+    // also starts a new epoch: reset() runs when the recenter is requested,
+    // but the frame after it may still sample the pre-recenter pose, so the
+    // step arrives one frame later, with the new epoch.
     void note_source_epoch(uint32_t epoch) {
         if (have_source_epoch_ && epoch != source_epoch_) {
             restart_prediction_ = true;
