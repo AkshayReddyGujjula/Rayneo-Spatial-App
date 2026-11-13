@@ -170,6 +170,9 @@ std::vector<std::string> calibration_tool_arguments(CalFlow flow, const std::str
         if (earbuds) {
             arguments.push_back("--earbuds");
         }
+    } else {
+        arguments.push_back("--repeats");
+        arguments.push_back(std::to_string(kCalHeadRepeats));
     }
     arguments.push_back("--output");
     arguments.push_back(output_path);

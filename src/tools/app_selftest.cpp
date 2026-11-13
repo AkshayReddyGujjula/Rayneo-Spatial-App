@@ -1380,9 +1380,9 @@ void test_calibration_progress() {
     // In-app runs use the tool's --auto mode (orientation_calibrate.cpp).
     const std::vector<std::string> head_args =
         gt::calibration_tool_arguments(gt::CalFlow::Orientation, "C:\\c\\orientation.json", true);
-    check(head_args == std::vector<std::string>{"--progress-json", "--auto", "--auto-delay", "5", "--output",
-                                                "C:\\c\\orientation.json"},
-          "head calibration runs --progress-json --auto --auto-delay 5 --output FILE (no --earbuds)");
+    check(head_args == std::vector<std::string>{"--progress-json", "--auto", "--auto-delay", "5", "--repeats", "3",
+                                                "--output", "C:\\c\\orientation.json"},
+          "head calibration runs --progress-json --auto --auto-delay 5 --repeats 3 --output FILE (no --earbuds)");
     check(gt::calibration_tool_arguments(gt::CalFlow::Mag, "o.json", false) ==
                   std::vector<std::string>{"--progress-json", "--auto", "--auto-delay", "5", "--mag", "--output",
                                            "o.json"} &&

@@ -61,8 +61,14 @@ inline constexpr const char* kCalProgressPrefix = "@@progress";
 // cancels through the tool's own path (IMU stream off, exit 1).
 inline constexpr int kCalAutoDelayS = 5;
 
+// In-app head calibration does each turn, nod and tilt this many times; the
+// tool drops an outlier and averages the rest (docs/overnight/r2-calibration.md:
+// modelled error 1.90 -> 1.14 deg mean, about 21 s longer). Owner's choice.
+inline constexpr int kCalHeadRepeats = 3;
+
 // orientation_calibrate.exe arguments for an in-app run:
-//   --progress-json --auto --auto-delay 5 [--mag [--earbuds]] --output FILE
+//   --progress-json --auto --auto-delay 5 --repeats 3 --output FILE        (head)
+//   --progress-json --auto --auto-delay 5 --mag [--earbuds] --output FILE (compass)
 std::vector<std::string> calibration_tool_arguments(CalFlow flow, const std::string& output_path,
                                                     bool earbuds);
 

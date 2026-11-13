@@ -444,7 +444,8 @@ reports with all numbers and rejected ideas: `docs/overnight/track-a.md` (estima
 - **Round 2:** review-and-fix pass (bugs 29-31), gravity-verified single-episode startup
   confirmation (bug 28), opt-in calibration `--repeats N` with robust averaging and a stored
   orientation quality shown as Good / Fair / Retry recommended (`docs/orientation-calibration.md`
-  section 10; modelled error 1.90 -> 1.14 deg mean at N = 3; the in-app wizard still uses 1).
+  section 10; modelled error 1.90 -> 1.14 deg mean at N = 3; the in-app calibration uses `--repeats 3` by the owner's decision, `kCalHeadRepeats`; the tool's
+  own default stays 1).
 - **Round 3:** UI fixes (bug 31), a visual QA pass (all theme text pairs >= WCAG AA, checked by
   `ui_snapshot`; `docs/overnight/r3-ui-qa.md`), and an independent maths review that found bug 32
   (`docs/overnight/r3-maths-review.md`; calibration repeats reviewed, nothing provable).

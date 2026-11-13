@@ -55,7 +55,7 @@ int body_welcome(Ui& ui, int left, int top, int width) {
                      L"A quick, read-only look at the display, sensor and driver.") +
          ui.px(space::lg);
     y += feature_row(ui, left, y, width, glyph::tracking, L"Calibrate head tracking",
-                     L"About a minute of guided head movements, then an optional compass step.") +
+                     L"About a minute and a half of guided head movements, then an optional compass step.") +
          ui.px(space::lg);
     y += feature_row(ui, left, y, width, glyph::layout, L"Pick a layout",
                      L"Start with one, three or more screens; fine-tune any time on the Layout page.") +
@@ -119,7 +119,8 @@ int body_calibration(Ui& ui, int left, int top, int width, CalFlow flow) {
         y += paragraph(ui, rect_of(left, y, width, 0), ui.f.body, ui.t.text_dim,
                        L"Put the glasses on and sit upright facing your desk. The guide asks you to hold still, "
                        L"turn, nod and tilt; each step starts by itself after a short countdown, so you never "
-                       L"need the keyboard. It takes about a minute and only replaces the saved calibration if "
+                       L"need the keyboard. Each movement is done three times for accuracy. It takes about a "
+                       L"minute and a half and only replaces the saved calibration if "
                        L"it succeeds.");
     }
     y += ui.px(space::lg);

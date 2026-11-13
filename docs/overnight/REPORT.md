@@ -94,10 +94,10 @@ when the app measures the sensor at start-up, and nothing told you to keep still
 - The glasses themselves show no prompt yet (the renderer has no way to draw text). A possible
   follow-up: keep the screens dimmed until tracking starts, as a "you can move now" cue.
 
-## Decision for you
-- **Calibration repeats in the app:** should in-app calibration use 3 repeats by default? It adds
-  about 21 seconds for the 40% accuracy gain. I left it at 1 because it lengthens the flow; it is a
-  two-line change (`calibration_tool_arguments` in `src/app_shell/calibration_progress.cpp`).
+## Your decisions
+- **Calibration repeats in the app: 3** (your call in the morning). In-app head calibration now
+  asks for each turn, nod and tilt three times (about a minute and a half in total); the setup
+  guide and Tracking page say so. The console tool's own default stays 1.
 
 ## Try this first with the glasses
 1. Open the app: does the setup guide appear, do hover/drag/scroll feel right, does CPU go to ~0 %

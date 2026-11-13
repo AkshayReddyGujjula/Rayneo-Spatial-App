@@ -692,7 +692,7 @@ int tracking_card_calibration(Ui& ui, int left, int top, int width, CalFlow flow
         mag ? L"Gives the glasses a magnetic reference so the centre screen cannot slowly drift sideways. "
               L"Optional; do it wearing what you normally wear, earbuds included, away from magnets."
             : L"Teaches the app how the sensor sits on your head. Wear the glasses, sit upright and follow "
-              L"the prompts; it takes about a minute.";
+              L"the prompts (each movement three times); it takes about a minute and a half.";
     std::wstring status;
     Severity severity = Severity::Neutral;
     if (!mag) {
