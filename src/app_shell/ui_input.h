@@ -22,6 +22,25 @@ inline std::wstring engine_start_calibration_block(bool calibration_active) {
     return std::wstring();
 }
 
+// "Run setup guide" (Settings). Opening the guide starts it afresh and clears
+// the calibration panel; doing that under a live in-app calibration would
+// orphan the run: its progress lines are ignored by the cleared (Idle)
+// state, the Cancel button and the glasses guide disappear, and the engine
+// start stays refused for a calibration the user can no longer see or
+// cancel. So the guide does not open while the tool process exists
+// (`calibration_active`, which includes the post-cancel shutdown wait) or
+// the run is still marked running. Returns whether the guide opened; the
+// caller then resets the guide's scroll and re-runs the health checks.
+template <typename State>
+bool open_setup_guide(State& state, bool calibration_active) {
+    if (calibration_active || state.cal_run.running()) {
+        return false;
+    }
+    state.onboarding.start();
+    state.cal_run = decltype(state.cal_run){};
+    return true;
+}
+
 // What the drag-end half of a button-up left to do.
 struct PointerDragEnd {
     bool ended = false;          // a drag was active and is now over

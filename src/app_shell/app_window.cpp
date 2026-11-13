@@ -1490,8 +1490,12 @@ void AppWindow::execute(int id, int arg) {
     }
     switch (id) {
         case kUiRunSetupGuide:
-            state_.onboarding.start();
-            state_.cal_run = CalRunState{};
+            if (!open_setup_guide(state_, calibration_.active())) {
+                state_.show_toast(L"Finish or cancel the calibration first");
+                invalidate();
+                update_animation_timer();
+                return;
+            }
             state_.scroll[kScrollWizard].offset = 0;
             refresh_health(true);
             invalidate();
