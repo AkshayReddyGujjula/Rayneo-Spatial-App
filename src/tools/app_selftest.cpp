@@ -1687,6 +1687,12 @@ struct PointerFixture {
     int drag_splitter = -1;
 };
 
+// Stand-in for the AppState members open_setup_guide() touches.
+struct GuideFixture {
+    gt::OnboardingFlow onboarding;
+    gt::CalRunState cal_run;
+};
+
 // Input and engine-start decisions AppWindow delegates to ui_input.h.
 void test_ui_input() {
     std::printf("app_selftest: engine-start gate and pointer input\n");
@@ -1698,6 +1704,14 @@ void test_ui_input() {
           "the refusal tells the user the calibration is the reason");
     check(gt::engine_start_calibration_block(false).empty(),
           "an engine start is allowed when no calibration is running");
+    // "Open in console" needs the sensor too: refused beside a running
+    // engine and beside an in-app run (also one still shutting down).
+    check(!gt::console_calibration_block(true, false).empty(),
+          "a console calibration is refused while the engine runs");
+    check(!gt::console_calibration_block(false, true).empty(),
+          "a console calibration is refused while an in-app calibration is running");
+    check(gt::console_calibration_block(false, false).empty(),
+          "a console calibration may start when the sensor is free");
 
     // Losing mouse capture mid-drag (Alt+Tab) must end the drag exactly as a
     // button-up would, or the next plain mouse move keeps dragging.
@@ -1763,6 +1777,35 @@ void test_ui_input() {
     check(!gt::pointer_on_mouse_leave(dragging) && dragging.press_id == 42 &&
               dragging.hover_id == 42,
           "a captured drag keeps its pressed look and hover when the pointer leaves");
+
+    // "Run setup guide" under a live in-app calibration (started on the
+    // Tracking page, then Settings): opening the guide used to clear the run
+    // state, orphaning the tool - its progress was then ignored, Cancel and
+    // the glasses guide vanished, and engine starts stayed refused for a
+    // calibration nobody could see. The guide must not open until it ends.
+    GuideFixture live;
+    live.cal_run.begin(gt::CalFlow::Orientation, true, 5.0);
+    check(!gt::open_setup_guide(live, true), "the setup guide does not open during a calibration");
+    check(live.cal_run.running() && live.cal_run.flow == gt::CalFlow::Orientation && !live.onboarding.active,
+          "a refused guide leaves the live calibration run (and its Cancel) intact");
+    live.cal_run.process_exited(1);
+    check(live.cal_run.phase == gt::CalRunState::Phase::Failed,
+          "the run still sees its own exit after the refused guide");
+    GuideFixture cancelling;
+    cancelling.cal_run.begin(gt::CalFlow::Mag, true, 5.0);
+    cancelling.cal_run.cancel();
+    check(!gt::open_setup_guide(cancelling, true),
+          "the guide also waits out a cancelled tool that has not exited yet");
+    GuideFixture marked;
+    marked.cal_run.begin(gt::CalFlow::Orientation, true, 5.0);
+    check(!gt::open_setup_guide(marked, false), "a run still marked running blocks the guide");
+    GuideFixture idle_guide;
+    idle_guide.cal_run.start_failed("old failure");
+    idle_guide.onboarding.step = gt::OnboardingStep::Done;
+    check(gt::open_setup_guide(idle_guide, false) && idle_guide.onboarding.active &&
+              idle_guide.onboarding.step == gt::OnboardingStep::Welcome &&
+              idle_guide.cal_run.phase == gt::CalRunState::Phase::Idle,
+          "with no calibration the guide opens at Welcome and clears a finished run's panel");
 }
 
 // Startup phase keys (status file "phase" / "phase_progress") and the Home
