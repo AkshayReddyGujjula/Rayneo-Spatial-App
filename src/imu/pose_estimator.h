@@ -69,6 +69,35 @@ public:
         // good. <= 0 disables it.
         float startup_confirm_s = 60.0f;
         float startup_confirm_agree_degs = 0.3f;
+        // Gravity-verified single episode. One long rest episode cannot vote
+        // twice, so a contaminated startup followed by one continuous rest
+        // (the recorded 2026-09-25 start: 28 windows at the true bias) was
+        // left to the slow escape. A gyro alone cannot tell that rest from a
+        // steady slow turn, but the accelerometer can for every axis except
+        // the vertical: any real rotation turns gravity in the sensor frame
+        // exactly as the gyro says, unless it is about gravity itself. So
+        // when the episode's mean disagrees with the current bias by more
+        // than the routine cap, its horizontal part (perpendicular to
+        // gravity) is at least startup_episode_tilt_degs and is carried by
+        // the rotation the bias in use integrates over every sample of the
+        // episode (at least half of it), that rotation would swing gravity by
+        // at least startup_episode_predict_min_deg, and the observed gravity
+        // direction moved by at most startup_episode_observed_ratio of that
+        // prediction, the startup bias is proven wrong by more than routine
+        // authority and the episode (startup window excluded) replaces it.
+        // Measured on the 2026-09-25 replay (870 starts): 60 s gyro-only
+        // drift mean 7.13 -> 6.52 deg, 52 starts better / 4 worse by > 3 deg;
+        // the exposure (a contaminated startup AND a coincident slow level
+        // turn in the same episode) is pose_scenarios 27.
+        // A pure yaw turn, at any head tilt, predicts gravity rotation only
+        // through its tilted axis - and then really rotates gravity - so a
+        // single slow turn can never pass. The vertical part rides on that
+        // evidence; the snapshot for a revert is the startup bias with only
+        // its horizontal part corrected. <= 0 span disables the rule.
+        float startup_episode_min_s = 10.0f;
+        float startup_episode_tilt_degs = 0.35f;
+        float startup_episode_predict_min_deg = 5.0f;
+        float startup_episode_observed_ratio = 0.3f;
         // Legacy floors kept for existing callers/tools: the warmup must also
         // consume this many samples, and the calibration window must also hold
         // this many contiguous samples.
@@ -192,6 +221,8 @@ public:
     // 0 or 1 per startup).
     uint32_t startup_reseeds() const { return startup_reseeds_; }
     uint32_t startup_reverts() const { return startup_reverts_; }
+    // How many of startup_reseeds() came from one gravity-verified episode.
+    uint32_t startup_episode_reseeds() const { return startup_episode_reseeds_; }
     // Instantaneous rest conditions (both deviation gates inside the enter
     // thresholds); `still()` is the dwell-qualified rest state.
     bool rest() const { return rest_now_; }
@@ -222,8 +253,9 @@ private:
     void step_bias(const Vec3& target, float k, float max_step);
     void finish_calibration();
     void reset_calibration_window();
-    bool accumulate_calibration_window(const Vec3& raw, float dt, bool qualifies);
-    void confirm_startup_window(const Vec3& mean);
+    bool accumulate_calibration_window(const Vec3& raw, const Vec3& accel, float dt, bool qualifies);
+    void confirm_startup_window(const Vec3& mean, const Vec3& accel_mean);
+    bool confirm_single_episode(int current, const Vec3& accel_mean);
     void reset_escape();
     Vec3 confirm_episode_mean(int index) const;
     void set_reference(const Quat& q);
@@ -243,6 +275,7 @@ private:
     float calibration_run_s_ = 0.0f;
     int calibration_run_samples_ = 0;
     Vec3 calibration_sum_;
+    Vec3 calibration_accel_sum_;
     // Startup confirmation: per rest episode (index 0 opens with the startup
     // window), the sum and count of its calibration-grade window means.
     static constexpr int kMaxConfirmEpisodes = 8;
@@ -260,6 +293,19 @@ private:
     int confirm_pair_last_ = -1;
     uint32_t startup_reseeds_ = 0;
     uint32_t startup_reverts_ = 0;
+    uint32_t startup_episode_reseeds_ = 0;
+    // Gravity-verified single episode: the current rest episode's windows
+    // after the startup window (episode id, sum and count of window means,
+    // the first window's gravity direction and completion time).
+    bool single_active_ = false;
+    uint32_t single_episode_ = 0;
+    Vec3 single_sum_;
+    int single_windows_ = 0;
+    Vec3 single_first_gravity_;
+    float single_first_s_ = 0.0f;
+    // Sensor rotation since that first window, integrated sample by sample
+    // with the bias in use: the motion the current bias claims happened.
+    Quat single_rotation_;
     // Counts detected motion events; a window's rest episode is the count at
     // its completion (motion breaks any open window, so a window never spans
     // two episodes).
