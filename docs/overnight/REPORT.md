@@ -59,6 +59,11 @@ It does nothing while you read (reading output is identical to before).
   - a slider/screen drag could stick after Alt+Tab; a button could stay drawn pressed;
   - two test suites failed when run at the same time (one cause was real: session logs could be
     left unarchived).
+- **Visual check of every screen** (both themes, 150 % scaling, narrow windows): all text now
+  meets the WCAG AA contrast standard (the dark-theme primary button is a slightly deeper blue),
+  cut-off help text now wraps, screen labels in the arrangement editor no longer sit on the
+  screens, and the setup-guide step labels line up. The renderer now fails the build if any colour
+  pair drops below AA. Before/after images: `docs/overnight/ui-qa/`.
 - **More accurate head calibration (opt-in):** `--repeats N` has you do each turn, nod and tilt N
   times; outliers are thrown out and the rest averaged. Simulated error 1.9 -> 1.1 deg with 3
   repeats (about 21 s longer). After every calibration the app now shows **Calibration quality:
