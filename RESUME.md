@@ -11,6 +11,11 @@ Started 2026-11-12 ~22:55 local. Hard stop 10:30 local (2026-11-13) — changed 
 - [x] Integrate track branches into `overnight-claude-improvements`, full suite, docs, report
 - [x] Round 2 (R2-A review, R2-B calibration repeats, R2-C single-episode startup) and round 3 (R3-A UI bugs,
       R3-B visual QA, R3-C maths review) merged; 11/11 green.
+- [x] Round 4 (R4-A startup phases + hold-still prompt, R4-B plain wording) merged (dc5f8c7); 11/11 green,
+      clean from-scratch rebuild 0 warnings.
+- [x] RUN COMPLETE at ~05:10. Nothing left on the plan that can be verified without the glasses. Remaining
+      items all need a person with the glasses (see docs/overnight/REPORT.md "Try this first") or a user
+      decision (calibration repeats default). Agent worktrees/branches under .claude/worktrees are kept (not deleted).
 
 ## Integration TODO (orchestrator)
 1. DONE: Track B merged (imu_replay.cpp conflict resolved by keeping both tool sets).

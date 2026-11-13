@@ -457,6 +457,10 @@ reports with all numbers and rejected ideas: `docs/overnight/track-a.md` (estima
   still**, to prevent the contaminated startup window of bug 26 at the source. The glasses show no
   prompt (the renderer has no text path). Read-only accessors only: estimator output unchanged.
   `docs/overnight/r4-startup-phases.md`.
+- **Wording:** normal pages use display formatters (`engine_status_display_summary`,
+  `layout_display_summary`, `format_degrees`, `calibration_saved_text`); Diagnostics, logs, the
+  status file and tool output keep the technical forms (`engine_status_summary`, `layout_summary`).
+  Non-ASCII glyphs (degree sign, middle dot, U+2212 minus) are written as `\u` escapes.
 - **Needs a person with the glasses:** the live window's message paths, real startup reseeds
   (engine log `startup confirmation: reseeds=N reverts=M`), the prediction horizon (overshoot vs
   trail on a quick turn), calibration cancel turning the stream off, the 5 s auto delay, the
