@@ -69,7 +69,20 @@ std::vector<std::string> calibration_tool_arguments(CalFlow flow, const std::str
 // Plain-language text for a tool failure/retry detail ("CODE: message ...").
 // Known setup codes (no device, stream, save, ...) get a fix-it sentence;
 // otherwise the code prefix is dropped and the tool's own sentence is kept.
+// The tool's raw axis metrics in parentheses ("(up_vs_yaw 6.10 deg, ...)") are
+// dropped and "deg" reads as "°" (cal_user_units); the raw detail stays in
+// CalRunState::detail and the Diagnostics activity log.
 std::string cal_reason_text(const std::string& detail);
+
+// "deg/s" -> "°/s" and a standalone "deg" -> "°" in tool text shown to the user
+// ("excursion 30.0 deg" -> "excursion 30.0°"). Words such as "degrees" are kept.
+std::string cal_user_units(const std::string& text);
+
+// The plain-language line under "Calibration saved" / "Compass calibrated",
+// chosen from the same Good / Fair / Retry bands as the quality line above it
+// (0.7 and 0.4). The tool's raw detail only adds the follow-ups it signals
+// (compass not calibrated yet; thin compass coverage and which way to move).
+std::string calibration_saved_text(CalFlow flow, float quality, const std::string& detail);
 
 // flow and state are required. step/steps default to 0, prompt/detail to
 // empty, quality to -1; a present field of the wrong type makes the line

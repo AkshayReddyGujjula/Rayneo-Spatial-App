@@ -537,13 +537,17 @@ void paint_editor_card(Ui& ui, const RECT& frame) {
     // Hint and layout summary share one row when both fit; otherwise the
     // hint wraps across the full width and the summary goes on its own line
     // below, so neither is cut off.
-    const std::wstring summary = wide_from_utf8(layout_summary(s.layout));
+    const std::wstring summary = wide_from_utf8(layout_display_summary(s.layout));
     const int row_w = rw(frame) - pad * 2;
     const int line_h = ui.px(24);
     const int summary_full_w = text_width(ui.c.dc(), ui.f.caption, summary);
     const bool one_row = text_width(ui.c.dc(), ui.f.caption, hint) + ui.px(space::lg) + summary_full_w <= row_w;
     const int hint_text_h = one_row ? 0 : wrapped_text_height(ui.c.dc(), ui.f.caption, row_w, hint);
-    const int hint_h = one_row ? line_h : ui.px(space::xs) + hint_text_h + line_h;
+    // On its own line the summary wraps rather than being cut short at narrow widths.
+    const bool summary_wraps = !one_row && summary_full_w > row_w;
+    const int summary_h = summary_wraps ? wrapped_text_height(ui.c.dc(), ui.f.caption, row_w, summary) + ui.px(space::xs)
+                                        : line_h;
+    const int hint_h = one_row ? line_h : ui.px(space::xs) + hint_text_h + summary_h;
     const int quick_h = quick ? ui.px(size::slider) * 2 + ui.px(space::md) + ui.px(size::control) + ui.px(space::md) : 0;
     RECT canvas_rect{frame.left + pad, top + bar_h + ui.px(space::lg), frame.right - pad,
                      frame.bottom - pad - hint_h - ui.px(space::sm) - quick_h};
@@ -576,8 +580,14 @@ void paint_editor_card(Ui& ui, const RECT& frame) {
     } else {
         ui.c.text(ui.f.caption, t.text_faint, rect_of(frame.left + pad, hint_y + ui.px(space::xs), row_w, hint_text_h),
                   hint, DT_LEFT | DT_TOP | DT_WORDBREAK);
-        ui.c.text(ui.f.caption, t.text_dim, rect_of(frame.left + pad, hint_y + ui.px(space::xs) + hint_text_h, row_w, line_h),
-                  summary, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        const RECT summary_rect = rect_of(frame.left + pad, hint_y + ui.px(space::xs) + hint_text_h, row_w, summary_h);
+        if (summary_wraps) {
+            ui.c.text(ui.f.caption, t.text_dim, rect_of(summary_rect.left, summary_rect.top + ui.px(space::xs), row_w,
+                                                        summary_h - ui.px(space::xs)),
+                      summary, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        } else {
+            ui.c.text(ui.f.caption, t.text_dim, summary_rect, summary, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
     }
     if (!quick) {
         return;

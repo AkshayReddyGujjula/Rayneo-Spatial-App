@@ -361,7 +361,7 @@ int paint_readiness(Ui& ui, int left, int top, int width) {
 int paint_layout_glance(Ui& ui, int left, int top, int width) {
     const int pad = ui.px(space::xl);
     const int preview_h = ui.px(150);
-    std::wstring summary = wide_from_utf8(layout_summary(ui.s.layout));
+    std::wstring summary = wide_from_utf8(layout_display_summary(ui.s.layout));
     if (ui.s.layout_dirty) {
         summary += L"  ·  unsaved changes";
     }
@@ -1121,10 +1121,8 @@ int paint_calibration_run(Ui& ui, int left, int top, int width, bool draw) {
             }
             y += ui.px(20) + ui.px(space::xs);
         }
-        const std::wstring detail = !run.detail.empty() ? wide_from_utf8(run.detail)
-                                    : !run.prompt.empty() ? wide_from_utf8(run.prompt)
-                                                          : std::wstring(L"The new calibration is in use from the next start.");
-        text_block(ui.f.body, t.text_dim, detail);
+        // Plain words here; the tool's raw metrics go to the Diagnostics activity log.
+        text_block(ui.f.body, t.text_dim, wide_from_utf8(calibration_saved_text(run.flow, run.quality, run.detail)));
         if (!ui.s.cal_in_wizard) {
             y += ui.px(space::lg);
             if (draw) {

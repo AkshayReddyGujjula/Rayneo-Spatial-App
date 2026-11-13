@@ -1917,8 +1917,15 @@ void AppWindow::on_calibration_output() {
     if (drain.exited) {
         state_.cal_run.process_exited(drain.exit_code);
         const bool succeeded = state_.cal_run.phase == CalRunState::Phase::Succeeded;
-        add_event(std::wstring(state_.cal_run.flow == CalFlow::Mag ? L"compass" : L"head") +
-                  L" calibration finished: " +
+        const std::wstring which = state_.cal_run.flow == CalFlow::Mag ? L"compass" : L"head";
+        // The tool's raw detail (axis metrics, field figures) is kept on the
+        // Diagnostics activity log, on its own line so it is not cut short;
+        // the calibration panel shows plain words.
+        const std::string& raw = state_.cal_run.detail;
+        if (!raw.empty() && raw != state_.cal_run.failure && raw != "cancelled") {
+            add_event(which + L" calibration detail: " + wide_from_utf8(raw));
+        }
+        add_event(which + L" calibration finished: " +
                   (succeeded ? L"saved" : wide_from_utf8(state_.cal_run.failure)));
         if (succeeded) {
             if (state_.onboarding.active) {

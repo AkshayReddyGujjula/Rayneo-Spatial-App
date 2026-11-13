@@ -284,7 +284,7 @@ EngineView engine_view(const AppState& state, const Theme& theme) {
                                 ? L"Your workspace is running"
                                 : L"The engine is running";
             if (state.engine_status.parsed) {
-                view.detail = wide_from_utf8(engine_status_summary(state.engine_status));
+                view.detail = wide_from_utf8(engine_status_display_summary(state.engine_status));
             } else {
                 view.detail = L"Put the glasses on and look around. Recenter whenever the centre "
                               L"screen drifts.";
@@ -358,7 +358,8 @@ std::vector<HealthItem> health_items(const AppState& state) {
             item.detail = wide_from_utf8(engine.last_error);
             item.severity = Severity::Error;
         } else if (state.engine_status.parsed) {
-            item.detail = wide_from_utf8(engine_status_summary(state.engine_status));
+            item.detail = wide_from_utf8(engine_status_display_summary(state.engine_status));
+            item.raw = wide_from_utf8(engine_status_summary(state.engine_status));
             item.severity = Severity::Ok;
         } else if (state.engine.busy()) {
             item.detail = L"Engine window found; waiting for its status file.";

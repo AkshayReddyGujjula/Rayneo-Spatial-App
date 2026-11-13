@@ -500,6 +500,18 @@ bool set_layout_field(Layout& layout, ScreenLayout& screen, LayoutField field, f
     return validate_layout(layout, error);
 }
 
+std::string format_degrees(double value) {
+    // Whole degrees; -0.4 shows as 0, not "-0". A negative value gets a real
+    // minus sign (U+2212), which lines up with the digits in Segoe UI.
+    double rounded = std::round(value);
+    if (rounded == 0.0) {
+        rounded = 0.0;
+    }
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%.0f", std::fabs(rounded));
+    return std::string(rounded < 0.0 ? "−" : "") + buffer + "°";
+}
+
 std::string format_layout_field_value(LayoutField field, float value) {
     char buffer[48];
     switch (field) {
@@ -509,8 +521,7 @@ std::string format_layout_field_value(LayoutField field, float value) {
         case LayoutField::Fov:
         case LayoutField::EnterDeg:
         case LayoutField::LeaveDeg:
-            std::snprintf(buffer, sizeof(buffer), "%.0f deg", static_cast<double>(value));
-            break;
+            return format_degrees(static_cast<double>(value));
         case LayoutField::Distance:
         case LayoutField::Width:
         case LayoutField::Height:
@@ -546,6 +557,32 @@ std::string layout_summary(const Layout& layout) {
                   layout.capture_policy.active_fps, layout.capture_policy.mid_fps,
                   layout.capture_policy.idle_fps);
     return std::string(buffer);
+}
+
+std::string layout_display_summary(const Layout& layout) {
+    if (layout.screens.empty()) {
+        return "No screens";
+    }
+    float minimum_yaw = layout.screens.front().yaw_deg;
+    float maximum_yaw = layout.screens.front().yaw_deg;
+    for (const ScreenLayout& screen : layout.screens) {
+        minimum_yaw = std::min(minimum_yaw, screen.yaw_deg);
+        maximum_yaw = std::max(maximum_yaw, screen.yaw_deg);
+    }
+    const char* separator = "  ·  ";
+    const size_t count = layout.screens.size();
+    std::string summary = std::to_string(count) + (count == 1 ? " screen" : " screens");
+    const std::string low = format_degrees(static_cast<double>(minimum_yaw));
+    const std::string high = format_degrees(static_cast<double>(maximum_yaw));
+    summary += separator;
+    summary += low == high ? "at " + low : "arc " + low + " to " + high;
+    summary += separator;
+    summary += format_degrees(static_cast<double>(layout.fov_deg)) + " field of view";
+    summary += separator;
+    summary += std::to_string(layout.capture_policy.active_fps) + "/" +
+               std::to_string(layout.capture_policy.mid_fps) + "/" +
+               std::to_string(layout.capture_policy.idle_fps) + " fps capture";
+    return summary;
 }
 
 namespace {

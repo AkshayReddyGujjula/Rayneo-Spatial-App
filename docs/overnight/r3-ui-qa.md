@@ -91,3 +91,52 @@ All 27 frames re-rendered and inspected after the fixes; hotspot checks (inside 
 overlaps, help topics) PASS, contrast check PASS. 11/11 ctest, no new warnings. Not verified:
 the live window (hover/press colours of the new `accent_fill` are rendered only at rest), and
 ClearType on a real light-theme panel.
+
+## Wording pass (R4-B)
+
+Follow-up to the "left as taste" items on status strings, calibration metric names and units.
+Only text shown on normal pages changed. The technical forms stay where they are diagnostic:
+the Diagnostics page Engine row and Layout file row, the engine log, the status file, the tool's
+stdout and its `@@progress` lines are unchanged. Separator is the Readiness rows' `  ·  `.
+
+New app-model formatters (each with `app_selftest` cases): `engine_status_display_summary`,
+`layout_display_summary`, `format_degrees`, `cal_user_units`, `calibration_saved_text`.
+`engine_status_summary` and `layout_summary` are unchanged and now feed only the Diagnostics page.
+
+| Where | Before | After |
+|---|---|---|
+| Home hero detail (engine running) | `running \| workspace \| 3 screens \| 60 fps \| VDD desktops` | `Workspace · 3 screens · 60 fps · virtual desktops` |
+| Same, other parts | `\| VDD unavailable`, `\| laptop display detached`, `\| no head tracking`, `\| monitor 1 1920x1080` | `virtual desktops unavailable`, `laptop screen off`, `no head tracking`; monitor index/size dropped (Diagnostics keeps it) |
+| Same, starting / failed / no status | `starting \| preview ...`, `failed \| <error>`, `no status yet` | `Preview · starting · ...`, `Stopped with an error: <error>`, `Waiting for the engine to report its status` |
+| Readiness rows: Engine detail (Home) | technical summary | display summary; Diagnostics shows the technical one via `HealthItem::raw` |
+| Home Layout card and Layout page summary | `3 screens \| arc -45..45 deg \| 46 deg fov \| 120/30/1 fps` | `3 screens · arc −45° to 45° · 46° field of view · 120/30/1 fps capture` (one screen: `1 screen · at 0° · ...`; empty: `No screens`) |
+| Layout inspector / quick sliders (yaw, pitch, roll, FOV, enter, leave) | `-45 deg`, `0 deg` | `−45°`, `0°` (U+2212 minus, rounded whole degrees, never `−0°`) |
+| Calibration saved panel (Tracking page and setup guide), head | tool detail, e.g. `up_vs_yaw 6.10 deg, nod_level 5.40 deg, nod_tilt 12.80 deg, handedness 9.95 deg` | by band: Good `The steps agreed closely, so your head axes are straight. The new calibration is in use from the next start.` / Fair `The steps agreed reasonably well. The new calibration is in use from the next start; if the screens tilt when you nod, run it again.` / Retry `The steps disagreed with each other. The calibration was saved, but running it again should give a straighter result.` / no score `The new calibration is in use from the next start.`; plus `Next, calibrate the compass for drift-free heading.` when the tool says so |
+| Calibration saved panel, compass | `field 51.5 uT, residual 0.80 uT, turn 360 deg, tilt 40 deg, observability 0.120[; for a better result repeat and ...]` | `The heading lock is on from the next start, so the screens stay put instead of slowly turning.` plus, when the tool gave advice, `Coverage was thin: for a better result, run it again and <tool's movement advice>.` |
+| Calibration failure / retry text (`cal_reason_text`) | `... (up_vs_yaw 6.10 deg, nod_level ...)`, `1.80 deg/s of movement`, `excursion 8.0 deg` | metrics parenthetical dropped; `1.80°/s of movement`, `Excursion 8.0°` |
+| Calibration step detail while running | `head movement 0.80 deg/s (limit 1.5)`, `spread 1.2 deg, excursion 30.0 deg` | `head movement 0.80°/s (limit 1.5)`, `spread 1.2°, excursion 30.0°` |
+
+Where the raw calibration figures went: when a calibration ends, the Diagnostics page's Activity
+log gets a `head calibration detail: <tool detail>` (or `compass ...`) line above the existing
+`... calibration finished: ...` line, so the metrics are one page away and never truncated by the
+finish message. The failed panel still shows the tool's last console lines in mono as before.
+
+Changed test expectation (deliberate): `app_selftest` "a retry reason survives the next waiting
+line" now expects `1.80°/s of movement (limit 1.5)` (was `1.80 deg/s ...`). There were no
+existing `format_layout_field_value` expectations; new cases pin `−45°`, `46°`, `0°` for −0.4,
+`13°` for 12.6, `2.00 m`, `60 fps`. Existing `engine_status_summary` / `layout_summary` checks are
+unchanged, and a new check pins the technical layout summary text.
+
+One paint change, needed to avoid truncation: on the Layout page, when the hint and the summary do
+not share a row and the summary is wider than the card (820x640), the summary now word-wraps onto a
+second line instead of ending in an ellipsis. Wide layouts render exactly as before.
+
+Left alone: the 2D arrangement canvas labels (`-45°`, `-90°`, paint code) keep the ASCII hyphen,
+so they differ from the inspector's `−45°` by the minus glyph only. Tracking page live angles
+(`+12.4°`) already used the degree sign.
+
+Renders checked (`ui_snapshot`, 33 frames, PASS incl. contrast): home-running-1920x1080-150,
+home-narrow-820x640, layout-1280x800, layout-narrow-820x640, tracking-calibration-saved-good,
+wizard-3-head-saved-retry-light, wizard-3-head-failed-light, diagnostics-1280x800 (technical
+Engine detail kept). Nothing truncates; Home hero, Layout card and calibration panels fit at
+820 px.
