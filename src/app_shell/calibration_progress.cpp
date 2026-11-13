@@ -590,6 +590,12 @@ void CalRunState::cancel() {
     }
 }
 
+void CalRunState::clear_unless_running() {
+    if (phase != Phase::Running) {
+        *this = CalRunState{};
+    }
+}
+
 float CalRunState::fraction() const {
     if (phase == Phase::Succeeded) {
         return 1.0f;

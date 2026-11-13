@@ -1496,6 +1496,9 @@ void AppWindow::execute(int id, int arg) {
     }
     switch (id) {
         case kUiRunSetupGuide:
+            // Refused while a calibration runs (R6-C); open_setup_guide only
+            // clears a finished result, never a running one (R6-B's
+            // CalRunState::clear_unless_running covers the same contract).
             if (!open_setup_guide(state_, calibration_.active())) {
                 state_.show_toast(L"Finish or cancel the calibration first");
                 invalidate();

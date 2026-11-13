@@ -16,6 +16,10 @@
 
 namespace {
 
+// Defined at the end of this file, after <windows.h>, whose macros (small,
+// far, ...) would otherwise clash with names used by the tests.
+bool run_calibration_tool(const std::wstring& argument, std::string& output, unsigned long& exit_code);
+
 using gt::CalibrationPhase;
 using gt::CalibrationPhaseData;
 using gt::ImuSample;
@@ -1020,7 +1024,96 @@ int main() {
     std::error_code remove_error;
     std::filesystem::remove(bad_version_path, remove_error);
 
+    std::printf("orientation_calibration_selftest: non-ASCII command line (R6-B)\n");
+    {
+        // The controller passes --output as UTF-8 through a wide command line.
+        // A narrow main() decoded it with the ANSI code page: U+65E5 became
+        // '?' and U+0142 a best-fit 'l', i.e. another path. The tool must see
+        // the exact characters (echoed back as UTF-8 by the unknown-option
+        // message, before any device access).
+        std::string output;
+        unsigned long exit_code = 0;
+        const bool ran = run_calibration_tool(L"--r6b-probe-日ł", output, exit_code);
+        const bool exact = output.find("--r6b-probe-\xE6\x97\xA5\xC5\x82") != std::string::npos;
+        if (ran && !exact) {
+            std::printf("    tool printed: %s\n", output.substr(0, 120).c_str());
+        }
+        check(ran && exit_code == 2 && exact,
+              "orientation_calibrate decodes a non-ASCII argument exactly (UTF-8, no ANSI best-fit)");
+    }
+
     std::printf("orientation_calibration_selftest: %s (%d failures)\n",
                 failures == 0 ? "PASS" : "FAIL", failures);
     return failures == 0 ? 0 : 1;
 }
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+namespace {
+
+// Runs orientation_calibrate.exe (built beside this test) with one argument
+// and collects its stdout. Only ever called with an unknown option: the tool
+// rejects it in parse_args and exits 2 before hidapi or the glasses are
+// touched, echoing the option as it decoded it.
+bool run_calibration_tool(const std::wstring& argument, std::string& output, unsigned long& exit_code) {
+    output.clear();
+    exit_code = 0;
+    std::wstring self(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, self.data(), static_cast<DWORD>(self.size()));
+    if (length == 0 || length >= self.size()) {
+        return false;
+    }
+    self.resize(length);
+    const std::filesystem::path tool = std::filesystem::path(self).parent_path() / L"orientation_calibrate.exe";
+    std::error_code exists_error;
+    if (!std::filesystem::exists(tool, exists_error)) {
+        std::printf("    orientation_calibrate.exe not found beside this test (build all targets)\n");
+        return false;
+    }
+    SECURITY_ATTRIBUTES inherit{};
+    inherit.nLength = sizeof(inherit);
+    inherit.bInheritHandle = TRUE;
+    HANDLE read_end = nullptr;
+    HANDLE write_end = nullptr;
+    if (!CreatePipe(&read_end, &write_end, &inherit, 0)) {
+        return false;
+    }
+    SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdOutput = write_end;
+    startup.hStdError = write_end;
+    startup.hStdInput = nullptr;
+    std::wstring command = L"\"" + tool.wstring() + L"\" " + argument;
+    PROCESS_INFORMATION info{};
+    const BOOL created = CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
+                                        nullptr, &startup, &info);
+    CloseHandle(write_end);
+    if (!created) {
+        CloseHandle(read_end);
+        return false;
+    }
+    char buffer[512];
+    DWORD read = 0;
+    while (ReadFile(read_end, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
+        output.append(buffer, read);
+    }
+    CloseHandle(read_end);
+    const bool exited = WaitForSingleObject(info.hProcess, 10000) == WAIT_OBJECT_0;
+    if (!exited) {
+        TerminateProcess(info.hProcess, 1);
+    }
+    GetExitCodeProcess(info.hProcess, &exit_code);
+    CloseHandle(info.hThread);
+    CloseHandle(info.hProcess);
+    return exited;
+}
+
+}  // namespace

@@ -1442,6 +1442,26 @@ void test_calibration_progress() {
     check(old_tool.phase == gt::CalRunState::Phase::Failed &&
               old_tool.failure.find("does not understand") != std::string::npos,
           "exit code 2 (bad arguments) names an outdated tool");
+    {
+        // "Run setup guide" while a calibration runs must not orphan it: the
+        // tool keeps the glasses, and only the running state offers Cancel,
+        // drives the glasses guide and receives the result (R6-B).
+        gt::CalRunState live_run;
+        live_run.begin(gt::CalFlow::Orientation, true, 5.0);
+        live_run.consume_line("@@progress {\"flow\":\"orientation\",\"step\":2,\"steps\":4,\"state\":\"recording\"}");
+        live_run.clear_unless_running();
+        live_run.consume_line("@@progress {\"flow\":\"orientation\",\"step\":4,\"steps\":4,\"state\":\"done\","
+                              "\"quality\":0.9}");
+        check(live_run.phase == gt::CalRunState::Phase::Succeeded && live_run.quality > 0.8f,
+              "clearing the panel keeps a running calibration and its result");
+        live_run.clear_unless_running();
+        gt::CalRunState failed_run;
+        failed_run.start_failed("not found");
+        failed_run.clear_unless_running();
+        check(live_run.phase == gt::CalRunState::Phase::Idle && !live_run.has_event &&
+                  failed_run.phase == gt::CalRunState::Phase::Idle && failed_run.failure.empty(),
+              "clearing the panel resets a finished run");
+    }
     check(gt::cal_reason_text("SMALL_EXCURSION: turn further") == "Turn further" &&
               gt::cal_reason_text("plain words") == "plain words" &&
               gt::cal_reason_text("STREAM_FAILED: timeout").find("motion data") != std::string::npos,

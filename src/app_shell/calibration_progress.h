@@ -210,6 +210,10 @@ struct CalRunState {
     // The tool could not be started at all.
     void start_failed(const std::string& reason);
     void cancel();
+    // Clears the panel of a finished (or never started) run. A run still in
+    // progress is kept: its tool still owns the glasses, and only this state
+    // offers Cancel, drives the glasses guide and receives the result.
+    void clear_unless_running();
 
     bool running() const { return phase == Phase::Running; }
     bool finished() const {

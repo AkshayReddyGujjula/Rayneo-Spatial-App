@@ -2,6 +2,7 @@
 #include "imu/gt_hid.h"
 #include "imu/gt_protocol.h"
 #include "imu/orientation_calibration.h"
+#include "util/utf8_path.h"
 
 #include <hidapi.h>
 #include <windows.h>
@@ -20,6 +21,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -311,17 +313,17 @@ std::string default_output_path() {
         std::error_code exists_error;
         if (std::filesystem::exists(candidate / "config" / "layouts" / "default.json",
                                     exists_error)) {
-            return (candidate / "config" / "orientation.json").string();
+            return gt::utf8_from_path(candidate / "config" / "orientation.json");
         }
         exists_error.clear();
         if (std::filesystem::exists(candidate / "config", exists_error)) {
-            return (candidate / "config" / "orientation.json").string();
+            return gt::utf8_from_path(candidate / "config" / "orientation.json");
         }
         if (candidate == candidate.parent_path()) {
             break;
         }
     }
-    return (executable_directory.parent_path() / "config" / "orientation.json").string();
+    return gt::utf8_from_path(executable_directory.parent_path() / "config" / "orientation.json");
 }
 
 uint64_t now_us() {
@@ -873,7 +875,7 @@ int calibrate_orientation_flow(gt::GtHidDevice& device, const Options& options, 
                     result.sensor_to_head[row * 3 + 1], result.sensor_to_head[row * 3 + 2]);
     }
 
-    const std::filesystem::path output_path(options.output_path);
+    const std::filesystem::path output_path = gt::path_from_utf8(options.output_path);
     if (!output_path.parent_path().empty()) {
         std::error_code directory_error;
         std::filesystem::create_directories(output_path.parent_path(), directory_error);
@@ -909,9 +911,33 @@ int calibrate_orientation_flow(gt::GtHidDevice& device, const Options& options, 
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int wmain(int argc, wchar_t** wide_argv) {
+    // Wide entry point, as in spatial_desk: the controller passes UTF-8 paths
+    // through a wide command line, and a narrow argv would decode them with
+    // the ANSI code page ('?' or a best-fit letter for anything outside it,
+    // i.e. a different or invalid --output path). Narrow to UTF-8 once; every
+    // path below is decoded with path_from_utf8. Nothing touches the glasses
+    // before the arguments parse.
+    std::vector<std::string> utf8_args;
+    utf8_args.reserve(static_cast<size_t>(argc < 0 ? 0 : argc));
+    for (int i = 0; i < argc; ++i) {
+        const std::wstring wide = wide_argv[i] != nullptr ? wide_argv[i] : L"";
+        const std::string narrow = gt::utf8_from_wide_text(wide);
+        if (!wide.empty() && narrow.empty()) {
+            std::printf("invalid command line argument %d: not representable in UTF-8\n", i);
+            return 2;
+        }
+        utf8_args.push_back(narrow);
+    }
+    std::vector<char*> argv;
+    argv.reserve(utf8_args.size() + 1);
+    for (std::string& argument : utf8_args) {
+        argv.push_back(argument.data());
+    }
+    argv.push_back(nullptr);
+
     Options options;
-    if (!parse_args(argc, argv, options)) {
+    if (!parse_args(argc, argv.data(), options)) {
         return 2;
     }
     if (options.output_path.empty()) {
@@ -964,7 +990,7 @@ int main(int argc, char** argv) {
 
     std::ofstream csv;
     if (!options.log_path.empty()) {
-        csv.open(options.log_path, std::ios::out | std::ios::trunc);
+        csv.open(gt::path_from_utf8(options.log_path), std::ios::out | std::ios::trunc);
         if (!csv) {
             std::printf("could not open raw log: %s\n", options.log_path.c_str());
             return fail_run(setup, 1, kConnectPrompt, "LOG_FAILED: could not open " + options.log_path);
