@@ -113,3 +113,24 @@ Window 3: merge leftovers, final full suite, final report. Stop at 10:30.
 - Track B item 4: orientation calibration averaging + quality/consistency scoring.
 - Track A next: guard for the single-long-rest-episode startup case; seed bias from last session.
 - Fold docs/overnight/*.md into AGENTS.md; write docs/overnight/REPORT.md (morning report).
+
+## Morning (2026-11-13 ~07:20) — user requests
+- DONE dd60425: user chose 3 repeats for in-app head calibration (`kCalHeadRepeats`), wording "about a minute and a half".
+- NEXT (paused at 80% of the 5-hour window until the 08:40 reset; nudge `rayneo-overnight-resume-2` at 08:50):
+  **Live calibration guide** (user: "a red line in the middle with the ball moving, so I can actually see and move
+  my head accurately ... calibration is the most important thing"). Plan for one Opus-high agent (R5-A):
+  1. Tool: `@@live {...}` JSON lines at ~25 Hz during waiting/recording (opt-in with --progress-json): step, the head
+     motion so far relative to the step's start pose in a guide frame (up = measured gravity from the still step;
+     forward from the previous calibration file if present, else yaw-only/gravity-only fallback), the rotation about
+     the step's intended axis (deg) vs the 12 deg gate and a recommended target, the off-axis angle, angular speed,
+     stillness (gyro rms vs the 1.5 deg/s still gate), and repeat count n/N. Display only: gates and maths unchanged.
+  2. Controller: a guide on the GLASSES display (borderless topmost window on the glasses monitor the controller
+     already identifies; black = see-through on the birdbath optics): a red centre line along the intended motion,
+     a ball showing the live head position, target ticks at the required/recommended excursion, colour feedback
+     (green on-axis, amber off-axis, "slower" / "further" hints), a shrinking steadiness ring for the still step,
+     repeat dots. The same mini-visual in the PC calibration panel. Closes when calibration ends/cancels.
+  3. Research first (functional IMU-to-segment calibration practice: pure single-axis motion, amplitude, speed,
+     return to neutral, real-time feedback), write findings into the notes; add any other accuracy aid that is
+     provable (e.g. pre-check that the glasses sit level/are worn, speed guidance).
+  4. Tests: live-line formatter/parser, guide geometry as pure functions, ui_snapshot renders of each guide state;
+     calibration selftests unchanged. Never run hardware/the engine/the UI live.
