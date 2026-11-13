@@ -40,8 +40,9 @@ struct Theme {
     COLORREF text_dim = 0;
     COLORREF text_faint = 0;
     COLORREF disabled_text = 0;
-    COLORREF accent = 0;
-    COLORREF accent_hover = 0;
+    COLORREF accent = 0;       // accent as text, icons, tracks and outlines
+    COLORREF accent_fill = 0;  // primary button fill (accent_text on it meets WCAG AA)
+    COLORREF accent_hover = 0; // hovered primary button fill
     COLORREF accent_text = 0;  // label colour on an accent fill
     COLORREF accent_soft = 0;  // tinted background (selected chip, nav item)
     COLORREF accent_dim = 0;   // filled slider track

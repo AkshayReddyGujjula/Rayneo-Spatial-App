@@ -172,51 +172,77 @@ int paint_hero(Ui& ui, int left, int top, int width) {
 
 int paint_readiness(Ui& ui, int left, int top, int width) {
     const std::vector<HealthItem> items = health_items(ui.s);
-    const int row_h = ui.px(64);
+    const int base_row_h = ui.px(64);
     const int rows = 5;
     const int pad = ui.px(space::xl);
+    const int help_w = help_mark_width(ui.dpi);
+    const int text_left = left + pad + ui.px(44);
+    struct RowAction {
+        int id = 0;
+        const wchar_t* label = nullptr;
+    };
+    const auto row_action = [&](int i, const HealthItem& item) {
+        RowAction action;
+        if (item.severity != Severity::Ok) {
+            if (i == 1) {
+                action = {kUiGoBase + static_cast<int>(AppPage::Diagnostics), L"Troubleshoot"};
+            } else if (i == 2) {
+                action = {kUiGoBase + static_cast<int>(AppPage::Tracking), L"Calibrate"};
+            } else if (i == 5) {
+                action = {kUiGoBase + static_cast<int>(AppPage::Layout), L"Open layout"};
+            }
+        }
+        return action;
+    };
+    const auto row_text_w = [&](const RowAction& action) {
+        const int action_w = action.label != nullptr ? ui.px(132) : 0;
+        return width - (text_left - left) - pad - help_w - ui.px(space::md) -
+               (action_w > 0 ? action_w + ui.px(space::md) : 0);
+    };
+    // A fix-it detail that does not fit on one line (a row with an action
+    // button is narrower) wraps instead of being cut off mid-word; the row
+    // grows by the extra lines.
+    const int detail_line_h = wrapped_text_height(ui.c.dc(), ui.f.small, width, L"Ag");
+    int row_heights[rows + 1] = {};
+    int rows_h = 0;
+    for (int i = 1; i <= rows; ++i) {
+        const HealthItem& item = items[static_cast<size_t>(i)];
+        const int detail_h = wrapped_text_height(ui.c.dc(), ui.f.small, row_text_w(row_action(i, item)), item.detail);
+        row_heights[i] = base_row_h + std::max(0, detail_h - detail_line_h);
+        rows_h += row_heights[i];
+    }
     RECT frame = rect_of(left, top, width, 0);
     // Measure header first so the card can be drawn before its content.
     const int header_h = ui.px(30) + wrapped_text_height(ui.c.dc(), ui.f.small, width - pad * 2,
                                                         L"What the workspace needs before it can start.") +
                          ui.px(space::lg) + pad;
-    frame.bottom = top + header_h + rows * row_h + pad - ui.px(space::sm);
+    frame.bottom = top + header_h + rows_h + pad - ui.px(space::sm);
     card(ui, frame);
     int y = card_header(ui, frame, L"Readiness", L"What the workspace needs before it can start.");
-    const int help_w = help_mark_width(ui.dpi);
     for (int i = 1; i <= rows; ++i) {
         const HealthItem& item = items[static_cast<size_t>(i)];
         const int row_top = y;
+        const int row_h = row_heights[i];
         if (i > 1) {
             ui.c.fill(rect_of(left + pad, row_top, width - pad * 2, 1), ui.t.border);
         }
         status_icon(ui, left + pad + ui.px(14), row_top + row_h / 2, item.severity);
-        const int text_left = left + pad + ui.px(44);
-        int action_w = 0;
-        int action_id = 0;
-        const wchar_t* action_label = nullptr;
-        if (item.severity != Severity::Ok) {
-            if (i == 1) {
-                action_id = kUiGoBase + static_cast<int>(AppPage::Diagnostics);
-                action_label = L"Troubleshoot";
-            } else if (i == 2) {
-                action_id = kUiGoBase + static_cast<int>(AppPage::Tracking);
-                action_label = L"Calibrate";
-            } else if (i == 5) {
-                action_id = kUiGoBase + static_cast<int>(AppPage::Layout);
-                action_label = L"Open layout";
-            }
-        }
-        if (action_label != nullptr) {
-            action_w = ui.px(132);
-        }
-        const int text_w = width - (text_left - left) - pad - help_w - ui.px(space::md) -
-                           (action_w > 0 ? action_w + ui.px(space::md) : 0);
+        const RowAction act = row_action(i, item);
+        const int action_id = act.id;
+        const wchar_t* action_label = act.label;
+        const int action_w = action_label != nullptr ? ui.px(132) : 0;
+        const int text_w = row_text_w(act);
         ui.c.text(ui.f.body_strong, ui.t.text, rect_of(text_left, row_top + ui.px(11), text_w, ui.px(22)),
                   std::wstring(item.title) + L"  ·  " + item.value,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        ui.c.text(ui.f.small, ui.t.text_dim, rect_of(text_left, row_top + ui.px(33), text_w, ui.px(20)), item.detail,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (row_h == base_row_h) {
+            ui.c.text(ui.f.small, ui.t.text_dim, rect_of(text_left, row_top + ui.px(33), text_w, ui.px(20)),
+                      item.detail, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        } else {
+            const int one_line_top = row_top + ui.px(33) + (ui.px(20) - detail_line_h) / 2;
+            ui.c.text(ui.f.small, ui.t.text_dim, rect_of(text_left, one_line_top, text_w, row_h), item.detail,
+                      DT_LEFT | DT_TOP | DT_WORDBREAK);
+        }
         const int right = left + width - pad;
         RECT help_rect = rect_of(right - help_w, row_top + (row_h - help_w) / 2, help_w, help_w);
         ui.help(kHelpStatus, item.status_row, item.topic, help_rect);

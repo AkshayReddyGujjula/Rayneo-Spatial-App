@@ -176,26 +176,72 @@ void paint_editor_2d(Ui& ui, const RECT& canvas_rect, bool labels) {
         const std::wstring id_text = wide_from_utf8(screen.id);
         std::swprintf(label, std::size(label), L"%s  %.0f°", id_text.c_str(),
                       static_cast<double>(screen.yaw_deg));
-        RECT label_rect = rect_of(center.x - ui.px(80), center.y - ui.px(32), ui.px(160), ui.px(18));
-        const int step = ui.px(17);
-        for (int attempt = 0; attempt < 8; ++attempt) {
-            bool overlaps = false;
+        // The label sits beside the screen along its outward normal, far
+        // enough that the text box clears the (possibly angled) line and the
+        // selection halo. Preference: outward, inward (towards the wearer),
+        // then outward or inward pushed back inside the canvas; the first
+        // one inside the canvas that collides with no other label wins.
+        HFONT label_font = selected ? ui.f.small_strong : ui.f.small;
+        const int label_w = text_width(ui.c.dc(), label_font, label) + ui.px(8);
+        const int label_h = ui.px(18);
+        const float nx = std::sin(yaw);
+        const float ny = -std::cos(yaw);
+        const float clearance = std::fabs(nx) * static_cast<float>(label_w) * 0.5f +
+                                std::fabs(ny) * static_cast<float>(label_h) * 0.5f +
+                                (thickness + (selected ? static_cast<float>(ui.px(12)) : 0.0f)) * 0.5f +
+                                static_cast<float>(ui.px(6));
+        const auto label_at = [&](float direction) {
+            const int lx = center.x + static_cast<int>(std::lround(nx * clearance * direction));
+            const int ly = center.y + static_cast<int>(std::lround(ny * clearance * direction));
+            return rect_of(lx - label_w / 2, ly - label_h / 2, label_w, label_h);
+        };
+        const auto inside_canvas = [&](const RECT& r) {
+            return r.left >= canvas_rect.left && r.right <= canvas_rect.right && r.top >= canvas_rect.top &&
+                   r.bottom <= canvas_rect.bottom;
+        };
+        const auto clamp_into_canvas = [&](RECT r) {
+            OffsetRect(&r, std::max(0L, canvas_rect.left - r.left), std::max(0L, canvas_rect.top - r.top));
+            OffsetRect(&r, std::min(0L, canvas_rect.right - r.right), std::min(0L, canvas_rect.bottom - r.bottom));
+            return r;
+        };
+        const auto collides = [&](const RECT& r) {
             for (const RECT& placed : blockers) {
                 RECT intersection{};
-                RECT inflated = label_rect;
+                RECT inflated = r;
                 InflateRect(&inflated, ui.px(2), ui.px(1));
                 if (IntersectRect(&intersection, &inflated, &placed) != 0) {
-                    overlaps = true;
-                    break;
+                    return true;
                 }
             }
-            if (!overlaps) {
+            return false;
+        };
+        const RECT candidates[] = {label_at(1.0f), label_at(-1.0f), clamp_into_canvas(label_at(1.0f)),
+                                   clamp_into_canvas(label_at(-1.0f))};
+        RECT label_rect = candidates[2];
+        bool free_spot = false;
+        for (const RECT& candidate : candidates) {
+            if (inside_canvas(candidate) && !collides(candidate)) {
+                label_rect = candidate;
+                free_spot = true;
                 break;
             }
-            OffsetRect(&label_rect, 0, step);
+        }
+        // Crowded layouts: step the label down until it is clear, but never
+        // out of the canvas (a clipped label is worse than a close one).
+        const int step = ui.px(17);
+        for (int attempt = 0; !free_spot && attempt < 8; ++attempt) {
+            RECT next = label_rect;
+            OffsetRect(&next, 0, step * (attempt + 1));
+            if (!inside_canvas(next)) {
+                break;
+            }
+            if (!collides(next)) {
+                label_rect = next;
+                free_spot = true;
+            }
         }
         blockers.push_back(label_rect);
-        ui.c.text(selected ? ui.f.small_strong : ui.f.small, selected ? t.text : t.text_dim, label_rect, label,
+        ui.c.text(label_font, selected ? t.text : t.text_dim, label_rect, label,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     ui.c.pop_clip();
@@ -274,9 +320,13 @@ void paint_editor_3d(Ui& ui, const RECT& canvas_rect) {
         wchar_t label[64];
         const std::wstring id_text = wide_from_utf8(screen.id);
         std::swprintf(label, std::size(label), L"%s  %.0f°", id_text.c_str(), static_cast<double>(screen.yaw_deg));
-        ui.c.text(selected ? ui.f.small_strong : ui.f.small, selected ? t.text : t.text_dim,
-                  rect_of(centre.pixel.x - ui.px(80), centre.pixel.y - ui.px(9), ui.px(160), ui.px(18)), label,
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        // A foreshortened quad can be narrower than its label: a soft plate
+        // keeps the text readable where it crosses the screen's outline.
+        HFONT label_font = selected ? ui.f.small_strong : ui.f.small;
+        const int label_w = text_width(ui.c.dc(), label_font, label) + ui.px(12);
+        const RECT plate = rect_of(centre.pixel.x - label_w / 2, centre.pixel.y - ui.px(10), label_w, ui.px(20));
+        ui.c.fill_round(plate, ui.px(radius::sm), t.canvas, 200);
+        ui.c.text(label_font, selected ? t.text : t.text_dim, plate, label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     ui.c.pop_clip();
 }
@@ -478,7 +528,22 @@ void paint_editor_card(Ui& ui, const RECT& frame) {
     }
 
     const bool quick = s.editor_fullscreen && !s.layout.screens.empty() && s.selected_screen < s.layout.screens.size();
-    const int hint_h = ui.px(24);
+    std::wstring hint;
+    if (s.editor_3d) {
+        hint = L"Click a screen to select it and drag to move it. Drag empty space to orbit; scroll to zoom.";
+    } else {
+        hint = L"Drag a screen sideways for yaw and up or down for pitch. Tab to the map for arrow keys.";
+    }
+    // Hint and layout summary share one row when both fit; otherwise the
+    // hint wraps across the full width and the summary goes on its own line
+    // below, so neither is cut off.
+    const std::wstring summary = wide_from_utf8(layout_summary(s.layout));
+    const int row_w = rw(frame) - pad * 2;
+    const int line_h = ui.px(24);
+    const int summary_full_w = text_width(ui.c.dc(), ui.f.caption, summary);
+    const bool one_row = text_width(ui.c.dc(), ui.f.caption, hint) + ui.px(space::lg) + summary_full_w <= row_w;
+    const int hint_text_h = one_row ? 0 : wrapped_text_height(ui.c.dc(), ui.f.caption, row_w, hint);
+    const int hint_h = one_row ? line_h : ui.px(space::xs) + hint_text_h + line_h;
     const int quick_h = quick ? ui.px(size::slider) * 2 + ui.px(space::md) + ui.px(size::control) + ui.px(space::md) : 0;
     RECT canvas_rect{frame.left + pad, top + bar_h + ui.px(space::lg), frame.right - pad,
                      frame.bottom - pad - hint_h - ui.px(space::sm) - quick_h};
@@ -501,22 +566,19 @@ void paint_editor_card(Ui& ui, const RECT& frame) {
     } else {
         canvas_rect.bottom = canvas_rect.top;
     }
-    std::wstring hint;
-    if (s.editor_3d) {
-        hint = L"Click a screen to select it and drag to move it. Drag empty space to orbit; scroll to zoom.";
-    } else {
-        hint = L"Drag a screen sideways for yaw and up or down for pitch. Tab to the map for arrow keys.";
-    }
-    // Layout summary on the right of the hint row (the hint yields first).
-    const std::wstring summary = wide_from_utf8(layout_summary(s.layout));
-    const int row_w = rw(frame) - pad * 2;
-    const int summary_w = std::min(text_width(ui.c.dc(), ui.f.caption, summary), row_w / 2);
     const int hint_y = canvas_rect.bottom + ui.px(space::sm);
-    ui.c.text(ui.f.caption, t.text_dim, rect_of(frame.right - pad - summary_w, hint_y, summary_w, hint_h), summary,
-              DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    ui.c.text(ui.f.caption, t.text_faint,
-              rect_of(frame.left + pad, hint_y, std::max(0, row_w - summary_w - ui.px(space::lg)), hint_h), hint,
-              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (one_row) {
+        ui.c.text(ui.f.caption, t.text_dim, rect_of(frame.right - pad - summary_full_w, hint_y, summary_full_w, line_h),
+                  summary, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        ui.c.text(ui.f.caption, t.text_faint,
+                  rect_of(frame.left + pad, hint_y, std::max(0, row_w - summary_full_w - ui.px(space::lg)), line_h),
+                  hint, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    } else {
+        ui.c.text(ui.f.caption, t.text_faint, rect_of(frame.left + pad, hint_y + ui.px(space::xs), row_w, hint_text_h),
+                  hint, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        ui.c.text(ui.f.caption, t.text_dim, rect_of(frame.left + pad, hint_y + ui.px(space::xs) + hint_text_h, row_w, line_h),
+                  summary, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
     if (!quick) {
         return;
     }

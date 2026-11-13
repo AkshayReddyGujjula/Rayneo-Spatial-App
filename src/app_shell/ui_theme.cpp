@@ -78,16 +78,17 @@ const Theme& dark_theme() {
         t.border_strong = rgb(60, 67, 83);
         t.text = rgb(237, 240, 246);
         t.text_dim = rgb(163, 171, 187);
-        t.text_faint = rgb(112, 120, 137);
+        t.text_faint = rgb(134, 141, 156);  // >= 4.5:1 on surface_alt
         t.disabled_text = rgb(82, 89, 103);
-        t.accent = rgb(66, 129, 247);
-        t.accent_hover = rgb(96, 152, 255);
+        t.accent = rgb(100, 152, 248);       // >= 4.5:1 as text, also on badges
+        t.accent_fill = rgb(52, 104, 204);   // white label 5.3:1
+        t.accent_hover = rgb(58, 114, 217);  // white label 4.6:1
         t.accent_text = rgb(255, 255, 255);
         t.accent_soft = rgb(29, 43, 71);
         t.accent_dim = rgb(52, 98, 186);
         t.ok = rgb(56, 199, 125);
         t.warning = rgb(240, 178, 62);
-        t.error = rgb(240, 98, 98);
+        t.error = rgb(241, 111, 111);
         t.focus = rgb(140, 185, 255);
         t.scrim = rgb(5, 7, 11);
         t.shadow = rgb(0, 0, 0);
@@ -111,16 +112,17 @@ const Theme& light_theme() {
         t.border_strong = rgb(192, 200, 214);
         t.text = rgb(22, 27, 36);
         t.text_dim = rgb(78, 88, 106);
-        t.text_faint = rgb(124, 134, 151);
+        t.text_faint = rgb(100, 109, 122);  // >= 4.5:1 on surface_alt
         t.disabled_text = rgb(168, 175, 188);
-        t.accent = rgb(37, 99, 235);
+        t.accent = rgb(33, 93, 222);  // >= 4.5:1 on accent_soft and badges
+        t.accent_fill = t.accent;
         t.accent_hover = rgb(29, 84, 210);
         t.accent_text = rgb(255, 255, 255);
         t.accent_soft = rgb(225, 234, 253);
         t.accent_dim = rgb(122, 160, 240);
-        t.ok = rgb(22, 150, 90);
-        t.warning = rgb(190, 122, 6);
-        t.error = rgb(212, 58, 58);
+        t.ok = rgb(18, 122, 73);       // status colours double as text:
+        t.warning = rgb(148, 95, 5);   // >= 4.5:1 on window, surface
+        t.error = rgb(195, 53, 53);    // and their own tinted badge
         t.focus = rgb(37, 99, 235);
         t.scrim = rgb(18, 24, 36);
         t.shadow = rgb(30, 40, 62);
