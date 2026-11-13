@@ -63,6 +63,9 @@ Build dirs live under `%LOCALAPPDATA%\Temp\rayneo-overnight\` (never inside the 
 
 - 00:04 Integration merged (7c9cc6e); 11/11 green. 5-hour usage 81% -> PAUSED until the 03:40 reset
   (nudge at 03:45). Weekly 56%.
+- 03:46 Resumed (5-hour 3%, weekly 57%). Launched R2-A (review+fix), R2-B (orientation calibration
+  averaging/quality), R2-C (startup long-rest guard) as Opus high agents in new worktrees; each stops at 80%.
+  Orchestrator: AGENTS.md folded (4241552); docs/overnight/REPORT.md drafted (round-2 section pending).
 
 ## Round 2 plan (start at 03:45; window 2 ~03:40-08:40, window 3 ~08:45-10:30 hard stop)
 Window 2, in parallel, each in its own worktree reset onto overnight-claude-improvements:
