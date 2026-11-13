@@ -84,6 +84,8 @@ Build dirs live under `%LOCALAPPDATA%\Temp\rayneo-overnight\` (never inside the 
 - 04:28 R3-B merged (1c09800): 8 visual defects fixed, all text token pairs >= WCAG AA (ui_snapshot now checks). 11/11.
 - 04:40 R3-C merged (afd40f5): bug 32 (single-episode gravity check timing) fixed, scenario 28; verified pose_selftest
   and scenarios 1-27 output identical. Calibration repeats reviewed, nothing provable. AGENTS.md + REPORT updated. 11/11.
+- 04:42 R4-A launched (Opus high): engine startup phases in the status file + 'hold still' prompt during the
+  startup bias window (prevents bug 26 at the source). 5-hour 47%, weekly 63%.
 
 ## Round 2 plan (start at 03:45; window 2 ~03:40-08:40, window 3 ~08:45-10:30 hard stop)
 Window 2, in parallel, each in its own worktree reset onto overnight-claude-improvements:
