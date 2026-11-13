@@ -8,7 +8,9 @@ Started 2026-11-12 ~22:55 local. Hard stop 10:30 local (2026-11-13) — changed 
 - [x] Track A — startup-bias confirmation + 35 ms turn prediction: merged (e28e4ef), 11/11 green.
 - [x] Track B — calibration --progress-json/--auto/--earbuds, mag status keys, opt-in earbud hard-iron tracker: merged (dd5e995), 11/11 green. Orientation-calibration averaging NOT done.
 - [x] Track C — UI redesign + setup guide: merged (1ea0a5d), 11/11 green. Live-window check still needed.
-- [ ] Integrate track branches into `overnight-claude-improvements`, full suite, docs, report
+- [x] Integrate track branches into `overnight-claude-improvements`, full suite, docs, report
+- [x] Round 2 (R2-A review, R2-B calibration repeats, R2-C single-episode startup) and round 3 (R3-A UI bugs,
+      R3-B visual QA, R3-C maths review) merged; 11/11 green.
 
 ## Integration TODO (orchestrator)
 1. DONE: Track B merged (imu_replay.cpp conflict resolved by keeping both tool sets).
@@ -80,7 +82,8 @@ Build dirs live under `%LOCALAPPDATA%\Temp\rayneo-overnight\` (never inside the 
   Engine log now reports single-episode reseeds (eeaf37d). AGENTS.md round 2 folded (2a8cdec), REPORT round 2 written.
   R3-C launched (Opus high): adversarial review of single-episode confirmation + calibration repeats maths.
 - 04:35 R3-B merged (1c09800): 8 visual defects fixed, all text token pairs >= WCAG AA (ui_snapshot now checks). 11/11.
-  Remaining: merge R3-C, final full suite, final RESUME/REPORT touch.
+- 04:55 R3-C merged (afd40f5): bug 32 (single-episode gravity check timing) fixed, scenario 28; verified pose_selftest
+  and scenarios 1-27 output identical. Calibration repeats reviewed, nothing provable. AGENTS.md + REPORT updated. 11/11.
 
 ## Round 2 plan (start at 03:45; window 2 ~03:40-08:40, window 3 ~08:45-10:30 hard stop)
 Window 2, in parallel, each in its own worktree reset onto overnight-claude-improvements:

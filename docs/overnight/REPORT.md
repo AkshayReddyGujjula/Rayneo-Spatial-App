@@ -74,6 +74,10 @@ It does nothing while you read (reading output is identical to before).
   minutes 32.8 -> 16.0 deg. Trade-off, measured and bounded: if a bad start *and* a very slow
   level turn happen in the same still period, it can learn the turn (+3 deg in the worst
   simulated case).
+- **Independent check of that new maths:** a second reviewer found one real flaw (a timing
+  mismatch that could let a slow nod "correct" a startup reading that was already right, costing
+  up to ~2.8 deg of drift) and fixed it with a new test; the calibration averaging was checked and
+  found sound.
 
 ## Decision for you
 - **Calibration repeats in the app:** should in-app calibration use 3 repeats by default? It adds
