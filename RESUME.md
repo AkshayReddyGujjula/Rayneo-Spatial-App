@@ -68,6 +68,10 @@ Build dirs live under `%LOCALAPPDATA%\Temp\rayneo-overnight\` (never inside the 
   Orchestrator: AGENTS.md folded (4241552); docs/overnight/REPORT.md drafted (round-2 section pending).
 - 04:02 R2-B merged (61150a9): opt-in `--repeats N` (default 1) with robust averaging + quality band in UI; 11/11 green.
   Open decision for the user: use `--repeats 3` in the in-app wizard (+21 s, modelled error -40%). 5-hour 20%, weekly 60%.
+- 04:10 R2-A merged (0393b32; include conflict in orientation_calibration_selftest resolved): 4 confirmed bugs fixed
+  (concurrent selftests, prediction overshoot on tracking toggle = scenario 24, hidden-window animation timer,
+  setup guide overwriting a failed app.json). 11/11 green; 18x parallel selftest runs 0 failures.
+  R3-A launched (Opus medium) for the 3 confirmed-unfixed UI bugs in r2-review.md. R2-C told to use scenario 25+.
 
 ## Round 2 plan (start at 03:45; window 2 ~03:40-08:40, window 3 ~08:45-10:30 hard stop)
 Window 2, in parallel, each in its own worktree reset onto overnight-claude-improvements:
