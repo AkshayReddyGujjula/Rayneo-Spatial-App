@@ -140,3 +140,5 @@ Window 3: merge leftovers, final full suite, final report. Stop at 10:30.
   renders viewed (turn off-axis, countdown). AGENTS.md section 10 + REPORT section 7 updated. 5-hour ~88%.
 - 07:50 User asked: at 08:40 start an in-depth code + correctness review (code-review skill) of everything done,
   3-4 Opus agents at medium/high, find and fix real defects. Nudge task rayneo-overnight-resume-2 moved to 08:41 to start it.
+- 08:47 The 08:41 nudge ran but never reached this session; user asked at 08:46. Started the code review now (5-hour 0%).
+  Four Opus reviewers R6-A..D (estimator+engine, calibration+guide, controller window/state, paint/widgets).
