@@ -254,8 +254,8 @@ private:
     void finish_calibration();
     void reset_calibration_window();
     bool accumulate_calibration_window(const Vec3& raw, const Vec3& accel, float dt, bool qualifies);
-    void confirm_startup_window(const Vec3& mean, const Vec3& accel_mean);
-    bool confirm_single_episode(int current, const Vec3& accel_mean);
+    void confirm_startup_window(const Vec3& mean, const Vec3& accel_mean, const Quat& window_half);
+    bool confirm_single_episode(int current, const Vec3& accel_mean, const Quat& window_half);
     void reset_escape();
     Vec3 confirm_episode_mean(int index) const;
     void set_reference(const Quat& q);
@@ -306,6 +306,13 @@ private:
     // Sensor rotation since that first window, integrated sample by sample
     // with the bias in use: the motion the current bias claims happened.
     Quat single_rotation_;
+    // A window's mean gravity stands for the orientation half-way through the
+    // window, not at its end where single_rotation_ starts and stops. The
+    // rotation over the open calibration window (bias in use), and the
+    // second half of the first window's, put both ends of the gravity
+    // comparison at window mid-points.
+    Quat window_rotation_;
+    Quat single_first_half_;
     // Counts detected motion events; a window's rest episode is the count at
     // its completion (motion breaks any open window, so a window never spans
     // two episodes).

@@ -1536,6 +1536,70 @@ int main() {
               std::fabs(on), 1.25f * std::fabs(off));
     }
 
+    std::printf("\n-- scenario 28: a correct startup and slow nods are never single-episode evidence --\n");
+    {
+        // The single-episode gravity comparison must use the same instants on
+        // both sides. Each window's mean gravity stands for the orientation
+        // half-way through it, but the integrated rotation ran from the END of
+        // the first window to the END of the current one. A slow nod up during
+        // the first window and a slow nod down during the current one (both
+        // under the 3 deg/s rest ceiling, so both qualify) skew the two ends
+        // by up to ~3.8 deg - enough for a real 5 deg swing to read as
+        // "gravity did not move" and reseed a CORRECT startup bias. Here the
+        // startup is clean (no contamination, so outside scenario 27's
+        // exposure); between the nods the wearer looks left and back at
+        // 3.5 deg/s (fast enough to make no rest window, slow enough not to be
+        // a detected motion, so it stays one episode). The nod-down length is
+        // swept so the end lands at every phase of a window.
+        int runs = 0;
+        int reseeded = 0;
+        float worst_drift = 0.0f;
+        float worst_drift_off = 0.0f;
+        for (int i = 0; i <= 40; ++i) {
+            const float fall_s = 1.0f + 0.1f * static_cast<float>(i);
+            float drift[2] = {0.0f, 0.0f};
+            for (int rule = 0; rule < 2; ++rule) {
+                PoseEstimator::Config cfg;
+                if (rule == 0) {
+                    cfg.startup_episode_min_s = 0.0f;
+                }
+                HeadSim sim(0x5EED0028u + static_cast<uint32_t>(i));
+                sim.bias_walk_degs = 0.0f;
+                sim.bias_pkg_degs.y = 0.4f;
+                sim.est.configure(cfg);
+                while (!sim.est.bias_done()) {
+                    sim.step(Vec3{});
+                }
+                sim.move(2.9f, 0.3f, 1.2f, Vec3{0.0f, 1.0f, 0.0f});   // slow nod up
+                sim.move(3.5f, 0.4f, 3.0f, Vec3{0.0f, 0.0f, 1.0f});   // look left ...
+                sim.move(-3.5f, 0.4f, 3.0f, Vec3{0.0f, 0.0f, 1.0f});  // ... and back
+                sim.move(-2.9f, 0.3f, fall_s, Vec3{0.0f, 1.0f, 0.0f});  // slow nod down
+                sim.hold(3.0f);
+                const float pub0 = sim.yaw();
+                const float true0 = true_yaw(sim);
+                sim.hold(60.0f);
+                drift[rule] = std::fabs((sim.yaw() - pub0) - (true_yaw(sim) - true0));
+                if (rule == 1) {
+                    ++runs;
+                    if (sim.est.startup_episode_reseeds() > 0) {
+                        ++reseeded;
+                    }
+                }
+            }
+            worst_drift_off = std::max(worst_drift_off, drift[0]);
+            worst_drift = std::max(worst_drift, drift[1]);
+        }
+        std::printf("  correct startup, nod up / look left and back / nod down (%d lengths): %d single-episode "
+                    "reseeds\n",
+                    runs, reseeded);
+        std::printf("  worst yaw drift over the next 60 s still: %.3f deg (rule off %.3f deg)\n", worst_drift,
+                    worst_drift_off);
+        check(reseeded == 0, "a correct startup bias is never reseeded by one episode",
+              static_cast<float>(reseeded), 0.0f);
+        check(worst_drift < worst_drift_off + 0.1f, "and the heading holds as without the rule", worst_drift,
+              worst_drift_off + 0.1f);
+    }
+
     std::printf("\npose_scenarios: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
