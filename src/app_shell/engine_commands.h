@@ -64,6 +64,10 @@ struct EngineStatusFile {
     std::string mag;
     double mag_error_deg = 0.0;
     double mag_offset_ut = 0.0;
+    // Startup phase (optional keys "phase" / "phase_progress"; empty phase and
+    // a negative progress = not reported, e.g. an older engine).
+    std::string phase;
+    double phase_progress = -1.0;
 };
 
 bool parse_engine_status(const std::string& text, EngineStatusFile& status, std::string& error);

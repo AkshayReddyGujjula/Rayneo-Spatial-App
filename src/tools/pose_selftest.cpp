@@ -861,6 +861,106 @@ int main() {
         }
     }
 
+    // Read-only startup phase for the wearer prompt (status key "phase"):
+    // production startup constants, a still head with a 0.4 deg/s bias, one
+    // head movement and one >= 50 ms sample gap inside the hold-still search.
+    std::printf("pose_selftest: startup phase accessors report warm-up -> hold still -> tracking\n");
+    {
+        PoseEstimator estimator;
+        estimator.configure(PoseEstimator::Config{});
+        uint32_t tick = 7000000;
+        int order_violations = 0;
+        int tracking_mismatch = 0;
+        int last_phase = static_cast<int>(estimator.startup_phase());
+        auto sample = [&](const Vec3& gyro, uint32_t step) {
+            ImuSample s;
+            s.accel_mps2 = package_from_body(Vec3{0.0f, 0.0f, 9.81f});
+            s.gyro_degs = gyro;
+            s.tick_100us = tick += step;
+            estimator.add_sample(s);
+            const int phase = static_cast<int>(estimator.startup_phase());
+            if (phase < last_phase) {
+                ++order_violations;
+            }
+            if ((estimator.startup_phase() == StartupPhase::tracking) != estimator.calibrated()) {
+                ++tracking_mismatch;
+            }
+            last_phase = phase;
+        };
+        const Vec3 still{0.0f, 0.4f, 0.0f};
+        auto feed_still = [&](int samples) {
+            for (int i = 0; i < samples; ++i) {
+                sample(still, 21);
+            }
+        };
+
+        const bool starts_warm = estimator.startup_phase() == StartupPhase::warmup &&
+                                 estimator.startup_progress() == 0.0f;
+        check(starts_warm, "a fresh estimator reports warm-up at 0", estimator.startup_progress(), 0.0f);
+        feed_still(952);  // 2.0 s of the 4 s warm-up
+        const float warm_half = estimator.startup_progress();
+        check(estimator.startup_phase() == StartupPhase::warmup && std::fabs(warm_half - 0.5f) < 0.02f,
+              "half-way through the warm-up reports ~0.5", warm_half, 0.5f);
+        sample(still, 600);  // a 60 ms gap during the warm-up is skipped, not counted
+        const float after_warm_gap = estimator.startup_progress();
+        check(estimator.startup_phase() == StartupPhase::warmup && after_warm_gap == warm_half,
+              "a warm-up gap neither advances nor resets the warm-up", after_warm_gap, warm_half);
+        int warm_samples = 0;
+        while (estimator.startup_phase() == StartupPhase::warmup && warm_samples < 2000) {
+            feed_still(1);
+            ++warm_samples;
+        }
+        const float warm_s = (952.0f + static_cast<float>(warm_samples)) * 21e-4f;
+        check(estimator.startup_phase() == StartupPhase::hold_still && std::fabs(warm_s - 4.0f) < 0.01f,
+              "hold still begins when the 4 s warm-up ends", warm_s, 4.0f);
+
+        // The warm-up gap armed the 1 s motion hold-off (bug 12), so the
+        // window opens ~1 s into hold still: ~0.9 s of window, then a move.
+        feed_still(906);
+        const float before_move = estimator.startup_progress();
+        check(estimator.startup_phase() == StartupPhase::hold_still && before_move > 0.2f && before_move < 0.9f,
+              "the hold-still window fills while the head is still", before_move, 0.2f);
+        for (int i = 0; i < 95; ++i) {  // 0.2 s at 40 deg/s
+            sample(Vec3{0.0f, 0.0f, 40.0f}, 21);
+        }
+        feed_still(1);
+        const float after_move = estimator.startup_progress();
+        check(estimator.startup_phase() == StartupPhase::hold_still && after_move == 0.0f,
+              "a head movement restarts the hold-still window at 0", after_move, 0.0f);
+
+        // Refill partly, then lose 60 ms of samples.
+        feed_still(900);  // ~1.9 s: the 1 s motion hold-off, then part of a window
+        const float before_gap = estimator.startup_progress();
+        check(estimator.startup_phase() == StartupPhase::hold_still && before_gap > 0.2f && before_gap < 0.9f,
+              "the window refills after the movement", before_gap, 0.2f);
+        sample(still, 600);
+        const float after_gap = estimator.startup_progress();
+        check(estimator.startup_phase() == StartupPhase::hold_still && after_gap == 0.0f,
+              "a >= 50 ms sample gap restarts the hold-still window at 0", after_gap, 0.0f);
+
+        float last_hold = 0.0f;
+        int hold_samples = 0;
+        while (estimator.startup_phase() == StartupPhase::hold_still && hold_samples < 5000) {
+            last_hold = estimator.startup_progress();
+            feed_still(1);
+            ++hold_samples;
+        }
+        std::printf("  warm-up %.2f s; window fill before the move %.2f, before the gap %.2f; "
+                    "tracking %.2f s after the gap (last hold-still progress %.3f)\n",
+                    warm_s, before_move, before_gap, static_cast<float>(hold_samples) * 21e-4f, last_hold);
+        check(estimator.startup_phase() == StartupPhase::tracking && estimator.startup_progress() == 1.0f &&
+                  last_hold > 0.99f,
+              "a full contiguous window opens tracking at progress 1", last_hold, 0.99f);
+        check(order_violations == 0, "the phase never steps backwards", static_cast<float>(order_violations),
+              0.0f);
+        check(tracking_mismatch == 0, "tracking is reported exactly when calibrated()",
+              static_cast<float>(tracking_mismatch), 0.0f);
+        feed_still(2000);
+        check(estimator.startup_phase() == StartupPhase::tracking && estimator.startup_progress() == 1.0f,
+              "startup confirmation windows after tracking opens do not reopen hold still",
+              estimator.startup_progress(), 1.0f);
+    }
+
     std::printf("pose_selftest: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

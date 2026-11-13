@@ -484,6 +484,12 @@ void AppWindow::on_timer(UINT_PTR timer_id) {
             calibration_.terminate();
         }
         invalidate();
+    } else if (timer_id == kTimerStartup) {
+        // Status file only, and never sooner than 0.5 s after the last read.
+        if (state_.engine_status_read_s < 0.0 || state_.now_s - state_.engine_status_read_s >= 0.49) {
+            refresh_engine_status(state_);
+            invalidate();
+        }
     } else if (timer_id == kTimerAnimation) {
         const double dt = last_animation_s_ > 0.0 ? state_.now_s - last_animation_s_ : 0.016;
         last_animation_s_ = state_.now_s;
@@ -491,6 +497,24 @@ void AppWindow::on_timer(UINT_PTR timer_id) {
         invalidate();
     }
     update_animation_timer();
+    update_startup_timer();
+}
+
+void AppWindow::update_startup_timer() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    const bool wanted = engine_startup_fast_poll(state_) && IsWindowVisible(hwnd_) != FALSE &&
+                        IsIconic(hwnd_) == FALSE;
+    if (wanted == startup_timer_) {
+        return;
+    }
+    startup_timer_ = wanted;
+    if (wanted) {
+        SetTimer(hwnd_, kTimerStartup, kStartupPollMs, nullptr);
+    } else {
+        KillTimer(hwnd_, kTimerStartup);
+    }
 }
 
 void AppWindow::on_close() {
@@ -531,6 +555,8 @@ void AppWindow::on_destroy() {
     }
     KillTimer(hwnd_, kTimerHealth);
     KillTimer(hwnd_, kTimerAnimation);
+    KillTimer(hwnd_, kTimerStartup);
+    startup_timer_ = false;
     animation_timer_ = false;
     if (calibration_.active()) {
         // Graceful first: the tool turns the IMU stream off on "q"/EOF

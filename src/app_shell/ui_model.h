@@ -85,6 +85,50 @@ enum class HeadingLockState : int {
 };
 
 bool parse_heading_lock_state(const std::string& text, HeadingLockState& state);
+
+// Engine startup phase as reported by the status file (key "phase", see
+// app/engine_protocol.h). Unknown covers an older engine that does not
+// report it and any value this controller does not know (a newer engine):
+// both keep the generic Starting / Running view.
+enum class EnginePhase : int {
+    Unknown = 0,
+    Preparing,
+    Takeover,
+    WaitingDisplay,
+    Connecting,
+    ImuWarmup,
+    HoldStill,
+    Tracking,
+    Running,
+    Restoring,
+};
+
+EnginePhase parse_engine_phase(const std::string& text);
+
+// Plain-language startup steps for the Home hero. Visible only during the
+// phases the wearer waits through; the active step's progress is -1 when
+// it has none (indeterminate).
+inline constexpr int kStartupStepCount = 4;
+// Warm-up share after which the hero switches to "Get ready to hold still".
+inline constexpr double kStartupGetReadyAt = 0.6;
+
+struct StartupView {
+    bool visible = false;
+    int step_count = 0;    // kStartupStepCount with head tracking, else 0
+    int active_step = -1;  // index into steps
+    const wchar_t* steps[kStartupStepCount] = {L"Screens", L"Glasses sensor", L"Warm-up", L"Hold still"};
+    const wchar_t* headline = L"";
+    const wchar_t* detail = L"";
+    double progress = -1.0;
+    bool get_ready = false;   // the end of the warm-up: hold still is next
+    bool hold_still = false;  // the gyro bias is being measured: keep still
+};
+
+StartupView startup_view(EnginePhase phase, double phase_progress, bool head_tracking);
+
+// One line shown under the Start buttons.
+inline constexpr const wchar_t* kStartStillHint =
+    L"After you start, look straight ahead and keep your head still for a few seconds when asked.";
 const wchar_t* heading_lock_label(HeadingLockState state);
 const wchar_t* heading_lock_detail(HeadingLockState state);
 

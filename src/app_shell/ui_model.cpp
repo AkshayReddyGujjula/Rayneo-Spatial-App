@@ -212,6 +212,92 @@ const wchar_t* heading_lock_detail(HeadingLockState state) {
     }
 }
 
+EnginePhase parse_engine_phase(const std::string& text) {
+    const std::string key = lower_ascii(text);
+    if (key == "preparing") return EnginePhase::Preparing;
+    if (key == "takeover") return EnginePhase::Takeover;
+    if (key == "waiting_display") return EnginePhase::WaitingDisplay;
+    if (key == "connecting") return EnginePhase::Connecting;
+    if (key == "imu_warmup") return EnginePhase::ImuWarmup;
+    if (key == "hold_still") return EnginePhase::HoldStill;
+    if (key == "tracking") return EnginePhase::Tracking;
+    if (key == "running") return EnginePhase::Running;
+    if (key == "restoring") return EnginePhase::Restoring;
+    return EnginePhase::Unknown;
+}
+
+StartupView startup_view(EnginePhase phase, double phase_progress, bool head_tracking) {
+    StartupView view;
+    const double progress = phase_progress < 0.0 ? -1.0 : (phase_progress > 1.0 ? 1.0 : phase_progress);
+    switch (phase) {
+        case EnginePhase::Preparing:
+            view.active_step = 0;
+            view.headline = L"Starting the engine";
+            view.detail = L"Loading your layout and calibration.";
+            break;
+        case EnginePhase::Takeover:
+            view.active_step = 0;
+            view.headline = L"Setting up your screens";
+            view.detail = L"Creating the virtual screens and arranging your displays. This can take up to "
+                          L"half a minute, and the screens may flicker.";
+            break;
+        case EnginePhase::WaitingDisplay:
+            view.active_step = 0;
+            view.headline = L"Waiting for the glasses display";
+            view.detail = L"The glasses display dropped out while the screens were arranged. Waiting up to "
+                          L"15 seconds for it to come back.";
+            break;
+        case EnginePhase::Connecting:
+            view.active_step = 1;
+            view.headline = L"Connecting to the glasses sensor";
+            view.detail = L"Waiting for the head-tracking sensor in the glasses to start. If this takes "
+                          L"long, check the glasses cable.";
+            break;
+        case EnginePhase::ImuWarmup:
+            view.active_step = 2;
+            view.progress = progress;
+            view.get_ready = progress >= kStartupGetReadyAt;
+            if (view.get_ready) {
+                view.headline = L"Get ready to hold still";
+                view.detail = L"Look straight ahead. In a moment, keep your head still for about two "
+                              L"seconds.";
+            } else {
+                view.headline = L"Warming up the sensor";
+                view.detail = L"Put the glasses on and look straight ahead. You will be asked to keep "
+                              L"still in a few seconds.";
+            }
+            break;
+        case EnginePhase::HoldStill:
+            view.active_step = 3;
+            view.progress = progress < 0.0 ? 0.0 : progress;
+            view.hold_still = true;
+            view.headline = L"Hold your head still";
+            view.detail = view.progress > 0.0
+                              ? L"Measuring the sensor while you keep still. Any movement starts it again."
+                              : L"Keep looking straight ahead without moving. Measuring starts as soon as "
+                                L"your head is steady.";
+            break;
+        case EnginePhase::Tracking:
+        case EnginePhase::Running:
+        case EnginePhase::Restoring:
+        case EnginePhase::Unknown:
+        default:
+            return view;
+    }
+    if (!head_tracking) {
+        // Without head tracking only the screen setup is waited for; the
+        // sensor steps never happen, so a sensor phase shows nothing.
+        if (view.active_step > 0) {
+            return StartupView{};
+        }
+        view.step_count = 0;
+    } else {
+        view.step_count = kStartupStepCount;
+    }
+    view.visible = true;
+    return view;
+}
+
 int predict_ms_choice_index(int predict_ms) {
     for (int i = 0; i < kPredictMsChoiceCount; ++i) {
         if (kPredictMsChoices[i] == predict_ms) {

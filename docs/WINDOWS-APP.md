@@ -11,7 +11,8 @@ RayNeo Spatial.exe  (this app, WIN32 subsystem, taskbar identity RayNeo.Spatial.
         |
         |  CreateProcessW            "spatial_desk.exe --layout ... --calibration ... --log ... --status ..."
         |  private window messages   WM_APP+0x101..0x106  (query, quit, recenter, yaw, pitch, reload)
-        |  status file              logs\engine-status.txt  (key=value, rewritten 1/s, read at <= 2 Hz)
+        |  status file              logs\engine-status.txt  (key=value, rewritten 1/s (4/s while the wearer
+        |                           holds still), read at <= 2 Hz)
         v
 spatial_desk.exe  (renderer engine: D3D11, VDD desktops, capture, IMU)
 ```
@@ -61,7 +62,7 @@ shows the engine state, and clicking it returns to Home. Every setting keeps its
 
 | Page | What it holds |
 |---|---|
-| **Home** | The state in one sentence with the next action (Start workspace / Start preview, or Recenter / Reload layout / Stop while running, with screens, frame rate and uptime), a **Readiness** checklist (glasses display, head calibration, sensor, virtual display driver, layout file) with a fix link for each problem, a layout thumbnail and live head angles |
+| **Home** | The state in one sentence with the next action (Start workspace / Start preview, or Recenter / Reload layout / Stop while running, with screens, frame rate and uptime), a **Readiness** checklist (glasses display, head calibration, sensor, virtual display driver, layout file) with a fix link for each problem, a layout thumbnail and live head angles. While the engine starts, the hero shows its startup steps (see *Startup steps* below) |
 | **Layout** | Presets, the arrangement editor (2D map / 3D view, fullscreen), the screen list with Add/Remove and the selected-screen inspector; **Save and apply** and **Revert** in the page header |
 | **Comfort** | Reading stabilisation, screen dimming (with per-screen or focus sliders), night tint and warmth, cursor to centre |
 | **Tracking** | Yaw/pitch tracking (live), preview without head tracking, motion prediction, the magnetic heading lock status, and both calibrations (in-app with live progress, or in a console window) |
@@ -97,6 +98,28 @@ Other output lines are ignored (the last few are shown if the run fails). If the
 without a `done` or `failed` line, the run fails with the exit code and offers **Try again**.
 Calibration is disabled while the engine runs (both need the sensor). **Open in console** keeps
 the previous behaviour: the tool in its own console window.
+
+### Startup steps and the hold-still prompt
+
+The engine reports its startup phase in the status file (`phase=` and `phase_progress=`, contract in
+`src/app/engine_protocol.h` and `docs/overnight/r4-startup-phases.md`). While it starts, the Home hero
+replaces the generic "Starting the engine" with four steps — **Screens**, **Glasses sensor**,
+**Warm-up**, **Hold still** — and a progress bar for the warm-up and the hold-still measurement:
+
+| Engine phase | Hero says |
+|---|---|
+| `preparing`, `takeover`, `waiting_display` | Starting the engine / Setting up your screens (up to half a minute) / Waiting for the glasses display |
+| `connecting` | Connecting to the glasses sensor |
+| `imu_warmup` | Warming up the sensor; for the last 40% of the 4 s warm-up **Get ready to hold still** |
+| `hold_still` | **Hold your head still** on an accent panel; the bar fills over the ~1.3 s measurement and drops back to empty if the head moves |
+| `tracking`, `running`, `restoring` | the normal Running / Stopping view |
+
+The startup gyro-bias window is measured during *Hold still*; a head movement there used to be the
+biggest source of early drift (AGENTS.md bug 26). Before a start the hero also says *After you start,
+look straight ahead and keep your head still for a few seconds when asked.* An engine without the
+`phase` key, or one reporting a value this controller does not know, keeps the generic view. While the
+engine reports the warm-up or hold still, a second timer re-reads only the status file at 2 Hz. The
+glasses themselves show no prompt: the renderer has no text overlay.
 
 ### Start workspace vs Start preview
 
@@ -277,7 +300,9 @@ dirty working tree after running the app is expected.
   (twice per second), and HID/VDD/calibration checks run at most every 2 s. A second timer exists
   only while something animates (see *Animation and accessibility*) and is killed as soon as it
   settles; the idle UI is fully event-driven. In-app calibration output arrives through a posted
-  message from the reader thread, not a poll.
+  message from the reader thread, not a poll. A status-only 500 ms timer runs only while the engine
+  reports the sensor warm-up or the hold-still measurement (a few seconds per start), and skips its
+  read when the last one is under 0.5 s old.
 * **Recovery states** are explicit: the banner (dismissible) names the failure, `Open engine log`
   shows the engine's own output, the Tracking page runs calibration in-app or in its own console,
   and the health checks keep the VDD/calibration/display state visible. A failed engine never leaves a stale "ready"

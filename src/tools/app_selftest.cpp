@@ -1675,6 +1675,88 @@ void test_ui_input() {
           "a captured drag keeps its pressed look and hover when the pointer leaves");
 }
 
+// Startup phase keys (status file "phase" / "phase_progress") and the Home
+// steps they map to. Older engines without the keys, and unknown values from
+// newer engines, must keep the generic view.
+void test_startup_phase() {
+    std::printf("app_selftest: startup phase status keys and Home steps\n");
+    std::string error;
+    gt::EngineStatusFile status;
+    check(gt::parse_engine_status("state=ready\nimu=1\nphase=hold_still\nphase_progress=0.42\n", status, error) &&
+              status.phase == "hold_still" && std::fabs(status.phase_progress - 0.42) < 1e-9,
+          "phase and phase_progress parse");
+    check(std::string(gt::kStatusKeyPhase) == "phase" && std::string(gt::kStatusKeyPhaseProgress) == "phase_progress",
+          "the phase keys keep their names");
+    check(gt::parse_engine_status("state=ready\nimu=1\nfps=60.00\n", status, error) && status.phase.empty() &&
+              status.phase_progress < 0.0,
+          "an older engine without the keys reports no phase");
+    const gt::StartupView old_engine =
+        gt::startup_view(gt::parse_engine_phase(status.phase), status.phase_progress, status.imu);
+    check(!old_engine.visible, "no phase key keeps the generic Starting/Running view");
+    check(gt::parse_engine_status("state=ready\nphase=calibrating_v2\nphase_progress=nan\n", status, error) &&
+              gt::parse_engine_phase(status.phase) == gt::EnginePhase::Unknown && status.phase_progress < 0.0,
+          "an unknown phase value and a non-numeric progress are ignored");
+    check(!gt::startup_view(gt::EnginePhase::Unknown, 0.5, true).visible, "an unknown phase shows no steps");
+    check(gt::parse_engine_status("state=ready\nphase=imu_warmup\nphase_progress=1.7\n", status, error) &&
+              status.phase_progress == 1.0,
+          "a progress above 1 is clamped");
+    check(gt::parse_engine_status("state=ready\nphase=imu_warmup\nphase_progress=-0.2\n", status, error) &&
+              status.phase_progress < 0.0,
+          "a negative progress counts as not reported");
+
+    // Every engine phase value round-trips to its own enum.
+    const struct {
+        const char* name;
+        gt::EnginePhase phase;
+    } names[] = {{gt::kPhasePreparing, gt::EnginePhase::Preparing},
+                 {gt::kPhaseTakeover, gt::EnginePhase::Takeover},
+                 {gt::kPhaseWaitingDisplay, gt::EnginePhase::WaitingDisplay},
+                 {gt::kPhaseConnecting, gt::EnginePhase::Connecting},
+                 {gt::kPhaseImuWarmup, gt::EnginePhase::ImuWarmup},
+                 {gt::kPhaseHoldStill, gt::EnginePhase::HoldStill},
+                 {gt::kPhaseTracking, gt::EnginePhase::Tracking},
+                 {gt::kPhaseRunning, gt::EnginePhase::Running},
+                 {gt::kPhaseRestoring, gt::EnginePhase::Restoring}};
+    bool all_named = true;
+    for (const auto& entry : names) {
+        all_named = all_named && gt::parse_engine_phase(entry.name) == entry.phase;
+    }
+    check(all_named, "every engine phase value maps to its own phase");
+
+    // Steps with head tracking: screens, glasses sensor, warm-up, hold still.
+    const auto step_of = [](gt::EnginePhase phase) { return gt::startup_view(phase, -1.0, true).active_step; };
+    check(step_of(gt::EnginePhase::Preparing) == 0 && step_of(gt::EnginePhase::Takeover) == 0 &&
+              step_of(gt::EnginePhase::WaitingDisplay) == 0 && step_of(gt::EnginePhase::Connecting) == 1 &&
+              step_of(gt::EnginePhase::ImuWarmup) == 2 && step_of(gt::EnginePhase::HoldStill) == 3,
+          "each startup phase activates its step");
+    check(!gt::startup_view(gt::EnginePhase::Tracking, 1.0, true).visible &&
+              !gt::startup_view(gt::EnginePhase::Running, 1.0, false).visible &&
+              !gt::startup_view(gt::EnginePhase::Restoring, -1.0, true).visible,
+          "tracking, running and restoring hide the steps");
+    const gt::StartupView takeover = gt::startup_view(gt::EnginePhase::Takeover, -1.0, true);
+    check(takeover.visible && takeover.step_count == gt::kStartupStepCount && takeover.progress < 0.0 &&
+              !takeover.hold_still,
+          "the display takeover shows indeterminate steps");
+    const gt::StartupView early = gt::startup_view(gt::EnginePhase::ImuWarmup, 0.3, true);
+    const gt::StartupView late = gt::startup_view(gt::EnginePhase::ImuWarmup, 0.75, true);
+    check(early.visible && !early.get_ready && std::fabs(early.progress - 0.3) < 1e-9 && late.get_ready &&
+              !late.hold_still && std::wstring(late.headline).find(L"hold still") != std::wstring::npos,
+          "the end of the warm-up asks the wearer to get ready to hold still");
+    const gt::StartupView waiting = gt::startup_view(gt::EnginePhase::HoldStill, 0.0, true);
+    const gt::StartupView measuring = gt::startup_view(gt::EnginePhase::HoldStill, 0.5, true);
+    const gt::StartupView unreported = gt::startup_view(gt::EnginePhase::HoldStill, -1.0, true);
+    check(waiting.hold_still && measuring.hold_still && waiting.progress == 0.0 && measuring.progress == 0.5 &&
+              unreported.progress == 0.0 && std::wstring(waiting.detail) != measuring.detail &&
+              std::wstring(measuring.headline) == L"Hold your head still",
+          "hold still shows the prompt with a filling bar");
+    const gt::StartupView no_imu_takeover = gt::startup_view(gt::EnginePhase::Takeover, -1.0, false);
+    check(no_imu_takeover.visible && no_imu_takeover.step_count == 0 &&
+              !gt::startup_view(gt::EnginePhase::HoldStill, 0.5, false).visible,
+          "without head tracking only the screen setup is shown, with no sensor steps");
+    check(std::wstring(gt::kStartStillHint).find(L"still") != std::wstring::npos,
+          "the pre-start hint asks the wearer to keep still");
+}
+
 int main() {
     std::printf("app_selftest: controller app model\n");
     std::filesystem::path directory;
@@ -1697,6 +1779,7 @@ int main() {
     test_engine_protocol();
     test_engine_commands();
     test_status_freshness();
+    test_startup_phase();
     test_app_config(directory);
     test_presets_and_screens();
     test_user_presets(directory);

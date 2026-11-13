@@ -20,6 +20,17 @@ enum class BiasAdaptState : int {
     calibrating = 3,
 };
 
+// Startup phase, derived read-only from the calibration state (diagnostics
+// and the wearer prompt; nothing in the estimator reads it). `warmup` is the
+// discarded stream-on period, `hold_still` is the search for one contiguous
+// calibration-grade rest window (the gyro bias is measured here, so the
+// wearer must keep the head still), `tracking` means the pose is published.
+enum class StartupPhase : int {
+    warmup = 0,
+    hold_still = 1,
+    tracking = 2,
+};
+
 class PoseEstimator {
 public:
     struct Config {
@@ -216,6 +227,13 @@ public:
     // True when the startup bias came from one contiguous high-confidence rest
     // window. Tracking never opens while this is false.
     bool calibrated() const { return calibrated_; }
+    // Read-only startup phase (see StartupPhase) and its progress in 0..1:
+    // warmup = share of the warm-up (time and settle-sample floors) done;
+    // hold_still = fill of the open contiguous window (time and sample
+    // floors), 0 while waiting for rest, and back to 0 whenever motion or a
+    // >= 50 ms sample gap discards the window; tracking = 1.
+    StartupPhase startup_phase() const;
+    float startup_progress() const;
     // Startup confirmation (see Config): how many times a consensus replaced
     // the startup bias, and how many times a later episode reverted it (each
     // 0 or 1 per startup).

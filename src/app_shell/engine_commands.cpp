@@ -256,6 +256,13 @@ bool parse_engine_status(const std::string& text, EngineStatusFile& status, std:
             parse_double(value, parsed.mag_error_deg);
         } else if (key == kStatusKeyMagOffset) {
             parse_double(value, parsed.mag_offset_ut);
+        } else if (key == kStatusKeyPhase) {
+            parsed.phase = value;
+        } else if (key == kStatusKeyPhaseProgress) {
+            double progress = -1.0;
+            if (parse_double(value, progress) && progress >= 0.0) {
+                parsed.phase_progress = progress > 1.0 ? 1.0 : progress;
+            }
         }
     }
     if (!saw_state) {

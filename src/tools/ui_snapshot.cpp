@@ -196,6 +196,24 @@ void running_state(gt::AppState& state) {
     state.heading_lock = gt::HeadingLockState::Locked;
 }
 
+// The engine mid-startup: the display takeover runs while the controller
+// still says Starting (no engine window yet); the sensor phases run after the
+// window exists, so the controller already says Running.
+void startup_state(gt::AppState& state, const char* phase, double progress) {
+    running_state(state);
+    gt::EngineSnapshot snapshot = state.engine.snapshot();
+    const bool takeover = std::string(phase) == gt::kPhaseTakeover;
+    snapshot.state = takeover ? gt::EngineProcessState::Starting : gt::EngineProcessState::Running;
+    snapshot.uptime_s = takeover ? 9.0 : 24.0;
+    snapshot.query_answered = !takeover;
+    state.engine.set_preview_snapshot(snapshot, true);
+    state.engine_status.state = takeover ? "starting" : "ready";
+    state.engine_status.fps = takeover ? 0.0 : 60.0;
+    state.engine_status.phase = phase;
+    state.engine_status.phase_progress = progress;
+    state.heading_lock = gt::HeadingLockState::Unknown;
+}
+
 struct Shot {
     std::string name;
     int width;
@@ -314,6 +332,23 @@ std::vector<Shot> shots() {
     list.push_back({"home-running-1920x1080-150", 1920, 1080, 144, true, page(AppPage::Home, true, true)});
     list.push_back({"home-setup-needed-1280x800-light", 1280, 800, 96, false, page(AppPage::Home, false, false)});
     list.push_back({"home-narrow-820x640", 820, 640, 96, true, page(AppPage::Home, true, true)});
+    const auto starting = [](const char* phase, double progress) {
+        return [=](AppState& s) {
+            base_state(s, true);
+            startup_state(s, phase, progress);
+            s.page = AppPage::Home;
+        };
+    };
+    list.push_back({"home-startup-takeover-1280x800", 1280, 800, 96, true, starting(gt::kPhaseTakeover, -1.0)});
+    list.push_back({"home-startup-warmup-1280x800-light", 1280, 800, 96, false,
+                    starting(gt::kPhaseImuWarmup, 0.35)});
+    list.push_back({"home-startup-get-ready-1280x800", 1280, 800, 96, true, starting(gt::kPhaseImuWarmup, 0.8)});
+    list.push_back({"home-startup-hold-still-1920x1080-150", 1920, 1080, 144, true,
+                    starting(gt::kPhaseHoldStill, 0.55)});
+    list.push_back({"home-startup-hold-still-1280x800-light", 1280, 800, 96, false,
+                    starting(gt::kPhaseHoldStill, 0.0)});
+    list.push_back({"home-startup-hold-still-narrow-820x640", 820, 640, 96, true,
+                    starting(gt::kPhaseHoldStill, 0.3)});
     list.push_back({"layout-1280x800", 1280, 800, 96, true, [](AppState& s) {
                         base_state(s, true);
                         s.page = AppPage::Layout;

@@ -19,12 +19,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <condition_variable>
 #include <cwctype>
 #include <cstring>
 #include <fstream>
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <string>
 #include <thread>
@@ -73,6 +75,9 @@ struct StatusReport {
     std::string mag = "off";
     float mag_error_deg = 0.0f;
     float mag_offset_ut = 0.0f;
+    // Startup phase (gt::kPhase*) and its progress, see engine_protocol.h.
+    std::string phase = gt::kPhasePreparing;
+    float phase_progress = 0.0f;
 };
 
 StatusReport g_status;
@@ -146,7 +151,12 @@ void set_stabilise_level(AppState& app, int level, const char* source) {
     std::printf("  reading stabilisation %s (%s)\n", gt::reading_hold_name(level), source);
 }
 
-void publish_status(const StatusReport& report) {
+// Serialises the file write between the main thread and the startup
+// heartbeat, and keeps the last published report for the heartbeat to repeat.
+std::mutex g_status_write_mutex;
+StatusReport g_status_last;
+
+void write_status_file(const StatusReport& report) {
     if (report.path.empty()) {
         return;
     }
@@ -175,6 +185,11 @@ void publish_status(const StatusReport& report) {
     text += std::string(gt::kStatusKeyUpdated) + "=" +
             std::to_string(static_cast<long long>(std::time(nullptr))) + "\n";
     text += std::string(gt::kStatusKeyError) + "=" + gt::engine_status_sanitize(report.error) + "\n";
+    text += std::string(gt::kStatusKeyPhase) + "=" + report.phase + "\n";
+    char progress[32];
+    std::snprintf(progress, sizeof(progress), "%.2f",
+                  static_cast<double>(std::clamp(report.phase_progress, 0.0f, 1.0f)));
+    text += std::string(gt::kStatusKeyPhaseProgress) + "=" + progress + "\n";
 
     // UTF-8 in, wide API out: the status path may live under a non-ASCII
     // profile directory, where the ANSI file APIs silently fail.
@@ -200,6 +215,72 @@ void publish_status(const StatusReport& report) {
     if (!MoveFileExW(temporary.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING)) {
         std::error_code remove_error;
         std::filesystem::remove(temporary, remove_error);
+    }
+}
+
+void publish_status(const StatusReport& report) {
+    std::lock_guard<std::mutex> lock(g_status_write_mutex);
+    g_status_last = report;
+    write_status_file(report);
+}
+
+// Keeps the status file fresh while the main thread is blocked in the startup
+// sequence (the display takeover takes 13-35 s, the glasses-display wait up
+// to 15 s): the controller discards a status older than 3 s, so without this
+// it would lose the phase exactly when startup is slowest. It only repeats
+// the last report published by the main thread (with a new timestamp) and
+// never touches g_status; it stops before the render loop, whose own
+// cadence takes over. Destruction stops it on every early return.
+class StatusHeartbeat {
+public:
+    StatusHeartbeat() = default;
+    ~StatusHeartbeat() { stop(); }
+    StatusHeartbeat(const StatusHeartbeat&) = delete;
+    StatusHeartbeat& operator=(const StatusHeartbeat&) = delete;
+
+    void start() {
+        if (thread_.joinable()) {
+            return;
+        }
+        stop_ = false;
+        thread_ = std::thread([this] {
+            std::unique_lock<std::mutex> lock(mutex_);
+            while (!cv_.wait_for(lock, std::chrono::seconds(1), [this] { return stop_; })) {
+                std::lock_guard<std::mutex> write_lock(g_status_write_mutex);
+                write_status_file(g_status_last);
+            }
+        });
+    }
+
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+private:
+    std::thread thread_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool stop_ = false;
+};
+
+const char* imu_phase_name(gt::ImuStartPhase phase) {
+    switch (phase) {
+        case gt::ImuStartPhase::warmup:
+            return gt::kPhaseImuWarmup;
+        case gt::ImuStartPhase::hold_still:
+            return gt::kPhaseHoldStill;
+        case gt::ImuStartPhase::tracking:
+            return gt::kPhaseTracking;
+        case gt::ImuStartPhase::connecting:
+        default:
+            return gt::kPhaseConnecting;
     }
 }
 
@@ -814,6 +895,8 @@ int wmain(int argc, wchar_t** argv) {
     g_status.vdd = opt.virtual_displays;
     g_status.imu = !opt.no_imu;
     publish_status(g_status);
+    StatusHeartbeat status_heartbeat;
+    status_heartbeat.start();
 
     if (!std::isfinite(opt.fov) || opt.fov < 20.0f || opt.fov > 150.0f ||
         !std::isfinite(opt.seconds) || opt.seconds < 0.0) {
@@ -883,6 +966,8 @@ int wmain(int argc, wchar_t** argv) {
     TopologyGuard topology_guard;
     gt::WorkspaceTopology workspace_topo;
     if (opt.virtual_displays) {
+        g_status.phase = gt::kPhaseTakeover;
+        publish_status(g_status);
         std::string vdd_error;
         std::wstring internal_display;
         WorkspacePlan plan;
@@ -1077,6 +1162,8 @@ int wmain(int argc, wchar_t** argv) {
         // The recovery runs on every pass, not just once: a single shot can
         // fire while the adapter is still flagged attached.
         std::printf("waiting for the glasses display to reappear...\n");
+        g_status.phase = gt::kPhaseWaitingDisplay;
+        publish_status(g_status);
         for (int wait_s = 0; wait_s < 15 && selected < 0; ++wait_s) {
             std::wstring detached;
             bool recovered = false;
@@ -1220,6 +1307,8 @@ int wmain(int argc, wchar_t** argv) {
     g_status.monitor_width = width;
     g_status.monitor_height = height;
     g_status.error.clear();
+    g_status.phase = opt.no_imu ? gt::kPhaseRunning : gt::kPhaseConnecting;
+    g_status.phase_progress = opt.no_imu ? 1.0f : 0.0f;
     publish_status(g_status);
 
     std::vector<std::unique_ptr<gt::DesktopDuplicator>> captures;
@@ -1319,6 +1408,9 @@ int wmain(int argc, wchar_t** argv) {
     int late_samples = 0;
     uint32_t logged_reseeds = 0;
     uint32_t logged_reverts = 0;
+    // The render loop rewrites the status itself from here on.
+    status_heartbeat.stop();
+    double next_phase_publish = 0.0;
     while (!state.quit) {
         MSG message;
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -1674,6 +1766,25 @@ int wmain(int argc, wchar_t** argv) {
             }
         }
 
+        // Startup phase: published on every change, and every 0.25 s while
+        // the wearer is warming up or holding still (the hold-still window is
+        // only ~1.3 s, too short for the 1 s cadence below).
+        if (!opt.no_imu) {
+            const gt::ImuStartPhase imu_phase = imu.start_phase();
+            const char* phase = imu_phase_name(imu_phase);
+            const bool fast = imu_phase == gt::ImuStartPhase::warmup || imu_phase == gt::ImuStartPhase::hold_still;
+            if (g_status.phase != phase || (fast && elapsed >= next_phase_publish)) {
+                if (g_status.phase != phase) {
+                    std::printf("[%.1fs] startup phase: %s\n", elapsed, phase);
+                }
+                g_status.phase = phase;
+                g_status.phase_progress = imu.start_progress();
+                g_status.elapsed_s = elapsed;
+                publish_status(g_status);
+                next_phase_publish = elapsed + 0.25;
+            }
+        }
+
         if (elapsed >= next_stat) {
             const gt::Euler e = gt::camera_applied_euler(head, signs);
             const double fps = static_cast<double>(frames - frames_at_stat) / (elapsed - (next_stat - 1.0));
@@ -1733,6 +1844,9 @@ int wmain(int argc, wchar_t** argv) {
                 g_status.mag_offset_ut = 0.0f;
             }
             g_status.screens = state.screen_count;
+            if (!opt.no_imu) {
+                g_status.phase_progress = imu.start_progress();
+            }
             publish_status(g_status);
             next_stat += 1.0;
         }
@@ -1741,6 +1855,8 @@ int wmain(int argc, wchar_t** argv) {
     std::printf("shutting down\n");
     captures.clear();
     if (topology_guard.armed) {
+        g_status.phase = gt::kPhaseRestoring;
+        publish_status(g_status);
         std::printf("restoring the laptop display (removing virtual desktops)...\n");
         std::string topo_error;
         if (!gt::restore_display_topology(topology_guard.topo, vdd, topo_error)) {

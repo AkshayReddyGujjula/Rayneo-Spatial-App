@@ -93,6 +93,10 @@ void ImuSource::run() {
     }
     bool raw_log_opened = false;
     while (running_.load()) {
+        // Until this connection delivers its first sample the wearer is
+        // waiting on the glasses, not on the estimator.
+        start_phase_.store(static_cast<int>(ImuStartPhase::connecting), std::memory_order_relaxed);
+        start_progress_.store(0.0f, std::memory_order_relaxed);
         GtHidDevice device;
         if (!device.open_first()) {
             set_status("waiting for RayNeo device");
@@ -232,6 +236,9 @@ void ImuSource::run() {
             startup_reverts_.store(estimator.startup_reverts(), std::memory_order_relaxed);
             startup_episode_reseeds_.store(estimator.startup_episode_reseeds(), std::memory_order_relaxed);
             calibrated_.store(estimator.calibrated(), std::memory_order_relaxed);
+            start_phase_.store(static_cast<int>(ImuStartPhase::warmup) + static_cast<int>(estimator.startup_phase()),
+                               std::memory_order_relaxed);
+            start_progress_.store(estimator.startup_progress(), std::memory_order_relaxed);
             drift_degs_.store(estimator.drift_correction_degs(), std::memory_order_relaxed);
 
             const char* phase = nullptr;

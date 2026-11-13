@@ -471,6 +471,37 @@ bool PoseEstimator::confirm_single_episode(int current, const Vec3& accel_mean, 
     return true;
 }
 
+StartupPhase PoseEstimator::startup_phase() const {
+    if (calibrated_) {
+        return StartupPhase::tracking;
+    }
+    // Mirrors the warm-up test in add_sample(): a sample is discarded while
+    // either floor is unmet, and the next sample after both are met enters
+    // the calibration window search.
+    if (time_s_ < cfg_.warmup_s || warmup_samples_ < cfg_.settle_samples) {
+        return StartupPhase::warmup;
+    }
+    return StartupPhase::hold_still;
+}
+
+float PoseEstimator::startup_progress() const {
+    const auto fraction = [](float done, float needed) {
+        return needed > 0.0f ? std::max(0.0f, std::min(1.0f, done / needed)) : 1.0f;
+    };
+    switch (startup_phase()) {
+        case StartupPhase::warmup:
+            return std::min(fraction(time_s_, cfg_.warmup_s),
+                            fraction(static_cast<float>(warmup_samples_), static_cast<float>(cfg_.settle_samples)));
+        case StartupPhase::hold_still:
+            return std::min(fraction(calibration_run_s_, cfg_.calibration_window_s),
+                            fraction(static_cast<float>(calibration_run_samples_),
+                                     static_cast<float>(cfg_.bias_samples)));
+        case StartupPhase::tracking:
+        default:
+            return 1.0f;
+    }
+}
+
 void PoseEstimator::finish_calibration() {
     const float n = static_cast<float>(calibration_run_samples_);
     const Vec3 mean{calibration_sum_.x / n, calibration_sum_.y / n, calibration_sum_.z / n};

@@ -69,23 +69,103 @@ int empty_state(Ui& ui, int left, int top, int width, const wchar_t* glyph_text,
 
 // --- Home -----------------------------------------------------------------
 
+// Startup steps under the hero text: one dot per step (done, active,
+// pending) joined by a hairline, the label beside it, and the active step's
+// progress bar below when it has one. Returns the height used.
+int startup_steps_height(Ui& ui, const StartupView& startup) {
+    if (startup.step_count <= 0 && startup.progress < 0.0) {
+        return 0;
+    }
+    int h = 0;
+    if (startup.step_count > 0) {
+        h += ui.px(24);
+    }
+    if (startup.progress >= 0.0) {
+        h += (h > 0 ? ui.px(space::md) : 0) + ui.px(8);
+    }
+    return h;
+}
+
+void paint_startup_steps(Ui& ui, int left, int top, int width, const StartupView& startup) {
+    const Theme& t = ui.t;
+    int y = top;
+    if (startup.step_count > 0) {
+        const int dot_r = ui.px(9);
+        const int slot_w = width / startup.step_count;
+        const int cy = y + ui.px(12);
+        for (int i = 0; i < startup.step_count; ++i) {
+            const int x = left + slot_w * i;
+            const int cx = x + dot_r;
+            const bool done = i < startup.active_step;
+            const bool active = i == startup.active_step;
+            if (i + 1 < startup.step_count) {
+                // Hairline to the next dot, behind the label space.
+                const int line_left = cx + dot_r + ui.px(space::xs);
+                const int label_w = text_width(ui.c.dc(), active ? ui.f.small_strong : ui.f.small, startup.steps[i]);
+                const int run_left = line_left + label_w + ui.px(space::sm);
+                const int run_right = x + slot_w - ui.px(space::sm);
+                if (run_right > run_left) {
+                    ui.c.fill(rect_of(run_left, cy, run_right - run_left, std::max(1, ui.px(1))),
+                              done ? t.ok : t.border);
+                }
+            }
+            if (done) {
+                ui.c.fill_circle(cx, cy, static_cast<float>(dot_r), mix(t.surface, t.ok, t.dark ? 0.24f : 0.16f));
+                draw_icon(ui.c, rect_of(cx - dot_r, cy - dot_r, dot_r * 2, dot_r * 2), glyph::check, ui.f.icon_small,
+                          t.ok);
+            } else if (active) {
+                ui.c.fill_circle(cx, cy, static_cast<float>(dot_r), mix(t.surface, t.accent, t.dark ? 0.24f : 0.16f));
+                ui.c.fill_circle(cx, cy, static_cast<float>(ui.px(4)), t.accent);
+            } else {
+                ui.c.ring(cx, cy, static_cast<float>(dot_r) - 0.5f, static_cast<float>(std::max(1, ui.px(1))),
+                          t.border_strong, 255);
+            }
+            ui.c.text(active ? ui.f.small_strong : ui.f.small, active ? t.text : done ? t.text_dim : t.text_faint,
+                      rect_of(cx + dot_r + ui.px(space::xs), y, slot_w - dot_r * 2 - ui.px(space::xs), ui.px(24)),
+                      startup.steps[i], DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+        y += ui.px(24) + ui.px(space::md);
+    }
+    if (startup.progress >= 0.0) {
+        draw_progress_bar(ui.c, rect_of(left, y, width, ui.px(8)), static_cast<float>(startup.progress), t.accent);
+    }
+}
+
 int paint_hero(Ui& ui, int left, int top, int width) {
     AppState& s = ui.s;
     const Theme& t = ui.t;
-    const EngineView view = engine_view(s, t);
+    EngineView view = engine_view(s, t);
     const bool busy = view.busy;
+    // Startup phases reported by the engine replace the generic Starting /
+    // Running copy with plain steps; an engine without the phase key keeps
+    // the generic view.
+    const StartupView startup = engine_startup_view(s);
+    const bool prompt = startup.visible && (startup.hold_still || startup.get_ready);
+    if (startup.visible) {
+        view.headline = startup.headline;
+        view.detail = startup.detail;
+        view.color = t.accent;
+        // A calm, still screen while the wearer must keep still.
+        view.transitional = !startup.hold_still;
+    }
     const int pad = ui.px(28);
     const int ring_r = ui.px(30);
     const bool wide = width >= ui.px(820);
-    const int metrics_w = wide && busy ? ui.px(320) : 0;
+    const int metrics_w = wide && busy && !startup.visible ? ui.px(320) : 0;
     const int text_left = left + pad + ring_r * 2 + ui.px(space::xl);
     const int text_w = width - (text_left - left) - pad - (metrics_w > 0 ? metrics_w + ui.px(space::xl) : 0);
-    const int headline_h = ui.px(32);
-    const int detail_h = wrapped_text_height(ui.c.dc(), ui.f.body, text_w, view.detail);
-    const int text_h = headline_h + ui.px(4) + detail_h;
+    // The hold-still prompt sits on an accent panel in the display font.
+    const int panel_pad = prompt ? ui.px(space::md) : 0;
+    const int inner_w = text_w - panel_pad * 2;
+    const HFONT headline_font = prompt ? ui.f.display : ui.f.title;
+    const int headline_h = prompt ? ui.px(38) : ui.px(32);
+    const int detail_h = wrapped_text_height(ui.c.dc(), ui.f.body, inner_w, view.detail);
+    const int text_h = headline_h + ui.px(4) + detail_h + panel_pad * 2;
     const int block_top = top + pad;
     const int content_h = std::max(ring_r * 2, text_h);
-    const int buttons_top = block_top + content_h + ui.px(space::xl);
+    const int steps_h = startup.visible ? startup_steps_height(ui, startup) : 0;
+    const int steps_top = block_top + content_h + ui.px(space::xl);
+    const int buttons_top = steps_top + (steps_h > 0 ? steps_h + ui.px(space::xl) : 0);
     const int button_h = ui.px(size::control_lg);
     const std::wstring workspace_block = start_block_reason(s, LaunchMode::Workspace);
     const std::wstring preview_block = start_block_reason(s, LaunchMode::Preview);
@@ -95,9 +175,15 @@ int paint_hero(Ui& ui, int left, int top, int width) {
     if (!busy && !preview_block.empty() && preview_block != workspace_block) {
         note = L"Preview: " + preview_block;
     }
+    // Before a start: when the wearer will be asked to keep still (the
+    // startup gyro window is the biggest drift source when it sees motion).
+    const std::wstring hint = !busy && (workspace_block.empty() || preview_block.empty())
+                                  ? std::wstring(kStartStillHint)
+                                  : std::wstring();
     const int note_w = width - pad * 2;
+    const int hint_h = hint.empty() ? 0 : wrapped_text_height(ui.c.dc(), ui.f.small, note_w, hint) + ui.px(space::md);
     const int note_h = note.empty() ? 0 : wrapped_text_height(ui.c.dc(), ui.f.small, note_w, note) + ui.px(space::md);
-    const int height = buttons_top - top + button_h + note_h + pad;
+    const int height = buttons_top - top + button_h + hint_h + note_h + pad;
     RECT hero = rect_of(left, top, width, height);
     card(ui, hero);
 
@@ -110,17 +196,27 @@ int paint_hero(Ui& ui, int left, int top, int width) {
                   static_cast<float>(ui.px(2)), view.color, static_cast<int>((1.0f - phase) * 160.0f));
     }
     ui.c.fill_circle(cx, cy, static_cast<float>(ring_r), mix(t.surface, view.color, t.dark ? 0.2f : 0.13f));
-    const wchar_t* hero_glyph = busy ? (view.transitional ? glyph::refresh : glyph::glasses)
+    const wchar_t* hero_glyph = prompt ? glyph::glasses
+                                : busy ? (view.transitional ? glyph::refresh : glyph::glasses)
                                 : view.color == t.accent ? glyph::play
                                                          : glyph::warning;
     draw_icon(ui.c, rect_of(cx - ring_r, cy - ring_r, ring_r * 2, ring_r * 2), hero_glyph, ui.f.icon_large,
               view.color);
 
     const int text_top = block_top + (content_h - text_h) / 2;
-    ui.c.text(ui.f.title, t.text, rect_of(text_left, text_top, text_w, headline_h), view.headline,
-              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    ui.c.text(ui.f.body, t.text_dim, rect_of(text_left, text_top + headline_h + ui.px(4), text_w, detail_h),
+    if (prompt) {
+        ui.c.fill_round(rect_of(text_left, text_top, text_w, text_h), ui.px(radius::lg), t.accent_soft);
+    }
+    // text on accent_soft is a checked contrast pair; text_dim is not, so
+    // the prompt's detail uses text too.
+    ui.c.text(headline_font, t.text, rect_of(text_left + panel_pad, text_top + panel_pad, inner_w, headline_h),
+              view.headline, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    ui.c.text(ui.f.body, prompt ? t.text : t.text_dim,
+              rect_of(text_left + panel_pad, text_top + panel_pad + headline_h + ui.px(4), inner_w, detail_h),
               view.detail, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    if (steps_h > 0) {
+        paint_startup_steps(ui, text_left, steps_top, width - (text_left - left) - pad, startup);
+    }
 
     if (metrics_w > 0) {
         const int tile_w = (metrics_w - ui.px(space::sm) * 2) / 3;
@@ -163,9 +259,14 @@ int paint_hero(Ui& ui, int left, int top, int width) {
         action(kUiStopEngine, L"Stop", ButtonStyle::Danger, busy, glyph::stop, ui.px(120), kRowStop,
                HelpTopic::EngineStop);
     }
+    if (!hint.empty()) {
+        ui.c.text(ui.f.small, t.text_dim, rect_of(left + pad, buttons_top + button_h + ui.px(space::md), note_w, hint_h),
+                  hint, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    }
     if (!note.empty()) {
-        ui.c.text(ui.f.small, t.warning, rect_of(left + pad, buttons_top + button_h + ui.px(space::md), note_w, note_h),
-                  note, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        ui.c.text(ui.f.small, t.warning,
+                  rect_of(left + pad, buttons_top + button_h + hint_h + ui.px(space::md), note_w, note_h), note,
+                  DT_LEFT | DT_TOP | DT_WORDBREAK);
     }
     return hero.bottom;
 }
