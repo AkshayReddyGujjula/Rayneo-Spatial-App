@@ -1071,7 +1071,8 @@ int paint_calibration_run(Ui& ui, int left, int top, int width, bool draw) {
         text_block(ui.f.title, t.text, prompt);
         // Live guide (tools that stream @@live): the same picture the glasses
         // show, smaller. Older tools keep the text-only view.
-        if (run.tool_has_live && (run.state == CalStepState::Waiting || run.state == CalStepState::Recording)) {
+        if (run.tool_has_live && run.flow == CalFlow::Orientation &&
+            (run.state == CalStepState::Waiting || run.state == CalStepState::Recording)) {
             y += ui.px(space::md);
             const int guide_h = std::clamp(width * 9 / 20, ui.px(170), ui.px(250));
             if (draw) {
