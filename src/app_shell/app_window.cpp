@@ -1491,7 +1491,9 @@ void AppWindow::execute(int id, int arg) {
     switch (id) {
         case kUiRunSetupGuide:
             state_.onboarding.start();
-            state_.cal_run = CalRunState{};
+            // Never orphan a calibration that is still running (its tool
+            // keeps the glasses; Cancel and the result live in cal_run).
+            state_.cal_run.clear_unless_running();
             state_.scroll[kScrollWizard].offset = 0;
             refresh_health(true);
             invalidate();
