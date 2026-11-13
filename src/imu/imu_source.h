@@ -12,6 +12,23 @@
 
 namespace gt {
 
+// Head-tracking startup as the engine reports it (status key "phase").
+// `connecting` covers everything before the sensor streams (no device, the
+// stream-on handshake, a reconnect after a disconnect or stream timeout); the
+// rest mirror PoseEstimator::startup_phase() of the current connection.
+enum class ImuStartPhase : int {
+    connecting = 0,
+    warmup = 1,
+    hold_still = 2,
+    tracking = 3,
+};
+// ImuSource maps an estimator phase p to ImuStartPhase(warmup + p).
+static_assert(static_cast<int>(ImuStartPhase::warmup) + static_cast<int>(StartupPhase::hold_still) ==
+                  static_cast<int>(ImuStartPhase::hold_still) &&
+              static_cast<int>(ImuStartPhase::warmup) + static_cast<int>(StartupPhase::tracking) ==
+                  static_cast<int>(ImuStartPhase::tracking),
+              "ImuStartPhase must extend StartupPhase in order");
+
 class ImuSource {
 public:
     ImuSource() = default;
@@ -51,6 +68,11 @@ public:
     // True once the startup bias came from a contiguous rest window. Diagnostic
     // timeouts never open the pose with an unqualified estimate.
     bool calibrated() const { return calibrated_.load(std::memory_order_relaxed); }
+    // Startup phase and its progress (0..1, see PoseEstimator::startup_progress).
+    ImuStartPhase start_phase() const {
+        return static_cast<ImuStartPhase>(start_phase_.load(std::memory_order_relaxed));
+    }
+    float start_progress() const { return start_progress_.load(std::memory_order_relaxed); }
     float drift_correction_degs() const;
     std::string status() const;
 
@@ -112,6 +134,8 @@ private:
     std::atomic<uint32_t> startup_reverts_{0};
     std::atomic<uint32_t> startup_episode_reseeds_{0};
     std::atomic<bool> calibrated_{false};
+    std::atomic<int> start_phase_{static_cast<int>(ImuStartPhase::connecting)};
+    std::atomic<float> start_progress_{0.0f};
     std::atomic<float> drift_degs_{0.0f};
     std::atomic<bool> mag_active_{false};
     std::atomic<int> mag_state_{0};

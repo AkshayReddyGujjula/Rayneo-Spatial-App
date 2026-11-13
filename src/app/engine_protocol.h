@@ -11,7 +11,9 @@
 //                        values below. Only integer payloads cross, so the
 //                        messages are safe to send across processes.
 //   * a status file    - the engine atomically rewrites a small key=value file
-//                        once per second (--status); the controller reads it at
+//                        once per second (--status; every 0.25 s while the
+//                        wearer must hold still, see kStatusKeyPhase); the
+//                        controller reads it at
 //                        no more than 2 Hz for engine-state diagnostics and for
 //                        the case where the engine was launched by hand.
 //
@@ -108,6 +110,31 @@ inline constexpr const char* kStatusKeyError = "error";
 inline constexpr const char* kStatusKeyMag = "mag";
 inline constexpr const char* kStatusKeyMagError = "mag_error_deg";
 inline constexpr const char* kStatusKeyMagOffset = "mag_offset_ut";
+
+// Startup phase (optional keys, added 2026-11-13; older controllers ignore
+// them, and a controller reading an older engine sees no phase and keeps its
+// generic Starting/Running view). phase = one of the kPhase* values below;
+// phase_progress = 0.00..1.00 for the phase that has one (imu_warmup:
+// share of the warm-up done; hold_still: fill of the current contiguous
+// still window, which drops back to 0 when the wearer moves), 1.00 after.
+// While the engine is blocked in the startup sequence (display takeover,
+// glasses-display wait) a heartbeat keeps the file fresh once per second;
+// during imu_warmup and hold_still the render loop rewrites it every
+// 0.25 s, otherwise once per second and on every phase change. Readers
+// must treat an unknown phase value as "no phase" (newer engines may add
+// values).
+inline constexpr const char* kStatusKeyPhase = "phase";
+inline constexpr const char* kStatusKeyPhaseProgress = "phase_progress";
+
+inline constexpr const char* kPhasePreparing = "preparing";            // loading config, layout, calibration
+inline constexpr const char* kPhaseTakeover = "takeover";              // creating virtual displays, arranging
+inline constexpr const char* kPhaseWaitingDisplay = "waiting_display";  // glasses display dropped out, waiting
+inline constexpr const char* kPhaseConnecting = "connecting";          // waiting for the glasses' IMU stream
+inline constexpr const char* kPhaseImuWarmup = "imu_warmup";           // sensor warm-up (samples discarded)
+inline constexpr const char* kPhaseHoldStill = "hold_still";           // measuring the gyro bias: keep still
+inline constexpr const char* kPhaseTracking = "tracking";              // head tracking runs
+inline constexpr const char* kPhaseRunning = "running";                // rendering without head tracking
+inline constexpr const char* kPhaseRestoring = "restoring";            // shutting down, restoring displays
 
 inline constexpr const char* kStatusStarting = "starting";
 inline constexpr const char* kStatusReady = "ready";
