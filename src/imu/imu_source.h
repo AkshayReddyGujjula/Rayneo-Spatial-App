@@ -42,6 +42,10 @@ public:
 
     bool has_pose() const { return has_pose_.load(std::memory_order_relaxed); }
     Quat orientation() const;
+    // The same pose plus its session epoch, read together: the epoch changes
+    // when a new connection's estimator publishes its first pose (from a fresh
+    // reference, so the view steps straight ahead). 0 before any pose.
+    Quat orientation(uint32_t& epoch) const;
     double sample_rate_hz() const { return sample_rate_hz_.load(std::memory_order_relaxed); }
     Vec3 gyro_bias_degs() const;
     Vec3 last_gyro_degs() const;
@@ -114,6 +118,7 @@ private:
     std::atomic<float> qx_{0.0f};
     std::atomic<float> qy_{0.0f};
     std::atomic<float> qz_{0.0f};
+    std::atomic<uint32_t> pose_epoch_{0};
     std::atomic<uint64_t> pose_sequence_{0};
     std::atomic<double> sample_rate_hz_{0.0};
     std::atomic<float> bx_{0.0f};

@@ -47,6 +47,11 @@ void ImuSource::stop() {
 }
 
 Quat ImuSource::orientation() const {
+    uint32_t epoch = 0;
+    return orientation(epoch);
+}
+
+Quat ImuSource::orientation(uint32_t& epoch) const {
     for (;;) {
         const uint64_t before = pose_sequence_.load(std::memory_order_acquire);
         if ((before & 1u) != 0u) {
@@ -55,8 +60,10 @@ Quat ImuSource::orientation() const {
         }
         const Quat pose{qw_.load(std::memory_order_relaxed), qx_.load(std::memory_order_relaxed),
                         qy_.load(std::memory_order_relaxed), qz_.load(std::memory_order_relaxed)};
+        const uint32_t pose_epoch = pose_epoch_.load(std::memory_order_relaxed);
         const uint64_t after = pose_sequence_.load(std::memory_order_acquire);
         if (before == after) {
+            epoch = pose_epoch;
             return pose;
         }
     }
@@ -92,6 +99,9 @@ void ImuSource::run() {
         return;
     }
     bool raw_log_opened = false;
+    // Session epoch of the published pose (see orientation(epoch)): each
+    // connection's estimator starts from a fresh reference.
+    uint32_t session_epoch = 0;
     while (running_.load()) {
         // Until this connection delivers its first sample the wearer is
         // waiting on the glasses, not on the estimator.
@@ -124,6 +134,7 @@ void ImuSource::run() {
         estimator_config.mag_calibration = mag_calibration_;
         estimator_config.mag_lock.hard_iron.enabled = mag_track_hard_iron_;
         estimator.configure(estimator_config);
+        ++session_epoch;
         has_pose_.store(false);
         sample_rate_hz_.store(0.0, std::memory_order_relaxed);
 
@@ -263,6 +274,7 @@ void ImuSource::run() {
                 qx_.store(q.x, std::memory_order_relaxed);
                 qy_.store(q.y, std::memory_order_relaxed);
                 qz_.store(q.z, std::memory_order_relaxed);
+                pose_epoch_.store(session_epoch, std::memory_order_relaxed);
                 pose_sequence_.fetch_add(1, std::memory_order_release);
                 has_pose_.store(true, std::memory_order_release);
             }

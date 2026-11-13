@@ -1696,8 +1696,9 @@ int wmain(int argc, wchar_t** argv) {
         // Late pose sample: the pose read above is older by the whole capture
         // pass plus the swapchain wait (up to a frame). World-locked text
         // swims by head speed x that age, so render from the newest pose.
+        uint32_t pose_epoch = 0;
         if (!opt.no_imu) {
-            const gt::Quat late = apply_view_holds(imu.orientation());
+            const gt::Quat late = apply_view_holds(imu.orientation(pose_epoch));
             late_gap_ms_sum +=
                 std::chrono::duration<double, std::milli>(SteadyClock::now() - early_pose_time).count();
             late_diff_deg_sum += gt::quat_angle_deg(gt::quat_multiply(gt::quat_conjugate(head), late));
@@ -1707,6 +1708,8 @@ int wmain(int argc, wchar_t** argv) {
         if (!opt.no_imu && opt.smoothing) {
             const float frame_dt =
                 (prev_elapsed < 0.0) ? (1.0f / 60.0f) : static_cast<float>(elapsed - prev_elapsed);
+            // A reconnect's first pose steps the view straight ahead; not a turn.
+            state.view_smoother.note_source_epoch(pose_epoch);
             head = state.view_smoother.update(head, frame_dt);
         }
         // View comfort: per-screen brightness (manual, or focus with a short

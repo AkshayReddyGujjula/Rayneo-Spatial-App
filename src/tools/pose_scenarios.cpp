@@ -1600,6 +1600,60 @@ int main() {
               worst_drift_off + 0.1f);
     }
 
+    std::printf("\n-- scenario 29: an IMU reconnect's view step is not predicted --\n");
+    {
+        // The glasses' IMU stream drops (unplug, a 2 s stream timeout) while
+        // the wearer looks at the left screen. The engine keeps rendering the
+        // last pose while ImuSource reconnects, warms up and recalibrates;
+        // the new estimator then publishes from a fresh reference, so the
+        // view steps from 45 deg to straight ahead in one frame. That step is
+        // a recenter, not head motion; read as a 2700 deg/s turn the
+        // prediction threw the view far past straight ahead. The engine
+        // passes each pose's session epoch to the smoother, which restarts
+        // the prediction when it changes.
+        constexpr float kFrameDt = 1.0f / 60.0f;
+        constexpr float kStepDeg = 45.0f;
+        auto run = [&](float predict_s, bool epochs) {
+            PoseSmoother smoother;
+            PoseSmoother::Config scfg;
+            apply_reading_hold(kReadingHoldDefault, scfg);
+            scfg.predict_s = predict_s;
+            smoother.configure(scfg);
+            const float half = 0.5f * kStepDeg * kPi / 180.0f;
+            const Quat old_session{std::cos(half), 0.0f, 0.0f, std::sin(half)};
+            const Quat new_session{1.0f, 0.0f, 0.0f, 0.0f};
+            // Tracking, then the frozen last pose through the ~8 s reconnect
+            // (same epoch: nothing new was published).
+            for (int f = 0; f < 600; ++f) {
+                if (epochs) {
+                    smoother.note_source_epoch(1);
+                }
+                smoother.update(old_session, kFrameDt);
+            }
+            float overshoot = 0.0f;
+            float last = 0.0f;
+            for (int f = 0; f < 120; ++f) {
+                if (epochs) {
+                    smoother.note_source_epoch(2);
+                }
+                last = quat_to_euler(smoother.update(new_session, kFrameDt)).yaw_deg;
+                overshoot = std::max(overshoot, -last);  // past straight ahead
+            }
+            return std::make_pair(overshoot, last);
+        };
+        const auto plain = run(0.0f, false);
+        const auto unguarded = run(PoseSmoother::Config{}.predict_s, false);
+        const auto guarded = run(PoseSmoother::Config{}.predict_s, true);
+        std::printf("  overshoot past straight ahead after a %.0f deg reconnect step: %.3f deg without "
+                    "prediction, %.3f deg predicted without the epoch, %.3f deg with it (settled %.3f deg)\n",
+                    kStepDeg, plain.first, unguarded.first, guarded.first, std::fabs(guarded.second));
+        check(guarded.first <= plain.first + 1e-4f, "a new IMU session's first pose adds no predicted overshoot",
+              guarded.first, plain.first + 1e-4f);
+        check(std::fabs(guarded.second - plain.second) < 1e-3f,
+              "the view settles exactly as without prediction (hold included)",
+              std::fabs(guarded.second - plain.second), 1e-3f);
+    }
+
     std::printf("\npose_scenarios: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
