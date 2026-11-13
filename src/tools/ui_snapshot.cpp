@@ -405,6 +405,11 @@ void render(const Shot& shot, const std::filesystem::path& out_dir) {
     if (interactive == 0) {
         fail(shot.name, "no interactive elements were painted");
     }
+    if (state.page == gt::AppPage::Layout && !state.onboarding.active &&
+        std::none_of(hotspots.begin(), hotspots.end(),
+                     [](const gt::ui::Hotspot& h) { return h.id == gt::kUiEditorCanvas; })) {
+        fail(shot.name, "the Layout page painted no arrangement editor");
+    }
     std::printf("  [%s] %s: %dx%d @%u%% %s, %d interactive\n", failures == 0 ? "ok" : "..",
                 shot.name.c_str(), shot.width, shot.height, shot.dpi * 100 / 96, shot.dark ? "dark" : "light",
                 interactive);
@@ -642,6 +647,28 @@ std::vector<Shot> shots() {
                         s.diagnostics.layout_ok = false;
                         s.diagnostics.layout_detail = L"config/layouts/default.json: screen 2 overlaps screen 1";
                         s.page = AppPage::Home;
+                    }});
+    // The smallest window the controller allows (760x560 outer, about
+    // 744x521 client), every page, with six user presets: the Layout page
+    // must still paint its editor and inspector.
+    const std::vector<std::string> many_presets = {"triple",      "ultrawide",   "reading-desk",
+                                                   "evening-sofa", "coding-wide", "travel-laptop"};
+    static const char* const kPageNames[] = {"home", "layout", "comfort", "tracking", "diagnostics", "settings"};
+    for (int p = 0; p < gt::kAppPageCount; ++p) {
+        list.push_back({std::string("min-") + kPageNames[p] + "-744x521", 744, 521, 96, true,
+                        [p, many_presets](AppState& s) {
+                            base_state(s, true);
+                            running_state(s);
+                            s.preset_names = many_presets;
+                            s.page = static_cast<AppPage>(p);
+                            s.config.comfort.dim_mode = gt::DimMode::Manual;
+                        }});
+    }
+    list.push_back({"min-layout-1488x1042-200-light", 1488, 1042, 192, false, [many_presets](AppState& s) {
+                        base_state(s, true);
+                        s.preset_names = many_presets;
+                        s.page = AppPage::Layout;
+                        s.layout_dirty = true;
                     }});
     return list;
 }

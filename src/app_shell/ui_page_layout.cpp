@@ -741,12 +741,29 @@ void paint_layout_page(Ui& ui, const RECT& body) {
     }
     const int gap = ui.px(space::xl);
     const int pad = ui.px(space::xl);
-    // Presets card.
+    // Presets card. In a short window (many presets near the minimum size)
+    // it is capped so the editor and inspector keep a usable height, and its
+    // chips scroll inside it. The page scroll portal is otherwise unused on
+    // this page, so it carries that scroll.
     const int inner_w = rw(body) - pad * 2;
     const int presets_h = presets_flow(ui, body.left + pad, 0, inner_w, false);
-    RECT presets = rect_of(body.left, body.top, rw(body), presets_h + pad * 2);
+    const int min_main = ui.px(280);
+    const int presets_cap =
+        std::max(pad * 2 + ui.px(size::control_sm), rh(body) - gap - min_main);
+    const bool presets_scroll = presets_h + pad * 2 > presets_cap;
+    RECT presets = rect_of(body.left, body.top, rw(body), presets_scroll ? presets_cap : presets_h + pad * 2);
     card(ui, presets);
-    presets_flow(ui, body.left + pad, body.top + pad, inner_w, true);
+    if (presets_scroll) {
+        // The bar sits in the card's right padding, as in the inspector.
+        RECT view{presets.left + pad - ui.px(space::sm), presets.top + pad - ui.px(space::sm),
+                  presets.right - pad + ui.px(space::sm) - ui.px(space::xs), presets.bottom - pad + ui.px(space::sm)};
+        ScrollArea area = begin_scroll(ui, kScrollPage, presets, view);
+        presets_flow(ui, body.left + pad, presets.top + pad - area.offset, inner_w, true);
+        end_scroll(ui, area, presets_h + ui.px(space::sm) * 2);
+    } else {
+        hide_scroll(ui, kScrollPage);
+        presets_flow(ui, body.left + pad, body.top + pad, inner_w, true);
+    }
 
     // Main row: editor | splitter | inspector.
     RECT main{body.left, presets.bottom + gap, body.right, body.bottom};
