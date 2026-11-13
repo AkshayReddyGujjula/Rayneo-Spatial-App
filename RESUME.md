@@ -12,7 +12,9 @@ Started 2026-11-12 ~22:55 local. Hard stop 10:30 local (2026-11-13) — changed 
 
 ## Integration TODO (orchestrator)
 1. DONE: Track B merged (imu_replay.cpp conflict resolved by keeping both tool sets).
-   Items 2-5 delegated at 00:00 to an integration agent (worktree branch `worktree-agent-aa47a624fb8f72fa7`,
+   DONE 00:04: items 2-5 merged (7c9cc6e): predict-ms Off/20/35/50 (default 35), heading-lock badge,
+   earbud switch (default off), in-app calibration in --auto mode with countdown + real cancel.
+   (Originally delegated at 00:00 to an integration agent (worktree branch `worktree-agent-aa47a624fb8f72fa7`,
    reset onto overnight-claude-improvements). Merge it when done; if it stopped early, re-spawn from its branch.
 2. Wire the UI's `EngineOptions.motion_prediction` (src/app_shell/ui_model.h, Tracking page) to the
    engine flag `--predict-ms N` (default 35, 0 = off) in the launch command (app_state.cpp).
@@ -59,7 +61,23 @@ Build dirs live under `%LOCALAPPDATA%\Temp\rayneo-overnight\` (never inside the 
 - 00:00 Track B finished (4 commits) and merged; 11/11 green. Integration agent launched (UI <-> engine wiring).
   5-hour usage 72%, weekly 55%.
 
-## Round 2 ideas (after the 03:40 reset)
+- 00:04 Integration merged (7c9cc6e); 11/11 green. 5-hour usage 81% -> PAUSED until the 03:40 reset
+  (nudge at 03:45). Weekly 56%.
+
+## Round 2 plan (start at 03:45; window 2 ~03:40-08:40, window 3 ~08:45-10:30 hard stop)
+Window 2, in parallel, each in its own worktree reset onto overnight-claude-improvements:
+- R2-A Review+fix agent (Opus high): adversarial review of `git diff main..overnight-claude-improvements`
+  (live UI message paths: hover/drag/wheel/tray/DPI/timer stop, calibration process handling; estimator
+  startup confirmation + prediction; mag tracker). Fix only confirmed bugs, each with a regression test.
+- R2-B Calibration agent (Opus high): orientation calibration accuracy (repeat averaging, outlier rejection,
+  consistency/quality score surfaced through --progress-json quality and the UI).
+- R2-C Estimator agent (Opus high): startup single-long-rest-episode guard (Track A "known gap"), proven on
+  the startup audit + synthetic scenario, without regressing any envelope.
+Then orchestrator: fold docs/overnight/*.md into AGENTS.md (bugs 26+, envelopes, test map incl. scenarios
+20-23 and ui_snapshot; correct the "thermal drift" sentence), write docs/overnight/REPORT.md.
+Window 3: merge leftovers, final full suite, final report. Stop at 10:30.
+
+## Round 2 ideas (backlog)
 - Code review of everything merged (bugs in the redesigned UI's live paths: hover/drag/tray/DPI/timer; estimator changes).
 - Track B item 4: orientation calibration averaging + quality/consistency scoring.
 - Track A next: guard for the single-long-rest-episode startup case; seed bias from last session.
