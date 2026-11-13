@@ -13,7 +13,6 @@ namespace {
 constexpr wchar_t kClassName[] = L"RayNeoSpatialCalibrationGuide";
 constexpr UINT_PTR kFrameTimer = 1;
 constexpr UINT kFrameIntervalMs = 20;  // ~40-50 fps after timer rounding; >= 30 fps
-constexpr double kBallTauS = 0.05;     // eases the ball between ~22 Hz live lines
 constexpr double kMonitorProbeIntervalS = 2.0;
 
 }  // namespace
@@ -36,6 +35,12 @@ LRESULT CALLBACK CalGuideWindow::window_proc(HWND hwnd, UINT message, WPARAM wpa
             return MA_NOACTIVATE;
         case WM_ERASEBKGND:
             return 1;  // painted whole from a back buffer
+        case WM_DISPLAYCHANGE:
+            if (self != nullptr) {
+                self->on_display_change();
+                return 0;
+            }
+            break;
         case WM_TIMER:
             if (self != nullptr && wparam == kFrameTimer) {
                 self->on_frame();
@@ -91,11 +96,55 @@ bool CalGuideWindow::create(const RECT& monitor) {
 void CalGuideWindow::close() {
     if (hwnd_ != nullptr) {
         KillTimer(hwnd_, kFrameTimer);
-        DestroyWindow(hwnd_);
+        // Cleared first: DestroyWindow may run from this window's own
+        // WM_DISPLAYCHANGE, and nothing may touch the handle afterwards.
+        const HWND hwnd = hwnd_;
         hwnd_ = nullptr;
+        DestroyWindow(hwnd);
     }
+    release_back_buffer();
     fonts_.destroy();
     ball_valid_ = false;
+}
+
+void CalGuideWindow::release_back_buffer() {
+    if (back_dc_ != nullptr) {
+        if (back_previous_ != nullptr) {
+            SelectObject(back_dc_, back_previous_);
+        }
+        DeleteDC(back_dc_);
+    }
+    if (back_bitmap_ != nullptr) {
+        DeleteObject(back_bitmap_);
+    }
+    back_dc_ = nullptr;
+    back_bitmap_ = nullptr;
+    back_previous_ = nullptr;
+    back_width_ = 0;
+    back_height_ = 0;
+}
+
+void CalGuideWindow::on_display_change() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    RECT monitor{};
+    if (!find_glasses_monitor_rect(monitor)) {
+        // The glasses display went away: close; update() probes again.
+        close();
+        next_monitor_probe_s_ = 0.0;
+        return;
+    }
+    if (EqualRect(&monitor, &monitor_)) {
+        return;
+    }
+    monitor_ = monitor;
+    SetWindowPos(hwnd_, HWND_TOPMOST, monitor.left, monitor.top, monitor.right - monitor.left,
+                 monitor.bottom - monitor.top, SWP_NOACTIVATE);
+    fonts_.create(monitor.bottom - monitor.top);
+    release_back_buffer();
+    ball_valid_ = false;
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void CalGuideWindow::update(const CalRunState& run, double now_s, float fov_h_deg) {
@@ -131,6 +180,9 @@ void CalGuideWindow::on_frame() {
                                      static_cast<double>(std::max<LONGLONG>(1, frequency.QuadPart)),
                                  0.0, 0.2);
     last_frame_ = now;
+    // Repaint only when something moved: update() repaints for each new
+    // sample or state; here only the eased ball (and its disappearance).
+    bool changed = false;
     if (view_.has_live) {
         const RECT client{0, 0, monitor_.right - monitor_.left, monitor_.bottom - monitor_.top};
         const CalGuidePoint target =
@@ -138,15 +190,17 @@ void CalGuideWindow::on_frame() {
         if (!ball_valid_) {
             ball_ = target;
             ball_valid_ = true;
+            changed = true;
         } else {
-            const float k = static_cast<float>(1.0 - std::exp(-dt / kBallTauS));
-            ball_.x += (target.x - ball_.x) * k;
-            ball_.y += (target.y - ball_.y) * k;
+            changed = cal_guide_ease_ball(ball_, target, dt);
         }
-    } else {
+    } else if (ball_valid_) {
         ball_valid_ = false;
+        changed = true;
     }
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    if (changed) {
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
 }
 
 void CalGuideWindow::paint() {
@@ -156,23 +210,25 @@ void CalGuideWindow::paint() {
     GetClientRect(hwnd_, &client);
     const int width = client.right - client.left;
     const int height = client.bottom - client.top;
-    HDC memory = CreateCompatibleDC(dc);
-    HBITMAP bitmap = CreateCompatibleBitmap(dc, std::max(1, width), std::max(1, height));
-    if (memory != nullptr && bitmap != nullptr) {
-        const HGDIOBJ previous = SelectObject(memory, bitmap);
+    if (back_dc_ == nullptr || back_width_ != width || back_height_ != height) {
+        release_back_buffer();
+        back_dc_ = CreateCompatibleDC(dc);
+        back_bitmap_ = CreateCompatibleBitmap(dc, std::max(1, width), std::max(1, height));
+        if (back_dc_ != nullptr && back_bitmap_ != nullptr) {
+            back_previous_ = SelectObject(back_dc_, back_bitmap_);
+            back_width_ = width;
+            back_height_ = height;
+        } else {
+            release_back_buffer();
+        }
+    }
+    if (back_dc_ != nullptr) {
         {
-            ui::Canvas canvas(memory, client, ui::dark_theme(), 96);
+            ui::Canvas canvas(back_dc_, client, ui::dark_theme(), 96);
             const ui::CalGuideStyle style = ui::glasses_guide_style(fonts_);
             ui::paint_cal_guide(canvas, client, view_, style, fov_h_deg_, ball_valid_ ? &ball_ : nullptr);
         }
-        BitBlt(dc, 0, 0, width, height, memory, 0, 0, SRCCOPY);
-        SelectObject(memory, previous);
-    }
-    if (bitmap != nullptr) {
-        DeleteObject(bitmap);
-    }
-    if (memory != nullptr) {
-        DeleteDC(memory);
+        BitBlt(dc, 0, 0, width, height, back_dc_, 0, 0, SRCCOPY);
     }
     EndPaint(hwnd_, &ps);
 }

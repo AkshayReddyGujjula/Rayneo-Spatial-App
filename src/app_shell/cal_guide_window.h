@@ -32,6 +32,9 @@ private:
     bool create(const RECT& monitor);
     void on_frame();
     void paint();
+    // The glasses monitor moved, changed mode or went away (WM_DISPLAYCHANGE).
+    void on_display_change();
+    void release_back_buffer();
 
     HWND hwnd_ = nullptr;
     RECT monitor_{};
@@ -41,6 +44,12 @@ private:
     CalGuidePoint ball_{};
     bool ball_valid_ = false;
     LARGE_INTEGER last_frame_{};
+    // Monitor-sized back buffer, kept between frames (not one per paint).
+    HDC back_dc_ = nullptr;
+    HBITMAP back_bitmap_ = nullptr;
+    HGDIOBJ back_previous_ = nullptr;
+    int back_width_ = 0;
+    int back_height_ = 0;
     double next_monitor_probe_s_ = 0.0;
 };
 

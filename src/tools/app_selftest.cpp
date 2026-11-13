@@ -2037,6 +2037,29 @@ bool guide_near(float a, float b, float tolerance = 0.01f) {
 
 void test_calibration_guide() {
     std::printf("app_selftest: live calibration guide (@@live)\n");
+    {
+        // R6-B: the glasses window repainted a full monitor every 20 ms even
+        // with nothing moving. The ball easing now reports whether it moved:
+        // the same exponential while moving, a snap within half a pixel, and
+        // no repaint once settled.
+        gt::CalGuidePoint ball{0.0f, 0.0f};
+        const gt::CalGuidePoint target{100.0f, -40.0f};
+        const bool first = gt::cal_guide_ease_ball(ball, target, 0.02);
+        const float k = static_cast<float>(1.0 - std::exp(-0.02 / gt::kCalGuideBallTauS));
+        check(first && guide_near(ball.x, 100.0f * k, 1e-4f) && guide_near(ball.y, -40.0f * k, 1e-4f),
+              "the ball eases exactly as before while it moves");
+        int frames = 1;
+        while (gt::cal_guide_ease_ball(ball, target, 0.02) && frames < 1000) {
+            ++frames;
+        }
+        check(ball.x == target.x && ball.y == target.y && frames <= 20,
+              "the ball settles exactly on its target within 20 frames (0.4 s)");
+        check(!gt::cal_guide_ease_ball(ball, target, 0.02) && !gt::cal_guide_ease_ball(ball, target, 0.2),
+              "a settled ball asks for no repaint");
+        gt::CalGuidePoint near_ball{10.3f, 5.0f};
+        check(gt::cal_guide_ease_ball(near_ball, gt::CalGuidePoint{10.0f, 5.0f}, 0.0) && near_ball.x == 10.0f,
+              "within half a pixel it snaps (one last repaint)");
+    }
     gt::CalLiveSample sample;
     std::string error;
     // The tool's own pinned line (orientation_calibration_selftest).

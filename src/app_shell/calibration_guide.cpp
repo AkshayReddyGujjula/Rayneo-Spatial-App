@@ -173,6 +173,18 @@ float cal_guide_ring_radius(float still_rms_degs, float gate_degs, float r_min, 
     return r_min + (r_max - r_min) * t;
 }
 
+bool cal_guide_ease_ball(CalGuidePoint& ball, const CalGuidePoint& target, double dt_s) {
+    const CalGuidePoint before = ball;
+    const double dt = std::isfinite(dt_s) ? std::max(0.0, dt_s) : 0.0;
+    const float k = static_cast<float>(1.0 - std::exp(-dt / kCalGuideBallTauS));
+    ball.x += (target.x - ball.x) * k;
+    ball.y += (target.y - ball.y) * k;
+    if (std::fabs(target.x - ball.x) < 0.5f && std::fabs(target.y - ball.y) < 0.5f) {
+        ball = target;
+    }
+    return ball.x != before.x || ball.y != before.y;
+}
+
 CalGuideView cal_guide_view(const CalRunState& run, double now_s) {
     CalGuideView view;
     view.visible = run.running() && run.tool_has_live && run.flow == CalFlow::Orientation;
@@ -185,7 +197,7 @@ CalGuideView cal_guide_view(const CalRunState& run, double now_s) {
         view.live.kind = kind_for_step(run);
         view.live.step = run.step;
         view.live.waiting = run.state == CalStepState::Waiting;
-        view.live.repeats_required = view.live.kind == CalGuideKind::Still ? 0 : 3;
+        view.live.repeats_required = view.live.kind == CalGuideKind::Still ? 0 : kCalHeadRepeats;
     }
     const CalGuideKind kind = view.live.kind;
     view.title = cal_guide_title(kind);
