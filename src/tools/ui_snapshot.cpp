@@ -16,10 +16,12 @@
 #include "app_shell/ui_widgets.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Gdiplus {
@@ -36,6 +38,92 @@ int failures = 0;
 void fail(const std::string& shot, const std::string& what) {
     std::printf("  [FAIL] %s: %s\n", shot.c_str(), what.c_str());
     ++failures;
+}
+
+// WCAG 2.x relative luminance and contrast ratio of two opaque colours.
+double relative_luminance(COLORREF color) {
+    const auto channel = [](BYTE value) {
+        const double c = static_cast<double>(value) / 255.0;
+        return c <= 0.03928 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * channel(GetRValue(color)) + 0.7152 * channel(GetGValue(color)) +
+           0.0722 * channel(GetBValue(color));
+}
+
+double contrast_ratio(COLORREF a, COLORREF b) {
+    const double la = relative_luminance(a);
+    const double lb = relative_luminance(b);
+    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+
+// Every token pair the paint code draws text or a state-carrying UI part
+// with must meet WCAG AA: 4.5:1 for text (the UI has no text large enough
+// for the 3:1 large-text rule except titles, which use `text`), 3:1 for the
+// focus ring. Status colours are also drawn as text on their own tinted
+// badge, so that background is checked with draw_badge's tint factor.
+void check_contrast() {
+    struct Pair {
+        const char* fg;
+        COLORREF gt::ui::Theme::*fg_token;
+        const char* bg;
+        COLORREF gt::ui::Theme::*bg_token;
+        double minimum;
+    };
+    using T = gt::ui::Theme;
+    const Pair pairs[] = {
+        {"text", &T::text, "window", &T::window, 4.5},
+        {"text", &T::text, "surface_alt", &T::surface_alt, 4.5},
+        {"text", &T::text, "accent_soft", &T::accent_soft, 4.5},
+        {"text_dim", &T::text_dim, "window", &T::window, 4.5},
+        {"text_dim", &T::text_dim, "sidebar", &T::sidebar, 4.5},
+        {"text_dim", &T::text_dim, "surface", &T::surface, 4.5},
+        {"text_dim", &T::text_dim, "surface_alt", &T::surface_alt, 4.5},
+        {"text_faint", &T::text_faint, "window", &T::window, 4.5},
+        {"text_faint", &T::text_faint, "sidebar", &T::sidebar, 4.5},
+        {"text_faint", &T::text_faint, "surface", &T::surface, 4.5},
+        {"text_faint", &T::text_faint, "surface_alt", &T::surface_alt, 4.5},
+        {"text_faint", &T::text_faint, "canvas", &T::canvas, 4.5},
+        {"accent", &T::accent, "window", &T::window, 4.5},
+        {"accent", &T::accent, "surface", &T::surface, 4.5},
+        {"accent", &T::accent, "accent_soft", &T::accent_soft, 4.5},
+        {"accent_text", &T::accent_text, "accent_fill", &T::accent_fill, 4.5},
+        {"accent_text", &T::accent_text, "accent_hover", &T::accent_hover, 4.5},
+        {"ok", &T::ok, "window", &T::window, 4.5},
+        {"ok", &T::ok, "surface", &T::surface, 4.5},
+        {"warning", &T::warning, "window", &T::window, 4.5},
+        {"warning", &T::warning, "surface", &T::surface, 4.5},
+        {"error", &T::error, "window", &T::window, 4.5},
+        {"error", &T::error, "surface", &T::surface, 4.5},
+        {"focus", &T::focus, "window", &T::window, 3.0},
+        {"focus", &T::focus, "surface", &T::surface, 3.0},
+    };
+    const struct {
+        const char* name;
+        const gt::ui::Theme& theme;
+    } themes[] = {{"dark", gt::ui::dark_theme()}, {"light", gt::ui::light_theme()}};
+    std::printf("ui_snapshot: WCAG contrast of theme token pairs\n");
+    for (const auto& entry : themes) {
+        const gt::ui::Theme& t = entry.theme;
+        const auto report = [&](const std::string& label, COLORREF fg, COLORREF bg, double minimum) {
+            const double ratio = contrast_ratio(fg, bg);
+            std::printf("  [%s] %-5s %-36s %5.2f (>= %.1f)\n", ratio >= minimum ? "ok" : "..", entry.name,
+                        label.c_str(), ratio, minimum);
+            if (ratio < minimum) {
+                fail(std::string("contrast-") + entry.name, label + " is below WCAG AA");
+            }
+        };
+        for (const Pair& pair : pairs) {
+            report(std::string(pair.fg) + " on " + pair.bg, t.*pair.fg_token, t.*pair.bg_token, pair.minimum);
+        }
+        // Badge: the status colour as text on its own tint (draw_badge).
+        const float tint = t.dark ? 0.18f : 0.12f;
+        for (const auto& [name, color] : {std::pair<const char*, COLORREF>{"accent", t.accent},
+                                          std::pair<const char*, COLORREF>{"ok", t.ok},
+                                          std::pair<const char*, COLORREF>{"warning", t.warning},
+                                          std::pair<const char*, COLORREF>{"error", t.error}}) {
+            report(std::string(name) + " on its badge", color, gt::ui::mix(t.surface, color, tint), 4.5);
+        }
+    }
 }
 
 bool save_png(HBITMAP bitmap, const std::filesystem::path& path) {
@@ -408,6 +496,7 @@ int main(int argc, char** argv) {
         std::printf("ui_snapshot: GDI+ failed to start\n");
         return 1;
     }
+    check_contrast();
     std::printf("ui_snapshot: offscreen renders of the controller UI\n");
     for (const Shot& shot : shots()) {
         if (!only.empty() && shot.name.find(only) == std::string::npos) {

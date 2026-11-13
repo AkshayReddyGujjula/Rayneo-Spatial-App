@@ -247,7 +247,7 @@ void draw_button(Canvas& canvas, const RECT& rect, const std::wstring& label, Bu
     COLORREF label_color = t.text;
     switch (style) {
         case ButtonStyle::Primary:
-            background = state.enabled ? mix(t.accent, t.accent_hover, hover) : t.surface_alt;
+            background = state.enabled ? mix(t.accent_fill, t.accent_hover, hover) : t.surface_alt;
             label_color = state.enabled ? t.accent_text : t.disabled_text;
             break;
         case ButtonStyle::Secondary:
