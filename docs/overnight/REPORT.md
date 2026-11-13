@@ -64,6 +64,11 @@ It does nothing while you read (reading output is identical to before).
   cut-off help text now wraps, screen labels in the arrangement editor no longer sit on the
   screens, and the setup-guide step labels line up. The renderer now fails the build if any colour
   pair drops below AA. Before/after images: `docs/overnight/ui-qa/`.
+- **Plain wording on the normal pages:** "running | workspace | 3 screens | 60 fps | VDD desktops"
+  now reads "Workspace · 3 screens · 60 fps · virtual desktops"; layout summaries read
+  "3 screens · arc −45° to 45° · 46° field of view · 120/30/1 fps capture"; after a calibration
+  you get a plain sentence instead of `up_vs_yaw 6.10 deg, nod_level …`; angles use ° everywhere.
+  The technical versions are still on the Diagnostics page and in the logs.
 - **More accurate head calibration (opt-in):** `--repeats N` has you do each turn, nod and tilt N
   times; outliers are thrown out and the rest averaged. Simulated error 1.9 -> 1.1 deg with 3
   repeats (about 21 s longer). After every calibration the app now shows **Calibration quality:
