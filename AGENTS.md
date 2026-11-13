@@ -137,7 +137,7 @@ message must be reproducible from the test output.
   1.0 deg/s turn keeps >=80% of its travel, and its snapshot rollback removes the small absorbed
   part when the turn stops (no reverse slide). A genuinely stale estimate therefore converges over
   tens of seconds, not seconds. Startup tracking stays closed until one valid bias window is
-  available; `R` / Ctrl+Alt+R recenters after an unavoidable ambiguous ultra-slow turn.
+  available; Ctrl+Shift+R (or the controller's Recenter) recenters after an unavoidable ambiguous ultra-slow turn.
 - **Bias band.** The estimator assumes |bias| <= 1.5 deg/s. A larger true bias cannot be corrected and
   would show as creep; better to recalibrate.
 - **Virtual displays need the signed Parsec VDD driver**, which is not installed by default. Without
