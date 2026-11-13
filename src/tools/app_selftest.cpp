@@ -1584,8 +1584,22 @@ void test_animation() {
     check(gt::anim::animation_timer_wanted(demand), "an engine start still animates while the window is shown");
 }
 
+// Stand-in for the AppState members the pointer helpers touch.
+struct PointerFixture {
+    int hover_id = 0;
+    int press_id = 0;
+    bool drag_active = false;
+    int drag_comfort = -1;
+    int drag_field = -1;
+    int drag_screen = -1;
+    bool orbiting = false;
+    int drag_scroll_panel = -1;
+    int drag_splitter = -1;
+};
+
 // Input and engine-start decisions AppWindow delegates to ui_input.h.
 void test_ui_input() {
+    std::printf("app_selftest: engine-start gate and pointer input\n");
     // An in-app calibration (including its post-cancel shutdown wait) owns
     // the glasses' sensor: an engine start must be refused, not launched.
     const std::wstring blocked = gt::engine_start_calibration_block(true);
@@ -1594,6 +1608,51 @@ void test_ui_input() {
           "the refusal tells the user the calibration is the reason");
     check(gt::engine_start_calibration_block(false).empty(),
           "an engine start is allowed when no calibration is running");
+
+    // Losing mouse capture mid-drag (Alt+Tab) must end the drag exactly as a
+    // button-up would, or the next plain mouse move keeps dragging.
+    PointerFixture slider;
+    slider.press_id = 42;
+    slider.drag_active = true;
+    slider.drag_comfort = 42;
+    int pending = 7;
+    gt::PointerDragEnd lost = gt::pointer_on_capture_lost(slider, pending);
+    check(lost.ended && !slider.drag_active, "capture lost mid-drag ends the drag");
+    check(slider.drag_comfort == -1 && slider.press_id == 0 && pending == 0,
+          "capture lost clears the dragged slider, the pressed look and the pending click");
+    check(lost.save_comfort && !lost.save_splitter,
+          "capture lost still saves a moved comfort slider, like a button-up");
+
+    PointerFixture splitter;
+    splitter.drag_active = true;
+    splitter.drag_splitter = 2;
+    splitter.drag_scroll_panel = 1;
+    splitter.drag_field = 3;
+    splitter.drag_screen = 1;
+    splitter.orbiting = true;
+    pending = 0;
+    lost = gt::pointer_on_capture_lost(splitter, pending);
+    check(lost.ended && lost.save_splitter && !lost.save_comfort,
+          "capture lost on a splitter drag persists the splitter");
+    check(splitter.drag_splitter == -1 && splitter.drag_scroll_panel == -1 &&
+              splitter.drag_field == -1 && splitter.drag_screen == -1 && !splitter.orbiting,
+          "capture lost closes every drag mode");
+
+    // Our own ReleaseCapture on button-up also sends WM_CAPTURECHANGED,
+    // after the drag ended: it must not save twice or touch a pending click.
+    PointerFixture idle;
+    pending = 9;
+    lost = gt::pointer_on_capture_lost(idle, pending);
+    check(!lost.ended && !lost.save_splitter && !lost.save_comfort && pending == 9,
+          "capture changed with no drag is a no-op");
+    PointerFixture button_up;
+    button_up.drag_active = true;
+    button_up.drag_comfort = 5;
+    pending = 0;
+    const gt::PointerDragEnd up = gt::pointer_end_drag(button_up, pending);
+    lost = gt::pointer_on_capture_lost(button_up, pending);
+    check(up.ended && up.save_comfort && !lost.ended && !lost.save_comfort,
+          "the button-up's own ReleaseCapture does not end (or save) the drag twice");
 }
 
 int main() {

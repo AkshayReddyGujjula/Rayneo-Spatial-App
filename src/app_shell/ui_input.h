@@ -22,4 +22,46 @@ inline std::wstring engine_start_calibration_block(bool calibration_active) {
     return std::wstring();
 }
 
+// What the drag-end half of a button-up left to do.
+struct PointerDragEnd {
+    bool ended = false;          // a drag was active and is now over
+    bool save_splitter = false;  // a splitter moved: persist the preferences
+    bool save_comfort = false;   // a comfort slider moved: persist it
+};
+
+// The drag-end half of a left-button-up: every drag mode is closed and the
+// pending click is dropped (a drag never also clicks). The caller releases
+// capture and performs the saves the result asks for. No-op when nothing is
+// being dragged.
+template <typename State>
+PointerDragEnd pointer_end_drag(State& state, int& pending_click_id) {
+    PointerDragEnd result;
+    if (!state.drag_active) {
+        return result;
+    }
+    result.ended = true;
+    result.save_splitter = state.drag_splitter >= 0;
+    result.save_comfort = state.drag_comfort >= 0;
+    state.drag_active = false;
+    state.drag_comfort = -1;
+    state.drag_field = -1;
+    state.drag_screen = -1;
+    state.orbiting = false;
+    state.drag_scroll_panel = -1;
+    state.drag_splitter = -1;
+    pending_click_id = 0;
+    return result;
+}
+
+// WM_CAPTURECHANGED: the window lost the mouse mid-gesture (Alt+Tab, another
+// window took capture). The button-up will never arrive here, so end the drag
+// exactly as a button-up would, but never execute a click. Our own
+// ReleaseCapture in the button-up also lands here, after the drag has
+// already ended, and is then a no-op.
+template <typename State>
+PointerDragEnd pointer_on_capture_lost(State& state, int& pending_click_id) {
+    state.press_id = 0;
+    return pointer_end_drag(state, pending_click_id);
+}
+
 }  // namespace gt

@@ -314,6 +314,9 @@ LRESULT AppWindow::dispatch(UINT message, WPARAM wparam, LPARAM lparam) {
         case WM_LBUTTONUP:
             on_lbutton_up(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
             return 0;
+        case WM_CAPTURECHANGED:
+            on_capture_changed();
+            return 0;
         case WM_MOUSEWHEEL:
             on_mouse_wheel(GET_WHEEL_DELTA_WPARAM(wparam));
             return 0;
@@ -1016,26 +1019,10 @@ void AppWindow::on_lbutton_up(int x, int y) {
         state_.press_id = kUiNone;
         invalidate();
     }
-    if (state_.drag_active) {
-        const bool moved_splitter = state_.drag_splitter >= 0;
-        const bool moved_comfort = state_.drag_comfort >= 0;
-        state_.drag_active = false;
-        state_.drag_comfort = -1;
-        state_.drag_field = -1;
-        state_.drag_screen = -1;
-        state_.orbiting = false;
-        state_.drag_scroll_panel = -1;
-        state_.drag_splitter = -1;
-        pending_click_id_ = kUiNone;
+    const PointerDragEnd drag_end = pointer_end_drag(state_, pending_click_id_);
+    if (drag_end.ended) {
         ReleaseCapture();
-        if (moved_splitter && state_.config_valid) {
-            std::wstring ignored;
-            save_config_to_disk(state_, ignored);
-        }
-        if (moved_comfort) {
-            save_comfort(state_);
-        }
-        invalidate();
+        finish_drag(drag_end);
         return;
     }
     if (pending_click_id_ != kUiNone) {
@@ -1046,6 +1033,29 @@ void AppWindow::on_lbutton_up(int x, int y) {
         if (spot != nullptr && spot->id == id && spot->enabled) {
             execute(id, arg);
         }
+    }
+}
+
+void AppWindow::finish_drag(const PointerDragEnd& drag_end) {
+    if (drag_end.save_splitter && state_.config_valid) {
+        std::wstring ignored;
+        save_config_to_disk(state_, ignored);
+    }
+    if (drag_end.save_comfort) {
+        save_comfort(state_);
+    }
+    invalidate();
+}
+
+void AppWindow::on_capture_changed() {
+    // Capture went elsewhere mid-drag (Alt+Tab, another window): the
+    // button-up will not arrive here, so end the drag now, without a click.
+    const bool was_pressed = state_.press_id != kUiNone;
+    const PointerDragEnd drag_end = pointer_on_capture_lost(state_, pending_click_id_);
+    if (drag_end.ended) {
+        finish_drag(drag_end);
+    } else if (was_pressed) {
+        invalidate();
     }
 }
 
