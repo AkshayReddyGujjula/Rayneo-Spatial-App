@@ -134,3 +134,5 @@ Window 3: merge leftovers, final full suite, final report. Stop at 10:30.
      provable (e.g. pre-check that the glasses sit level/are worn, speed guidance).
   4. Tests: live-line formatter/parser, guide geometry as pure functions, ui_snapshot renders of each guide state;
      calibration selftests unchanged. Never run hardware/the engine/the UI live.
+- 07:22 User said start now, stop at 95%. R5-A (Opus high) launched for the live calibration guide; it stops at 95% with notes
+  and is resumed after the reset (08:40-08:50).
