@@ -635,6 +635,14 @@ std::vector<Shot> shots() {
                         s.cal_in_wizard = true;
                         guide_cases()[4].setup(s.cal_run, s.now_s);
                     })});
+    // A broken layout file: the readiness row and the Layout card must not
+    // both register the same go-to id (Tab focus would loop between them).
+    list.push_back({"home-layout-problem-1280x800", 1280, 800, 96, true, [](AppState& s) {
+                        base_state(s, true);
+                        s.diagnostics.layout_ok = false;
+                        s.diagnostics.layout_detail = L"config/layouts/default.json: screen 2 overlaps screen 1";
+                        s.page = AppPage::Home;
+                    }});
     return list;
 }
 

@@ -290,9 +290,12 @@ int paint_readiness(Ui& ui, int left, int top, int width) {
                 action = {kUiGoBase + static_cast<int>(AppPage::Diagnostics), L"Troubleshoot"};
             } else if (i == 2) {
                 action = {kUiGoBase + static_cast<int>(AppPage::Tracking), L"Calibrate"};
-            } else if (i == 5) {
-                action = {kUiGoBase + static_cast<int>(AppPage::Layout), L"Open layout"};
             }
+            // The layout-file row has no button of its own: the Layout card
+            // beside it always shows "Edit layout" with the same go-to id,
+            // and one id registered twice traps Tab focus (cycle_focus finds
+            // the first copy, so forward Tab loops and never reaches the
+            // sidebar again).
         }
         return action;
     };
