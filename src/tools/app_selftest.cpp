@@ -1544,6 +1544,31 @@ void test_animation() {
     check(!animator.wants_frames(), "the frame request lasts one paint");
     animator.snap(hover, 0.25f);
     check(animator.track(hover, 0.25f) == 0.25f, "snap jumps a value (slider drag)");
+
+    // The animation timer. A frame request is cleared only by the next paint,
+    // and a hidden (tray) or minimized window gets no WM_PAINT: closing the
+    // window to the tray while the status card pulsed (engine starting) used
+    // to leave the 15 ms timer ticking until the window was shown again.
+    gt::anim::AnimationDemand demand;
+    check(!gt::anim::animation_timer_wanted(demand), "an idle window runs no animation timer");
+    demand.wants_frames = true;
+    check(gt::anim::animation_timer_wanted(demand), "a visible window with a frame request animates");
+    demand.window_paints = false;
+    check(!gt::anim::animation_timer_wanted(demand),
+          "a hidden or minimized window runs no animation timer, even with a stale frame request");
+    demand.wants_frames = false;
+    demand.starting = true;
+    demand.toast = true;
+    demand.animating = true;
+    demand.transition = true;
+    demand.fade_pending = true;
+    check(!gt::anim::animation_timer_wanted(demand), "nothing keeps the timer alive while the window cannot paint");
+    demand.window_paints = true;
+    demand.toast = false;
+    demand.animating = false;
+    demand.transition = false;
+    demand.fade_pending = false;
+    check(gt::anim::animation_timer_wanted(demand), "an engine start still animates while the window is shown");
 }
 
 int main() {

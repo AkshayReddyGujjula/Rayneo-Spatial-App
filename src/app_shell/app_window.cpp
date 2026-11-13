@@ -1995,11 +1995,19 @@ void AppWindow::update_tooltip() {
 }
 
 void AppWindow::update_animation_timer() {
-    const bool toast_active = !state_.toast.empty() && state_.now_s < state_.toast_expiry_s;
-    const bool wanted = state_.starting || toast_active || state_.anim.animating() ||
-                        state_.anim.wants_frames() || state_.page_transition.active(state_.now_s) ||
-                        fade_dc_ != nullptr;
-    if (wanted == animation_timer_ || hwnd_ == nullptr) {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    anim::AnimationDemand demand;
+    demand.window_paints = IsWindowVisible(hwnd_) != FALSE && IsIconic(hwnd_) == FALSE;
+    demand.starting = state_.starting;
+    demand.toast = !state_.toast.empty() && state_.now_s < state_.toast_expiry_s;
+    demand.animating = state_.anim.animating();
+    demand.wants_frames = state_.anim.wants_frames();
+    demand.transition = state_.page_transition.active(state_.now_s);
+    demand.fade_pending = fade_dc_ != nullptr;
+    const bool wanted = anim::animation_timer_wanted(demand);
+    if (wanted == animation_timer_) {
         return;
     }
     animation_timer_ = wanted;

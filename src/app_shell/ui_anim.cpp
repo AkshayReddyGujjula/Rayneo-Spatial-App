@@ -43,6 +43,14 @@ float approach(float current, float target, float dt_s, float tau_s, float epsil
     return next;
 }
 
+bool animation_timer_wanted(const AnimationDemand& demand) {
+    if (!demand.window_paints) {
+        return false;
+    }
+    return demand.starting || demand.toast || demand.animating || demand.wants_frames ||
+           demand.transition || demand.fade_pending;
+}
+
 float Transition::progress(double now_s) const {
     if (start_s < 0.0 || !(duration_s > 0.0)) {
         return 1.0f;

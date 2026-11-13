@@ -63,6 +63,22 @@ inline constexpr float kTauToggle = 0.07f;
 inline constexpr float kTauSlide = 0.08f;
 inline constexpr float kTauProgress = 0.20f;
 
+// Whether the window's animation timer should run. Something must be moving
+// AND the window must be able to paint: a hidden (tray) or minimized window
+// receives no WM_PAINT, so a frame request (cleared only by the next paint)
+// would never clear and the timer would tick at 66 Hz for as long as the
+// window stays in the tray. Showing the window paints, which re-evaluates.
+struct AnimationDemand {
+    bool window_paints = true;  // visible and not minimized
+    bool starting = false;      // engine start in progress
+    bool toast = false;         // a toast is on screen
+    bool animating = false;     // Animator::animating()
+    bool wants_frames = false;  // Animator::wants_frames()
+    bool transition = false;    // page transition running
+    bool fade_pending = false;  // the old page's snapshot is still held
+};
+bool animation_timer_wanted(const AnimationDemand& demand);
+
 class Animator {
 public:
     // Call at the start of each paint; keys not tracked before the next
