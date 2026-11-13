@@ -32,17 +32,32 @@ directory, 11/11 ctest green before and after, no warnings.
   identical to the branch tip (diffed).
 - **Needs live verification:** unplug/replug the glasses while looking at a side screen.
 
+### 2. A recenter landing after the smoother reset was predicted as a turn (follow-up commit)
+
+- **Race.** The recenter handlers (`spatial_desk.cpp`, hotkey and controller) call
+  `view_smoother.reset()` at once. The IMU thread applies `recenter()` only at the top of its next
+  loop, and it publishes the recentered pose one sample later: about 2-4 ms normally, and up to
+  the 100 ms read timeout on a USB stall. A frame whose late pose is sampled inside that interval
+  restarts the smoother from the pre-recenter pose. The view then steps one frame later, and the
+  prediction read that step as a turn. Whether the race happens on hardware depends on the
+  capture pass plus `wait_for_frame()` being shorter than that latency. That was not measured.
+  The consequence, once the race happens, is reproduced below.
+- **Fix.** `ImuSource::run` increments the session epoch right after `estimator.recenter()`, so
+  the epoch changes on exactly the pose where the view steps, and `note_source_epoch()` restarts
+  the prediction there. When there is no race, the reset has already restarted the smoother, so
+  the changed epoch has no effect. The 1-euro glide of a late step predates this branch and is
+  unchanged.
+- **Test.** `pose_scenarios` 30 (30 deg recenter, medium hold, 60 Hz): the smoother is reset, one
+  frame samples the pre-recenter pose, then the recentered pose arrives. Overshoot past straight
+  ahead is 0.000 deg without prediction, **12.936 deg** predicted when the epoch does not change
+  on the recenter (the check fails when the scenario's epoch is not bumped), and 0.000 deg with
+  the epoch change. The settled pose matches the no-prediction run. As with scenario 29, the test
+  drives the smoother with the epoch sequence that `ImuSource` publishes. `ImuSource` itself
+  needs the HID device, so no test runs it. `pose_selftest` and scenarios 1-29 print identical
+  output.
+
 ## Plausible, not fixed
 
-- **Recenter race** (`spatial_desk.cpp` hotkey/controller recenter): the handler calls
-  `view_smoother.reset()` at once, but the IMU thread applies `recenter()` only at the top of its
-  next loop and publishes the recentered pose one sample later (about 2-4 ms nominally, up to the
-  100 ms read timeout on a USB stall). If the frame's late pose is taken inside that interval the
-  smoother is seeded with the pre-recenter pose and the next frame's step is predicted (and
-  1-euro-glided, which predates this branch). Not proven: it depends on the capture pass plus
-  `wait_for_frame()` being shorter than the IMU latency. Cheap follow-up if wanted: bump the
-  session epoch in `ImuSource::run` right after `estimator.recenter()`; in the non-race case that
-  is a no-op (the reset already reseeds the smoother).
 - **Hard-iron tracker bound** (`mag_heading.cpp` `decide()`, opt-in, off by default): the
   `max_offset_ut` bound is checked when a step is detected, but adoption then refines the
   offset to `c_before + a h` with `a` up to `max_scale` 1.5, so the departure can exceed the
