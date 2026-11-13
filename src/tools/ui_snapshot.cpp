@@ -782,6 +782,25 @@ std::vector<Shot> shots() {
                         s.diagnostics.layout_ok = false;
                         s.diagnostics.layout_detail = L"config/layouts/default.json: screen 2 overlaps screen 1";
                         s.page = AppPage::Home;
+                    },
+                    // The engine exits with "layout load failed" on this file in
+                    // either mode, so Home must not offer a start.
+                    [](const std::string& name, const AppState& s, const uint32_t*, const auto& hotspots) {
+                        for (const int id : {static_cast<int>(gt::kUiStartWorkspace),
+                                             static_cast<int>(gt::kUiStartPreview)}) {
+                            const auto spot = std::find_if(hotspots.begin(), hotspots.end(),
+                                                           [id](const gt::ui::Hotspot& h) { return h.id == id; });
+                            if (spot == hotspots.end() || spot->enabled) {
+                                fail(name, "start button " + std::to_string(id) +
+                                               " is offered although the layout file cannot load");
+                            }
+                        }
+                        const gt::LaunchMode modes[] = {gt::LaunchMode::Workspace, gt::LaunchMode::Preview};
+                        for (const gt::LaunchMode mode : modes) {
+                            if (gt::start_block_reason(s, mode).empty()) {
+                                fail(name, "start_block_reason is empty with a broken layout file");
+                            }
+                        }
                     }});
     // The smallest window the controller allows (760x560 outer, about
     // 744x521 client), every page, with six user presets: the Layout page
