@@ -120,3 +120,29 @@ These are real by Win32 semantics or a concrete trace, but the code lives in `Ap
   open. Arrow keys acting on a stale shell focus id (a nav item or segmented control under the
   guide) were considered: the guide opens at launch with no focus, or from the Run setup guide
   button, which then holds focus, so no path reaches it.
+
+## Round 3 fixes (R3-A)
+
+The three "confirmed, not fixed" items above are fixed. The test seam is a header-only
+`src/app_shell/ui_input.h` (no Win32): `AppWindow` calls it with its `AppState`, and
+`app_selftest` (`test_ui_input`) calls it with a stand-in struct holding the same members.
+
+1. **Engine start during calibration.** `execute(kUiStartWorkspace/Preview)` asks
+   `engine_start_calibration_block(calibration_.active())` first and, while a calibration is
+   active (including the post-cancel shutdown wait), shows a warning banner ("Finish or cancel
+   the calibration first: it is using the glasses' sensor.") and logs the refusal. Home buttons,
+   the tray menu and the guide all go through `execute`. Reverse direction verified unchanged:
+   `start_calibration` refuses while `engine.busy()` (process or window present). Not covered:
+   the separate console-window calibration (`kUiLaunchCalibration`) is not tracked by
+   `calibration_` and was not changed.
+2. **`WM_CAPTURECHANGED`.** The drag-end half of `on_lbutton_up` is now `pointer_end_drag`
+   (same field resets and saves). `WM_CAPTURECHANGED` runs `pointer_on_capture_lost`: ends the
+   drag, clears the pressed look and the pending click, performs the splitter/comfort save, and
+   never executes a click. The button-up's own `ReleaseCapture` lands after the drag ended and
+   is a no-op (tested: no double save).
+3. **Stuck pressed look.** `WM_MOUSELEAVE` runs `pointer_on_mouse_leave`, which clears hover
+   and `press_id` together unless a captured drag is active; the click is still decided by
+   `pending_click_id_`.
+
+Live window message paths were not exercised (no live UI runs in this session); 11/11 suites
+green, no new warnings.

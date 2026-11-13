@@ -12,6 +12,7 @@
 #include "app_shell/app_state.h"
 #include "app_shell/calibration_runner.h"
 #include "app_shell/tray_icon.h"
+#include "app_shell/ui_input.h"
 #include "app_shell/ui_theme.h"
 #include "app_shell/ui_widgets.h"
 
@@ -62,6 +63,8 @@ private:
     void on_mouse_leave();
     void on_lbutton_down(int x, int y);
     void on_lbutton_up(int x, int y);
+    void on_capture_changed();
+    void finish_drag(const PointerDragEnd& drag_end);
     void on_mouse_wheel(int delta);
     void on_key_down(WPARAM key, bool shift);
     void on_tray_message(LPARAM lparam);
