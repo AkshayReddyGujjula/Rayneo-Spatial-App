@@ -139,6 +139,14 @@ struct EngineView {
 EngineView engine_view(const AppState& state, const Theme& theme);
 float pulse_phase(Ui& ui, bool active);
 
+// The sidebar's always-visible engine card: label and dot colour.
+struct StatusCard {
+    std::wstring label;
+    COLORREF dot = 0;
+    bool pulse = false;
+};
+StatusCard status_card(const EngineView& view, const AppState& state, const Theme& theme);
+
 // Readiness checks shared by Home, Diagnostics and the setup guide.
 struct HealthItem {
     const wchar_t* title = L"";
