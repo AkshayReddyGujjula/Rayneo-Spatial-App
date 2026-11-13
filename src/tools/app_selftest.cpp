@@ -1481,6 +1481,23 @@ void test_calibration_progress() {
                                           final_event, final_error) == gt::CalLineKind::Malformed,
               "raw ANSI bytes would make that line malformed (why the tool sanitises)");
     }
+    // R6-B: a step that failed three times wraps its last reason; the code
+    // used to reach the wearer raw ("the yaw step ... (OFF_AXIS: ...)").
+    check(gt::cal_reason_text("the yaw step did not pass after three attempts (OFF_AXIS: too much off-axis motion - "
+                              "keep the other head axes still)") ==
+                  "The turn step did not pass after three attempts. Too much off-axis motion - keep the other "
+                  "head axes still" &&
+              gt::cal_reason_text("stillness could not be measured after three attempts (HOLD_STILL: 1.80 deg/s of "
+                                  "movement (limit 1.5) - rest the back of your head against something)") ==
+                  "Stillness could not be measured after three attempts. 1.80°/s of movement (limit 1.5) - "
+                  "rest the back of your head against something" &&
+              gt::cal_reason_text("failed after three attempts; nothing was changed (SMALL_COVERAGE: not enough "
+                                  "movement - turn fully around AND nod/tilt (field 51.0 uT, turn 90 deg))") ==
+                  "Failed after three attempts. Not enough movement - turn fully around AND nod/tilt (field 51.0 "
+                  "uT, turn 90°)" &&
+              gt::cal_reason_text("the nod step did not pass after three attempts (NO_DEVICE: gone)")
+                      .find("The glasses were not found") != std::string::npos,
+          "a reason wrapped by the third failed attempt reads in plain words, code mapped or dropped");
     check(gt::cal_reason_text("SMALL_EXCURSION: turn further") == "Turn further" &&
               gt::cal_reason_text("plain words") == "plain words" &&
               gt::cal_reason_text("STREAM_FAILED: timeout").find("motion data") != std::string::npos,

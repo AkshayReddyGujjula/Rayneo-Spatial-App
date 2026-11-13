@@ -341,15 +341,54 @@ std::string cal_reason_text(const std::string& detail) {
         }
         return cal_user_units(text);
     };
+    const auto is_code = [](const std::string& text) {
+        if (text.empty()) {
+            return false;
+        }
+        for (char c : text) {
+            if (!((c >= 'A' && c <= 'Z') || c == '_')) {
+                return false;
+            }
+        }
+        return true;
+    };
+    // A step that failed three times wraps its last reason:
+    // "the yaw step did not pass after three attempts (OFF_AXIS: ...)".
+    // Say what happened in plain words, then the wrapped reason, mapped.
+    const auto nested = [&](const std::string& text) -> std::string {
+        for (size_t open = text.find(" ("); open != std::string::npos; open = text.find(" (", open + 2)) {
+            const size_t inner_colon = text.find(": ", open + 2);
+            if (inner_colon == std::string::npos || !is_code(text.substr(open + 2, inner_colon - open - 2))) {
+                continue;
+            }
+            std::string inner = text.substr(open + 2);
+            if (!inner.empty() && inner.back() == ')') {
+                inner.pop_back();  // the wrapper's own closing parenthesis
+            }
+            std::string prefix = text.substr(0, open);
+            const size_t yaw = prefix.find("the yaw step");
+            if (yaw != std::string::npos) {
+                prefix.replace(yaw, 12, "the turn step");
+            }
+            const size_t unchanged = prefix.find("; nothing was changed");
+            if (unchanged != std::string::npos) {
+                prefix.erase(unchanged);  // the panel says so itself
+            }
+            if (!prefix.empty() && prefix.front() >= 'a' && prefix.front() <= 'z') {
+                prefix.front() = static_cast<char>(prefix.front() - 'a' + 'A');
+            }
+            return prefix + ". " + cal_reason_text(inner);
+        }
+        return {};
+    };
     const size_t colon = detail.find(": ");
     if (colon == std::string::npos || colon == 0) {
         return tidy(detail);
     }
     const std::string code = detail.substr(0, colon);
-    for (char c : code) {
-        if (!((c >= 'A' && c <= 'Z') || c == '_')) {
-            return tidy(detail);
-        }
+    if (!is_code(code)) {
+        const std::string wrapped = nested(detail);
+        return wrapped.empty() ? tidy(detail) : wrapped;
     }
     for (const Known& known : kKnown) {
         if (code == known.code) {
@@ -451,8 +490,6 @@ void CalRunState::apply(const CalProgressEvent& event, double now_s) {
     }
     if (has_event && event.step != step) {
         retry_reason.clear();
-    }
-    if (has_event && event.step != step) {
         retry_tip.clear();
     }
     if (event.state == CalStepState::Retry) {
