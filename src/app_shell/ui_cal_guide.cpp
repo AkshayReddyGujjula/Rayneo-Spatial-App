@@ -191,7 +191,7 @@ void paint_cal_guide(Canvas& c, const RECT& area, const CalGuideView& view, cons
     if (style.show_text && band > 0) {
         const int pad = std::max(4, H / 60);
         RECT step_rect{area.left + pad * 2, area.top + pad, area.left + W / 3, area.top + pad + H / 18};
-        if (view.steps > 0) {
+        if (view.steps > 0 && style.glasses) {  // the PC panel already shows the step
             c.text(style.small, style.text_dim, step_rect,
                    format_wide(L"Step %d of %d", std::max(1, view.step), view.steps), DT_LEFT | DT_TOP | DT_SINGLELINE);
         }
