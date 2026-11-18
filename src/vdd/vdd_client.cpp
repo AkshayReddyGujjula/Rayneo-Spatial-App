@@ -1,4 +1,5 @@
 #include "vdd/vdd_client.h"
+#include "vdd/display_config.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -12,6 +13,7 @@
 #include <cstdio>
 #include <cwchar>
 #include <memory>
+#include <utility>
 
 namespace gt {
 namespace {
@@ -84,6 +86,24 @@ std::array<uint8_t, 32> vdd_remove_payload(int driver_index) {
 
 std::vector<int> vdd_cleanup_order(const std::vector<int>& addition_order) {
     return std::vector<int>(addition_order.rbegin(), addition_order.rend());
+}
+
+bool retry_vdd_removal(int index, const std::function<bool(int, std::string&)>& remove,
+                       const std::function<void(int)>& sleep_ms, std::string& error) {
+    constexpr std::array delays_ms{0, 250, 750};
+    std::string failure;
+    for (size_t attempt = 0; attempt < delays_ms.size(); ++attempt) {
+        const int delay_ms = delays_ms[attempt];
+        if (delay_ms != 0) sleep_ms(delay_ms);
+        std::string ioctl_error;
+        if (remove(index, ioctl_error)) return true;
+        failure = "failed to remove Parsec virtual display " + std::to_string(index) +
+                  ": " + ioctl_error;
+        std::printf("  VDD remove attempt %zu/%zu: %s\n",
+                    attempt + 1, delays_ms.size(), failure.c_str());
+    }
+    error = std::move(failure);
+    return false;
 }
 
 VddClient::~VddClient() {
@@ -207,15 +227,21 @@ bool VddClient::ioctl(uint32_t code, const std::array<uint8_t, 32>& input, uint3
     }
     uint32_t result = 0;
     DWORD transferred = 0;
-    DeviceIoControl(native_handle(handle_), code, const_cast<uint8_t*>(input.data()),
-                    static_cast<DWORD>(input.size()), output != nullptr ? &result : nullptr,
-                    output != nullptr ? sizeof(result) : 0, nullptr, &overlapped);
-    const BOOL completed = GetOverlappedResultEx(native_handle(handle_), &overlapped, &transferred,
-                                                 timeout_ms, FALSE);
-    const DWORD completion_error = completed ? ERROR_SUCCESS : GetLastError();
-    if (!completed) {
-        CancelIoEx(native_handle(handle_), &overlapped);
-        GetOverlappedResult(native_handle(handle_), &overlapped, &transferred, TRUE);
+    const BOOL submitted = DeviceIoControl(
+        native_handle(handle_), code, const_cast<uint8_t*>(input.data()),
+        static_cast<DWORD>(input.size()), output != nullptr ? &result : nullptr,
+        output != nullptr ? sizeof(result) : 0, nullptr, &overlapped);
+    DWORD completion_error = submitted ? ERROR_SUCCESS : GetLastError();
+    BOOL completed = FALSE;
+    if (submitted || completion_error == ERROR_IO_PENDING) {
+        completed = GetOverlappedResultEx(native_handle(handle_), &overlapped, &transferred,
+                                          timeout_ms, FALSE);
+        if (!completed) {
+            completion_error = GetLastError();
+            CancelIoEx(native_handle(handle_), &overlapped);
+            // A request can complete between the timeout and cancellation.
+            completed = GetOverlappedResult(native_handle(handle_), &overlapped, &transferred, TRUE);
+        }
     }
     CloseHandle(overlapped.hEvent);
     if (!completed) {
@@ -269,12 +295,10 @@ bool VddClient::add_display(int& index, std::string& error) {
     return true;
 }
 
-bool VddClient::remove_display(int index) {
+bool VddClient::remove_display(int index, std::string& error) {
     const auto input = vdd_remove_payload(index);
     uint32_t response = 0;
-    const bool removed = ioctl(kIoctlRemove, input, 1000, &response, nullptr, false);
-    ping();
-    return removed;
+    return ioctl(kIoctlRemove, input, 1000, &response, &error, false);
 }
 
 void VddClient::keepalive_loop() {
@@ -315,6 +339,14 @@ bool VddClient::connect(size_t display_count, std::string& error) {
     keepalive_thread_ = std::thread(&VddClient::keepalive_loop, this);
 
     if (!resize(display_count, error)) {
+        if (!display_indices_.empty()) {
+            std::printf("display landscape before startup cleanup:\n%s",
+                        describe_display_landscape().c_str());
+            std::vector<VirtualDisplayInfo> settled;
+            std::string settle_error;
+            wait_for_virtual_displays(display_indices_, kVirtualDisplayWaitMs,
+                                      "startup cleanup settle", settled, settle_error);
+        }
         disconnect();
         return false;
     }
@@ -330,20 +362,12 @@ bool VddClient::resize(size_t display_count, std::string& error) {
         error = "VDD display count must be between 1 and " + std::to_string(kMaximumDisplays);
         return false;
     }
-    const size_t original_count = display_indices_.size();
     while (display_indices_.size() > display_count) {
         const int index = display_indices_.back();
-        if (!remove_display(index)) {
-            error = "failed to remove Parsec virtual display " + std::to_string(index);
-            while (display_indices_.size() < original_count) {
-                int replacement = -1;
-                std::string rollback_error;
-                if (!add_display(replacement, rollback_error)) {
-                    error += "; rollback also failed: " + rollback_error;
-                    break;
-                }
-                display_indices_.push_back(replacement);
-            }
+        if (!retry_vdd_removal(
+                index, [this](int id, std::string& detail) { return remove_display(id, detail); },
+                [](int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); },
+                error)) {
             return false;
         }
         display_indices_.pop_back();
@@ -351,15 +375,6 @@ bool VddClient::resize(size_t display_count, std::string& error) {
     while (display_indices_.size() < display_count) {
         int index = -1;
         if (!add_display(index, error)) {
-            while (display_indices_.size() > original_count) {
-                const int added_index = display_indices_.back();
-                if (!remove_display(added_index)) {
-                    error += "; failed to remove partially added display " +
-                             std::to_string(added_index);
-                    break;
-                }
-                display_indices_.pop_back();
-            }
             return false;
         }
         display_indices_.push_back(index);
@@ -370,7 +385,11 @@ bool VddClient::resize(size_t display_count, std::string& error) {
 void VddClient::disconnect() {
     if (handle_ != nullptr) {
         for (int index : vdd_cleanup_order(display_indices_)) {
-            remove_display(index);
+            std::string error;
+            if (!remove_display(index, error)) {
+                std::printf("  failed to remove Parsec virtual display %d during disconnect: %s\n",
+                            index, error.c_str());
+            }
         }
     }
     display_indices_.clear();

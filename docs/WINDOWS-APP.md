@@ -227,6 +227,11 @@ sidebar collapses to icons.
 * **Save and apply** validates, writes `config/layouts/default.json` atomically through
   `gt::save_layout` (temporary file + `MoveFileEx`), and then tells the engine to reload it
   immediately. **Revert** re-reads the file from disk and discards unsaved edits.
+  When the edit changes the virtual desktops, the engine waits for Windows to
+  activate their outputs before arranging them. If the edit fails and the engine
+  restores the previous desktop arrangement, the running workspace keeps its
+  previous layout and the engine log reports the rejection. The saved edit stays
+  on disk. If the restore also fails, the controller reports an engine failure.
 * **Splitter** — drag the divider between the arrangement editor and the inspector; the
   inspector's share of the row is remembered in `splits.column`. (The earlier dashboard had
   splitters between its six stacked panels; those panels are now separate pages, so

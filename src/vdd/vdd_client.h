@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -23,6 +24,8 @@ enum class VddDriverStatus {
 const char* vdd_driver_status_text(VddDriverStatus status);
 std::array<uint8_t, 32> vdd_remove_payload(int driver_index);
 std::vector<int> vdd_cleanup_order(const std::vector<int>& addition_order);
+bool retry_vdd_removal(int index, const std::function<bool(int, std::string&)>& remove,
+                       const std::function<void(int)>& sleep_ms, std::string& error);
 
 class VddClient {
 public:
@@ -35,6 +38,8 @@ public:
     static VddDriverStatus driver_status();
 
     bool connect(size_t display_count, std::string& error);
+    // On failure the owned indices reflect completed operations. The caller
+    // can restore its previous count or disconnect during startup cleanup.
     bool resize(size_t display_count, std::string& error);
     void disconnect();
 
@@ -50,7 +55,7 @@ private:
     bool open(std::string& error);
     void close();
     bool add_display(int& index, std::string& error);
-    bool remove_display(int index);
+    bool remove_display(int index, std::string& error);
     bool ping();
     bool query_version(int& version);
     bool ioctl(uint32_t code, const std::array<uint8_t, 32>& input, uint32_t timeout_ms,

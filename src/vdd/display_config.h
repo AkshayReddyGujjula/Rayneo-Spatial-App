@@ -20,6 +20,8 @@ struct VirtualDisplayInfo {
     std::wstring device_name;
     std::wstring device_id;
     bool active = false;
+    DWORD adapter_flags = 0;
+    DWORD monitor_flags = 0;
 };
 
 struct ConfiguredDisplay {
@@ -30,13 +32,19 @@ struct ConfiguredDisplay {
     int refresh_hz = 0;
     int x = 0;
     int y = 0;
+
+    bool operator==(const ConfiguredDisplay&) const = default;
 };
 
+constexpr int kVirtualDisplayWaitMs = 5000;
 int parse_vdd_driver_index(const std::wstring& device_id);
 int choose_refresh_rate(const std::vector<int>& available, int preferred);
 std::vector<VirtualDisplayInfo> enumerate_virtual_displays();
 bool wait_for_virtual_displays(const std::vector<int>& driver_indices, int timeout_ms,
-                               std::vector<VirtualDisplayInfo>& displays, std::string& error);
+                               const char* phase, std::vector<VirtualDisplayInfo>& displays,
+                               std::string& error);
+std::map<int, std::wstring> active_virtual_display_names(
+    const std::vector<VirtualDisplayInfo>& displays);
 
 // Pure workspace-topology planning (unit-tested in vdd_selftest; no Win32 calls).
 

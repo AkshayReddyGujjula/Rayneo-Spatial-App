@@ -1,7 +1,10 @@
 #include "vdd/display_config.h"
 #include "vdd/vdd_client.h"
+#include "vdd/workspace_reload.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -11,6 +14,214 @@ int failures = 0;
 void check(bool condition, const char* label) {
     std::printf("  [%s] %s\n", condition ? "PASS" : "FAIL", label);
     if (!condition) ++failures;
+}
+
+gt::Layout triple_layout() {
+    gt::Layout layout;
+    layout.screens = {{"left", 0, -45.0f}, {"center", 1, 0.0f}, {"right", 2, 45.0f}};
+    return layout;
+}
+
+void test_workspace_reload(const char* label, int arrival_ms, int removal_failures) {
+    auto previous = triple_layout();
+    auto candidate = previous;
+    candidate.screens.push_back({"above", 3, 0.0f, 25.0f});
+    std::vector<int> indices{0, 1, 2};
+    std::vector<gt::ConfiguredDisplay> configured{
+        {0, L"left", 1920, 1080, 120, -1920, 0},
+        {1, L"center", 1920, 1080, 120, 0, 0},
+        {2, L"right", 1920, 1080, 120, 1920, 0},
+    };
+    const auto previous_displays = configured;
+    std::vector<std::string> events;
+    std::vector<int> backoff;
+    int removal_attempts = 0;
+    int reload_wait_ms = -1;
+    int added_active_ms = -1;
+    int rollback_active_ms = -1;
+    const std::string ioctl_error = "VDD IOCTL 0x0022a008 failed (Windows error 170)";
+    std::string error, rollback_error;
+    const gt::WorkspaceReloadOps ops{
+        [&]() -> const std::vector<int>& { return indices; },
+        [&](size_t count, std::string& detail) {
+            events.push_back("resize " + std::to_string(count));
+            if (count == 4) {
+                indices.push_back(3);
+                return true;
+            }
+            const bool removed = gt::retry_vdd_removal(
+                indices.back(),
+                [&](int index, std::string& attempt_error) {
+                    check(index == 3, "rollback removes the newly added index");
+                    if (++removal_attempts > removal_failures) return true;
+                    attempt_error = ioctl_error;
+                    return false;
+                },
+                [&](int ms) { backoff.push_back(ms); }, detail);
+            if (removed) indices.pop_back();
+            return removed;
+        },
+        [&](const std::vector<int>& expected, int timeout_ms, const char* phase,
+            std::vector<gt::VirtualDisplayInfo>& displays, std::string& detail) {
+            events.push_back(phase);
+            const std::string_view phase_name = phase;
+            if (phase_name == "reload") reload_wait_ms = timeout_ms;
+            if (phase_name == "reload rollback settle") {
+                check(expected == std::vector<int>{3} && timeout_ms > 0,
+                      "rollback waits on the added index before removal");
+            } else {
+                check(expected == indices, "wait covers every owned index");
+            }
+            for (int ms = 0; ms <= timeout_ms; ms += 100) {
+                displays = {{0, L"left", L"", true}, {1, L"center", L"", true},
+                            {2, L"right", L"", true}, {3, L"registry ghost", L"", false}};
+                if (indices.size() == 3) return true;
+                if (ms >= arrival_ms && phase_name == "reload") {
+                    displays.push_back({3, L"above", L"", true});
+                    added_active_ms = ms;
+                    return true;
+                }
+                if (removal_failures == 1 && ms == 200 &&
+                    phase_name == "reload rollback settle") {
+                    displays.push_back({3, L"above", L"", true});
+                    rollback_active_ms = ms;
+                    return true;
+                }
+            }
+            detail = std::string("timed out waiting for active Parsec virtual displays (") +
+                     phase + ")";
+            return false;
+        },
+        [&](const gt::WorkspacePlan& plan, const std::map<int, std::wstring>& names,
+            std::vector<gt::ConfiguredDisplay>& displays, std::string& detail) {
+            events.push_back("reposition");
+            std::vector<gt::ConfiguredDisplay> positioned;
+            for (const auto& desktop : plan.desktops) {
+                const auto name = names.find(desktop.driver_index);
+                if (name == names.end() ||
+                    (desktop.driver_index == 3 && name->second != L"above")) {
+                    detail = "a planned virtual display has no Windows display name";
+                    return false;
+                }
+                positioned.push_back({desktop.driver_index, name->second, 1920, 1080, 120,
+                                      desktop.x, desktop.y});
+            }
+            displays = std::move(positioned);
+            return true;
+        },
+        [&](const auto& displays, std::string&) {
+            events.push_back("capture apply");
+            check(displays.size() == 4, "candidate binds four captures");
+            return true;
+        },
+        [&](const auto& displays, std::string&) {
+            events.push_back("capture restore");
+            check(displays == previous_displays, "rollback binds the original displays");
+            return true;
+        },
+    };
+
+    const bool reloaded = gt::reload_workspace(previous, candidate, configured, ops, error,
+                                               rollback_error);
+    std::printf("  %s: result=%s configured=%zu owned=%zu arrival_ms=%d wait_ms=%d "
+                "settle_arrival_ms=%d remove_attempts=%d backoff_ms=[",
+                label, reloaded ? "applied" : (rollback_error.empty() ? "ignored" : "fatal"),
+                configured.size(), indices.size(), added_active_ms, reload_wait_ms,
+                rollback_active_ms, removal_attempts);
+    for (size_t i = 0; i < backoff.size(); ++i) {
+        std::printf("%s%d", i == 0 ? "" : ",", backoff[i]);
+    }
+    std::printf("] reason='%s' rollback='%s'\n", error.c_str(), rollback_error.c_str());
+    if (arrival_ms == 300) {
+        check(reloaded && configured.size() == 4 && indices.size() == 4 &&
+                  added_active_ms == 300 && removal_attempts == 0 &&
+                  events == std::vector<std::string>{
+                      "resize 4", "reload", "reposition", "capture apply"},
+              "late active display must be awaited before reposition");
+    } else if (removal_failures < 3) {
+        check(!reloaded && rollback_error.empty() && configured == previous_displays &&
+                  indices == std::vector<int>{0, 1, 2} && error.starts_with("timed out") &&
+                  removal_attempts == removal_failures + 1 &&
+                  rollback_active_ms == (removal_failures == 0 ? -1 : 200) &&
+                  backoff == (removal_failures == 0 ? std::vector<int>{} : std::vector<int>{250}) &&
+                  events == std::vector<std::string>{"resize 4", "reload",
+                      "reload rollback settle", "resize 3", "reload rollback", "reposition",
+                      "capture restore"},
+              "missing display rejects the reload and rebinds the restored workspace");
+    } else {
+        check(!reloaded && configured == previous_displays && indices.size() == 4 &&
+                  rollback_error == "virtual display rollback failed: failed to remove Parsec "
+                                    "virtual display 3: " + ioctl_error &&
+                  removal_attempts == 3 && backoff == std::vector<int>{250, 750} &&
+                  events == std::vector<std::string>{"resize 4", "reload",
+                      "reload rollback settle", "resize 3"},
+              "exhausted removal retries are fatal and retain the IOCTL error");
+    }
+}
+
+void test_stacked_screen_binding() {
+    const auto triple = triple_layout();
+    auto stacked = triple;
+    stacked.screens.insert(stacked.screens.begin(), {"above", 3, 0.0f, 25.0f});
+    gt::WorkspacePlan triple_plan, stacked_plan;
+    std::string error;
+    const std::vector<int> driver_indices{2, 1, 0, 3};
+    if (!gt::plan_workspace_for_layout(triple, {2, 1, 0}, triple_plan, error) ||
+        !gt::plan_workspace_for_layout(stacked, driver_indices, stacked_plan, error)) {
+        check(false, "stacked-screen planner returns a plan");
+        return;
+    }
+    auto configure = [](const gt::WorkspacePlan& plan) {
+        std::vector<gt::ConfiguredDisplay> displays;
+        for (const auto& desktop : plan.desktops) {
+            displays.push_back({desktop.driver_index, L"DISPLAY" + std::to_wstring(desktop.driver_index),
+                                1920, 1080, 120, desktop.x, desktop.y});
+        }
+        return displays;
+    };
+    const auto before = gt::bind_displays_to_screens(triple, configure(triple_plan));
+    const auto after = gt::bind_displays_to_screens(stacked, configure(stacked_plan));
+    std::vector<int> positions, paired_indices;
+    for (const auto& display : after) {
+        positions.push_back(display.x);
+        paired_indices.push_back(display.driver_index);
+    }
+    std::printf("  stacked above/left/center/right: center driver=%d, driver@x=",
+                stacked_plan.center_driver);
+    for (const auto& display : after) std::printf(" %d@%d", display.driver_index, display.x);
+    std::printf("\n");
+    check(stacked_plan.center_driver == 1 && paired_indices == std::vector<int>{3, 2, 1, 0} &&
+              positions == std::vector<int>{1920, -1920, 0, 3840},
+          "equal-yaw screens keep their binding and get four non-overlapping x slots");
+
+    const auto sources = gt::reusable_capture_sources(before, after);
+    const auto kept = std::count_if(sources.begin(), sources.end(),
+                                   [](const auto& source) { return source.has_value(); });
+    std::printf("  capture reuse: kept=%td new_or_moved=%zu\n", kept,
+                after.size() - static_cast<size_t>(kept));
+    check(sources == std::vector<std::optional<size_t>>{std::nullopt, 0, 1, std::nullopt},
+          "grow reuses unchanged outputs across reorder, replacing the moved and new outputs");
+
+    auto changed = before;
+    changed[0].refresh_hz = 60;
+    changed[1].device_name = L"renumbered";
+    auto unavailable = before;
+    unavailable[2] = {};
+    const auto geometry_only = gt::reusable_capture_sources(before, before);
+    const auto mode_or_name_changed = gt::reusable_capture_sources(before, changed);
+    const auto released = gt::reusable_capture_sources(unavailable, before);
+    std::printf("  capture reuse old slots (geometry only / mode or name changed / released):");
+    for (const auto* map : {&geometry_only, &mode_or_name_changed, &released}) {
+        std::printf(" [");
+        for (const auto& slot : *map) std::printf(" %d", slot ? static_cast<int>(*slot) : -1);
+        std::printf(" ]");
+    }
+    std::printf("\n");
+    check(geometry_only == std::vector<std::optional<size_t>>{0, 1, 2} &&
+              mode_or_name_changed == std::vector<std::optional<size_t>>{
+                  std::nullopt, std::nullopt, 2} &&
+              released == std::vector<std::optional<size_t>>{0, 1, std::nullopt},
+          "geometry-only reload keeps every live capture, changed modes and names do not match");
 }
 
 }  // namespace
@@ -151,6 +362,13 @@ int main() {
           "a primary internal panel wins over a secondary one");
     check(gt::select_internal_display({{L"A", false, true}}).empty(),
           "desktop PCs without an internal panel detach nothing");
+
+    std::printf("vdd_selftest: layout hot reload\n");
+    test_stacked_screen_binding();
+    test_workspace_reload("late arrival", 300, 0);
+    test_workspace_reload("never arrives", 99999, 0);
+    test_workspace_reload("one removal failure", 99999, 1);
+    test_workspace_reload("permanent removal failure", 99999, 3);
 
     std::printf("vdd_selftest: aside planning\n");
     check(gt::display_rects_intersect(0, 0, 10, 10, 5, 5, 10, 10), "overlap is detected");
