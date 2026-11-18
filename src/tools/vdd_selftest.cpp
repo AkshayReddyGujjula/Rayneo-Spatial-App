@@ -500,6 +500,16 @@ int main() {
         check(seam_center == 0 && at(seam_plan, 0) == std::make_pair(0, 0) &&
                   at(seam_plan, 1) == std::make_pair(0, -1080),
               "a stack across the 180 deg yaw seam stays one column");
+        // +180 and -180 are the same direction: the stack keeps its side.
+        for (const float upper_yaw : {180.0f, -180.0f}) {
+            const std::vector<P> behind{{0, 0.0f, 0.0f}, {1, 179.0f, 0.0f}, {2, upper_yaw, 30.0f}};
+            const auto behind_plan = gt::plan_workspace_desktops(behind, 0, 1920, 1080);
+            check(at(behind_plan, 0) == std::make_pair(0, 0) &&
+                      at(behind_plan, 1) == std::make_pair(1920, 0) &&
+                      at(behind_plan, 2) == std::make_pair(1920, -1080),
+                  upper_yaw > 0 ? "a stack behind keeps its side (+180 encoding)"
+                                : "a stack behind keeps its side (-180 encoding)");
+        }
     }
     check(gt::select_internal_display(
               {{L"\\\\.\\DISPLAY1", false, true}, {L"\\\\.\\DISPLAY2", true, false}}) ==

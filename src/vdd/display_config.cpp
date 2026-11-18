@@ -359,7 +359,29 @@ int select_center_driver(const std::vector<ScreenPlacement>& screens) {
 
 std::vector<PlannedDesktop> plan_workspace_desktops(const std::vector<ScreenPlacement>& screens,
                                                     int center_driver, int width, int height) {
-    const auto columns = group_columns(screens);
+    auto columns = group_columns(screens);
+    // Order columns by their base (most level) screen's yaw relative to the
+    // centre's column, wrapped into (-180, 180]: +180 and -180 deg encode the
+    // same direction, and a stack must not change sides with the encoding.
+    // For layouts that do not straddle the seam this is the raw yaw order.
+    float center_yaw = 0.0f;
+    for (const auto& column : columns) {
+        for (const ScreenPlacement& member : column) {
+            if (member.driver_index == center_driver) {
+                center_yaw = std::min_element(column.begin(), column.end(), nearer_level)->yaw_deg;
+            }
+        }
+    }
+    const auto relative_yaw = [&](const std::vector<ScreenPlacement>& column) {
+        float offset = std::remainder(
+            std::min_element(column.begin(), column.end(), nearer_level)->yaw_deg - center_yaw,
+            360.0f);
+        if (offset <= -180.0f) offset += 360.0f;
+        return offset;
+    };
+    std::stable_sort(columns.begin(), columns.end(), [&](const auto& a, const auto& b) {
+        return relative_yaw(a) < relative_yaw(b);
+    });
     size_t center_column = 0;
     for (size_t c = 0; c < columns.size(); ++c) {
         for (const ScreenPlacement& member : columns[c]) {

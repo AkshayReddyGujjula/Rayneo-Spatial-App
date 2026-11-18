@@ -1456,6 +1456,7 @@ int wmain(int argc, wchar_t** argv) {
     // yet (a VDD slow to re-appear): retried on later ticks of the watch even
     // though the panel is gone by then.
     bool repin_pending = false;
+    double next_repin_try = 0.0;
     // Returns a fatal error only when the capture rebind failed: the bindings
     // may then hold released duplicators, so the engine must leave through the
     // normal display restore before the next capture poll.
@@ -1479,10 +1480,19 @@ int wmain(int argc, wchar_t** argv) {
         pristine_rect.bottom =
             pristine_rect.top + static_cast<LONG>(pristine_panel->mode.dmPelsHeight);
         const RECT center_rect{0, 0, 1920, 1080};
-        // The panel the takeover detached, by stable monitor id (bug 15).
-        const std::wstring panel_name =
-            gt::resolve_live_device_name(gt::live_device_identities(),
-                                         pristine_panel->device_name, pristine_panel->monitor_id);
+        // The panel the takeover detached, by stable monitor id (bug 15). With
+        // a known id that no longer enumerates, nothing is touched: its old
+        // GDI name may now belong to another panel.
+        std::wstring panel_name = pristine_panel->device_name;
+        if (!pristine_panel->monitor_id.empty()) {
+            panel_name.clear();
+            for (const auto& [name, id] : gt::live_device_identities()) {
+                if (id == pristine_panel->monitor_id) {
+                    panel_name = name;
+                    break;
+                }
+            }
+        }
         const size_t known_windows = topology_guard.topo.migrated_windows.size();
         std::string redetach_error;
         if (gt::redetach_internal_display(panel_name, pristine_rect, center_rect,
@@ -1501,7 +1511,8 @@ int wmain(int argc, wchar_t** argv) {
                 redetach_watch_until = -1.0;  // leave it attached; the restore still works
             }
         }
-        if (!repin_pending) {
+        const double now_s = std::chrono::duration<double>(SteadyClock::now() - start).count();
+        if (!repin_pending || now_s < next_repin_try) {
             return {};
         }
         // The detach can make Windows compact the arrangement: re-pin the
@@ -1515,7 +1526,11 @@ int wmain(int argc, wchar_t** argv) {
                                            pin_error)) {
             std::printf("warning: virtual desktops not ready after the re-detach; retrying: %s\n",
                         pin_error.c_str());
-            return {};  // repin_pending stays set: the next tick retries
+            // repin_pending stays set; space the blocking waits out so frames
+            // keep rendering between retries.
+            next_repin_try =
+                std::chrono::duration<double>(SteadyClock::now() - start).count() + 3.0;
+            return {};
         }
         repin_pending = false;
         bool pinned_ok =
@@ -1657,6 +1672,7 @@ int wmain(int argc, wchar_t** argv) {
                             15.0;
                         redetach_failures = 0;
                         repin_pending = false;
+                        next_repin_try = 0.0;
                     }
                 } else if (reload_ok) {
                     reload_ok = renderer.set_layout(candidate, reload_error);
