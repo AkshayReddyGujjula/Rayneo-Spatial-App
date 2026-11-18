@@ -303,7 +303,7 @@ dirty working tree after running the app is expected.
 | Layout file | `gt::load_layout` | validity, screen count, arc, FOV, capture policy, file age |
 | Telemetry CSV | newest row of `logs/telemetry.csv` | yaw/pitch/roll, bias, rest/still, adaptation state, deviation |
 | Engine log | `logs/engine.log` | console output captured from the engine process |
-| Session archives | `logs/sessions/*.zip` | the last three sessions over 10 minutes; replay `imu_raw.csv` with `imu_replay` |
+| Session archives | `logs/sessions/*.zip` | the last three sessions over 10 minutes, and separately the last three failed sessions (`failed-session-*.zip`, any length); replay `imu_raw.csv` with `imu_replay` |
 
 * **Session logs.** Every engine session starts on empty files: `engine.log`, `telemetry.csv`,
   `imu_raw.csv` (every IMU sample) and `engine-status.txt`. When a session that ran for **more
@@ -313,8 +313,16 @@ dirty working tree after running the app is expected.
   (`RayNeo Spatial.exe --archive-sessions <dir>`, Windows' own `tar.exe`). Only the **newest three**
   archives are kept: the fourth session's archive removes the first. Quitting never waits for the
   compression, a zip only appears under its final name once it is complete, and anything a crash
-  or power cut left pending is archived the next time the controller starts. Shorter sessions are
-  not archived; their files stay in `logs/` until the next session starts. Other files in
+  or power cut left pending is archived the next time the controller starts. Shorter successful
+  sessions are not archived; their files stay in `logs/` until the next session starts.
+  A session whose engine **failed** (the controller showed Failed, a non-zero exit code, or
+  `engine-status.txt` says `state=failed`) is kept whatever its length: its files stay in `logs/`
+  for the Diagnostics page and Open engine log, with a `session-failed.txt` marker (stem and
+  reason), and the next start stages them as
+  `logs/sessions/failed-session-YYYY-MM-DD_HH-MM-SS.zip` before it clears the folder. A failed
+  status left on disk by a controller that has since restarted is kept the same way. Failed
+  archives keep their own newest three, pruned separately, so failures never evict a long
+  session's archive. Other files in
   `logs/sessions/` (for example a reference archive you keep) are never touched. The telemetry CSV
   is read back at no more than 2 Hz and only its tail is parsed.
 * **Polling**: the health timer is the only recurring timer, it can never be faster than 500 ms

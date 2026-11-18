@@ -71,7 +71,9 @@ driver and the engine.
 
 ### Logs that are there when you need them
 When a session longer than 10 minutes ends, its logs are compressed into `logs/sessions/`
-automatically, and the newest three are kept. Each archive can be replayed offline.
+automatically, and the newest three are kept. A session that ended in an engine failure is
+always kept, whatever its length, as a separate `failed-session-*.zip` (also the newest
+three). Each archive can be replayed offline.
 
 </td>
 </tr>
@@ -237,19 +239,22 @@ calibration, the driver, the layout and the engine. Each engine session starts o
 | `telemetry.csv` | Pose, bias, rest and adaptation state (the dashboard reads the newest row) |
 | `imu_raw.csv` | Every IMU sample, for offline replay |
 | `sessions/session-YYYY-MM-DD_HH-MM-SS.zip` | Sessions longer than 10 minutes, compressed; the newest three are kept |
+| `sessions/failed-session-YYYY-MM-DD_HH-MM-SS.zip` | Sessions whose engine failed, any length; the newest three are kept, separately |
 
 When a session that ran for more than 10 minutes ends (stopped, quit, exited or crashed), its
 files are compressed into `logs/sessions/` in the background; quitting never waits for it, and
-anything interrupted is finished the next time the controller starts. Shorter sessions are not
-archived: their files stay in `logs/` until the next session starts. To investigate a session,
-extract its `imu_raw.csv` and replay it through the real estimator with `imu_replay` from a
-source build:
+anything interrupted is finished the next time the controller starts. Shorter successful
+sessions are not archived: their files stay in `logs/` until the next session starts. A
+session that ended in an engine failure is kept whatever its length: its files stay in `logs/`
+(so the engine log can still be opened) and the next Start archives them as
+`logs/sessions/failed-session-*.zip`, newest three kept, separately from normal sessions.
+To investigate a session, extract its `imu_raw.csv` and replay it through the real estimator
+with `imu_replay` from a source build:
 
 ```cmd
 build\rayneo\imu_replay.exe imu_raw.csv --orientation config\orientation.json --observe --stats
 ```
 
-<!-- failed-session archive: documented after merge -->
 
 ## Build from source
 
