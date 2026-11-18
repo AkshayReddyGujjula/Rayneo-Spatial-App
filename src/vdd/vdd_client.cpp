@@ -298,7 +298,11 @@ bool VddClient::add_display(int& index, std::string& error) {
 bool VddClient::remove_display(int index, std::string& error) {
     const auto input = vdd_remove_payload(index);
     uint32_t response = 0;
-    return ioctl(kIoctlRemove, input, 1000, &response, &error, false);
+    const bool removed = ioctl(kIoctlRemove, input, 1000, &response, &error, false);
+    // Same post-change update as add_display (and the pre-refactor remove):
+    // the driver expects an update after every add/remove.
+    ping();
+    return removed;
 }
 
 void VddClient::keepalive_loop() {
