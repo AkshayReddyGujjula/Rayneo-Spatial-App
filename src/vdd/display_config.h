@@ -205,8 +205,11 @@ bool find_internal_display(std::wstring& device_name, std::string& error);
 // it (nothing is recorded: they are home on a visible screen); one that lands
 // despite its error is treated as a success, so no moved window goes
 // unrecorded.
-bool redetach_internal_display(const RECT& pristine_laptop, const RECT& center_rect,
-                               std::vector<MigratedWindow>& migrated, std::string& error);
+// `panel_name` is the live GDI name of the panel the takeover detached
+// (resolved by monitor id; only that panel is ever touched).
+bool redetach_internal_display(const std::wstring& panel_name, const RECT& pristine_laptop,
+                               const RECT& center_rect, std::vector<MigratedWindow>& migrated,
+                               std::string& error);
 // The Win32 steps of the guard above, injectable for the selftest.
 struct RedetachOps {
     // Sets an empty name when no internal panel is active.

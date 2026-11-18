@@ -494,6 +494,12 @@ int main() {
                   at(split_plan, 2) == std::make_pair(0, -1080) &&
                   at(split_plan, 1) == std::make_pair(1920, 0),
               "a narrow screen in between never splits a stack");
+        const std::vector<P> seam{{0, 179.0f, 0.0f}, {1, -179.0f, 30.0f}};
+        const int seam_center = gt::select_center_driver(seam);
+        const auto seam_plan = gt::plan_workspace_desktops(seam, seam_center, 1920, 1080);
+        check(seam_center == 0 && at(seam_plan, 0) == std::make_pair(0, 0) &&
+                  at(seam_plan, 1) == std::make_pair(0, -1080),
+              "a stack across the 180 deg yaw seam stays one column");
     }
     check(gt::select_internal_display(
               {{L"\\\\.\\DISPLAY1", false, true}, {L"\\\\.\\DISPLAY2", true, false}}) ==

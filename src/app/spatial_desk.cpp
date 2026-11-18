@@ -781,20 +781,19 @@ bool bind_desktop_captures(
 // by its monitor id; when the id is known but no longer enumerates, the
 // window stays put rather than follow a stale name onto another display
 // (possibly a captured virtual one: invariant 8).
-void fit_window_to_display(HWND hwnd, const std::wstring& startup_name,
-                           const std::wstring& monitor_id) {
-    std::wstring device_name = startup_name;
-    if (!monitor_id.empty()) {
-        device_name.clear();
-        for (const auto& [name, id] : gt::live_device_identities()) {
-            if (id == monitor_id) {
-                device_name = name;
-                break;
-            }
+void fit_window_to_display(HWND hwnd, const std::wstring& monitor_id) {
+    if (monitor_id.empty()) {
+        return;  // no verified identity: never trust a possibly renumbered name
+    }
+    std::wstring device_name;
+    for (const auto& [name, id] : gt::live_device_identities()) {
+        if (id == monitor_id) {
+            device_name = name;
+            break;
         }
-        if (device_name.empty()) {
-            return;
-        }
+    }
+    if (device_name.empty()) {
+        return;
     }
     struct Search {
         const std::wstring* name;
@@ -1288,6 +1287,10 @@ int wmain(int argc, wchar_t** argv) {
             break;
         }
     }
+    if (render_monitor_id.empty()) {
+        std::printf("warning: the render display has no monitor id; the render window will not "
+                    "follow it if Windows moves it\n");
+    }
     const int width = target.rect.right - target.rect.left;
     const int height = target.rect.bottom - target.rect.top;
     std::printf("rendering on [%d] %dx%d\n", selected, width, height);
@@ -1449,9 +1452,16 @@ int wmain(int argc, wchar_t** argv) {
     // A transient failure (the returning panel's mode not readable yet) gets
     // retried on later ticks; a detach that keeps failing stops after three.
     int redetach_failures = 0;
-    const auto reassert_laptop_detach = [&]() {
+    // Set when the panel went but the virtual desktops could not be re-pinned
+    // yet (a VDD slow to re-appear): retried on later ticks of the watch even
+    // though the panel is gone by then.
+    bool repin_pending = false;
+    // Returns a fatal error only when the capture rebind failed: the bindings
+    // may then hold released duplicators, so the engine must leave through the
+    // normal display restore before the next capture poll.
+    const auto reassert_laptop_detach = [&]() -> std::string {
         if (!topology_guard.armed || topology_guard.topo.detached_device.empty()) {
-            return;
+            return {};
         }
         const auto pristine_panel = std::find_if(
             topology_guard.topo.snapshots.begin(), topology_guard.topo.snapshots.end(),
@@ -1459,7 +1469,7 @@ int wmain(int argc, wchar_t** argv) {
                 return entry.device_name == topology_guard.topo.detached_device;
             });
         if (pristine_panel == topology_guard.topo.snapshots.end()) {
-            return;
+            return {};
         }
         RECT pristine_rect{};
         pristine_rect.left = pristine_panel->mode.dmPosition.x;
@@ -1469,59 +1479,70 @@ int wmain(int argc, wchar_t** argv) {
         pristine_rect.bottom =
             pristine_rect.top + static_cast<LONG>(pristine_panel->mode.dmPelsHeight);
         const RECT center_rect{0, 0, 1920, 1080};
+        // The panel the takeover detached, by stable monitor id (bug 15).
+        const std::wstring panel_name =
+            gt::resolve_live_device_name(gt::live_device_identities(),
+                                         pristine_panel->device_name, pristine_panel->monitor_id);
         const size_t known_windows = topology_guard.topo.migrated_windows.size();
         std::string redetach_error;
-        if (!gt::redetach_internal_display(pristine_rect, center_rect,
-                                           topology_guard.topo.migrated_windows,
-                                           redetach_error)) {
-            if (!redetach_error.empty()) {
-                ++redetach_failures;
-                std::printf("warning: could not detach the re-attached laptop display "
-                            "(attempt %d of 3): %s\n",
-                            redetach_failures, redetach_error.c_str());
-                if (redetach_failures >= 3) {
-                    redetach_watch_until = -1.0;  // leave it attached; the restore still works
-                }
+        if (gt::redetach_internal_display(panel_name, pristine_rect, center_rect,
+                                          topology_guard.topo.migrated_windows,
+                                          redetach_error)) {
+            std::printf("Windows re-attached the laptop display; detached it again "
+                        "(%zu more windows recorded for the restore)\n",
+                        topology_guard.topo.migrated_windows.size() - known_windows);
+            repin_pending = true;
+        } else if (!redetach_error.empty()) {
+            ++redetach_failures;
+            std::printf("warning: could not detach the re-attached laptop display "
+                        "(attempt %d of 3): %s\n",
+                        redetach_failures, redetach_error.c_str());
+            if (redetach_failures >= 3) {
+                redetach_watch_until = -1.0;  // leave it attached; the restore still works
             }
-            return;
         }
-        std::printf("Windows re-attached the laptop display; detached it again "
-                    "(%zu more windows recorded for the restore)\n",
-                    topology_guard.topo.migrated_windows.size() - known_windows);
+        if (!repin_pending) {
+            return {};
+        }
         // The detach can make Windows compact the arrangement: re-pin the
-        // virtual desktops (a no-op when nothing moved).
-        // Names come fresh from the driver index: the detach is churn, and GDI
-        // names renumber across churn (bug 15).
+        // virtual desktops (a no-op when nothing moved). Names come fresh from
+        // the driver index: the detach is churn, and GDI names renumber
+        // across churn (bug 15).
         gt::WorkspacePlan replan;
         std::string pin_error;
         std::vector<gt::VirtualDisplayInfo> live_vdds;
+        if (!gt::wait_for_virtual_displays(vdd.display_indices(), 2000, "re-detach", live_vdds,
+                                           pin_error)) {
+            std::printf("warning: virtual desktops not ready after the re-detach; retrying: %s\n",
+                        pin_error.c_str());
+            return {};  // repin_pending stays set: the next tick retries
+        }
+        repin_pending = false;
         bool pinned_ok =
-            gt::wait_for_virtual_displays(vdd.display_indices(), 2000, "re-detach", live_vdds,
-                                          pin_error) &&
             gt::plan_workspace_for_layout(layout, vdd.display_indices(), replan, pin_error);
+        std::vector<gt::ConfiguredDisplay> pinned;
         if (pinned_ok) {
             std::map<int, std::wstring> names;
             for (const auto& display : live_vdds) {
                 if (display.active) names[display.driver_index] = display.device_name;
             }
-            std::vector<gt::ConfiguredDisplay> pinned;
             pinned_ok = gt::reposition_virtual_displays(replan.desktops, names,
                                                         replan.center_driver, 1920, 1080, 120,
                                                         pinned, pin_error);
-            if (pinned_ok && pinned != virtual_displays) {
-                // Same reuse rule as a reload: unchanged outputs keep their capture.
-                pinned_ok = bind_desktop_captures(renderer, layout, pinned, captures, pin_error);
-                if (pinned_ok) {
-                    virtual_displays = std::move(pinned);
-                    capture_states.assign(captures.size(), CaptureTierState{});
-                }
-            }
         }
         if (!pinned_ok) {
             std::printf("warning: could not re-pin the virtual desktops after the re-detach: %s\n",
                         pin_error.c_str());
+        } else if (pinned != virtual_displays) {
+            // Same reuse rule as a reload: unchanged outputs keep their capture.
+            if (!bind_desktop_captures(renderer, layout, pinned, captures, pin_error)) {
+                return "capture rebind after the laptop re-detach failed: " + pin_error;
+            }
+            virtual_displays = std::move(pinned);
+            capture_states.assign(captures.size(), CaptureTierState{});
         }
-        fit_window_to_display(hwnd, render_device, render_monitor_id);
+        fit_window_to_display(hwnd, render_monitor_id);
+        return {};
     };
     double next_capture_error_log = 0.0;
     int consecutive_capture_failures = 0;
@@ -1564,12 +1585,19 @@ int wmain(int argc, wchar_t** argv) {
             next_layout_check = elapsed + 0.5;
             if (opt.virtual_displays) {
                 if (elapsed < redetach_watch_until) {
-                    reassert_laptop_detach();
+                    const std::string redetach_fatal = reassert_laptop_detach();
+                    if (!redetach_fatal.empty()) {
+                        std::printf("%s\n", redetach_fatal.c_str());
+                        engine_failed = true;
+                        fatal_detail = redetach_fatal;
+                        state.quit = true;
+                        break;  // before the capture poll; restore runs below
+                    }
                 }
                 // Windows can still move the glasses after a commit (it can
                 // re-attach the laptop panel and shove them right), so keep
                 // re-fitting the render window on this cadence, not only once.
-                fit_window_to_display(hwnd, render_device, render_monitor_id);
+                fit_window_to_display(hwnd, render_monitor_id);
             }
             std::error_code time_error;
             const auto write_time =
@@ -1618,7 +1646,7 @@ int wmain(int argc, wchar_t** argv) {
                     status_heartbeat.stop();
                     // A reposition can move the glasses aside (a stacked
                     // screen takes their home slot) or re-base every desktop.
-                    fit_window_to_display(hwnd, render_device, render_monitor_id);
+                    fit_window_to_display(hwnd, render_monitor_id);
                     // Any add or remove (a rollback included) can re-attach
                     // the laptop panel; a fatal rollback quits below anyway.
                     if (rollback_error.empty() &&
@@ -1628,6 +1656,7 @@ int wmain(int argc, wchar_t** argv) {
                             std::chrono::duration<double>(SteadyClock::now() - start).count() +
                             15.0;
                         redetach_failures = 0;
+                        repin_pending = false;
                     }
                 } else if (reload_ok) {
                     reload_ok = renderer.set_layout(candidate, reload_error);

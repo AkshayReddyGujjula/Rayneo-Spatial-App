@@ -312,7 +312,9 @@ std::vector<std::vector<ScreenPlacement>> group_columns(std::vector<ScreenPlacem
         float target_distance = 0.0f;
         for (auto& column : columns) {
             const ScreenPlacement& anchor = column.front();
-            const float distance = std::fabs(screen.yaw_deg - anchor.yaw_deg);
+            // Wrapped: 179 and -179 deg are 2 deg apart, not 358.
+            const float distance =
+                std::fabs(std::remainder(screen.yaw_deg - anchor.yaw_deg, 360.0f));
             const float half_width = 0.5f * std::min(anchor.width_deg, screen.width_deg);
             bool separated = distance < half_width;
             for (const ScreenPlacement& member : column) {
@@ -1085,13 +1087,17 @@ bool commit_topology_snapshots(const std::vector<DisplayModeSnapshot>& snapshots
 
 }  // namespace
 
-bool redetach_internal_display(const RECT& pristine_laptop, const RECT& center_rect,
-                               std::vector<MigratedWindow>& migrated, std::string& error) {
+bool redetach_internal_display(const std::wstring& panel_name, const RECT& pristine_laptop,
+                               const RECT& center_rect, std::vector<MigratedWindow>& migrated,
+                               std::string& error) {
     RedetachOps ops;
-    // By output technology, not by the takeover-time GDI name: names
-    // renumber across display churn (bug 15).
-    ops.find_panel = [](std::wstring& panel, std::string& detail) {
-        return find_internal_display(panel, detail);
+    // Exactly the panel the takeover detached (the caller resolves its live
+    // name by monitor id), never "any internal panel": a machine with two
+    // internal targets must not lose the other one.
+    ops.find_panel = [&](std::wstring& panel, std::string&) {
+        panel = !panel_name.empty() && is_display_attached(panel_name) ? panel_name
+                                                                        : std::wstring{};
+        return true;
     };
     ops.read_rect = [](const std::wstring& panel, RECT& rect) {
         DEVMODEW mode{};
@@ -1299,6 +1305,9 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
         partial.migrated_windows = migrated;
         partial.focus_window = focus_window;
         partial.taskbar_state = taskbar_state;
+        // So the restore re-attaches a non-primary panel the failed takeover
+        // already detached (harmless when it is the primary or still attached).
+        partial.detached_device = detach_device;
         partial.active = true;
         std::string restore_error;
         if (!restore_display_topology(partial, vdd, restore_error)) {
