@@ -147,8 +147,8 @@ inline const wchar_t* help_text(HelpTopic topic) {
             return L"ON: closing the window hides it in the notification area and the "
                    L"engine keeps running. OFF: closing quits everything.";
         case HelpTopic::DiagRecoverDisplays:
-            return L"Re-runs display recovery: reattaches a detached glasses display and "
-                   L"restores the taskbar. Try it before rebooting when the glasses vanish.";
+            return L"Re-applies the Windows Extend display mode and restores the taskbar "
+                   L"auto-hide setting. Try it before rebooting when the glasses vanish.";
         case HelpTopic::LayoutFactory:
             return L"One-click starter arcs: Single, Triple (default), Quad, Five and Wide. "
                    L"Clicking loads one into the editor unsaved; Save and apply writes it.";

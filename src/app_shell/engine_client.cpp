@@ -336,7 +336,7 @@ void EngineClient::poll(double now_s) {
                     kill_reported_ = true;
                     if (!start_timeout_reported_) {
                         snapshot_.last_error =
-                            "the engine did not stop within 8 s and was terminated; its virtual "
+                            "the engine did not stop within 45 s and was terminated; its virtual "
                             "displays are removed by the driver watchdog; if the laptop display "
                             "stays off use Recover displays or press Win+P";
                     }

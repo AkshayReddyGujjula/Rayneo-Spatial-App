@@ -172,7 +172,8 @@ if ($IncludeCalibration -and (Test-Path -LiteralPath $orientationSource)) {
     Write-Host "folder instead (or re-stage with -IncludeCalibration to copy this machine's file)."
 }
 
-foreach ($document in @("README.md", "LICENSE", "docs\WINDOWS-APP.md", "docs\THIRD_PARTY_NOTICES.md")) {
+foreach ($document in @("README.md", "LICENSE", "docs\WINDOWS-APP.md", "docs\THIRD_PARTY_NOTICES.md",
+                         "docs\orientation-calibration.md", "docs\PROTOCOL-NOTES.md", "docs\assets\hero.svg")) {
     $source = Join-Path $repoRoot $document
     if (Test-Path -LiteralPath $source) {
         $target = Join-Path $destinationPath (Split-Path -Parent $document)
@@ -203,9 +204,9 @@ Run
    signed Parsec VDD driver installed by you).
    Start preview    -> renderer-only: labelled test screens, no virtual
    desktops, no driver needed.
-4. If orientation calibration is missing, use "Run calibration" in the
-   Diagnostics panel; the tool opens in its own console window and writes
-   config\orientation.json.
+4. If orientation calibration is missing, use "Calibrate now" on the
+   Tracking page (guided, in the app; "Open in console" runs the console
+   tool instead). The result is written to config\orientation.json.
 
 Pin (optional, manual)
 ----------------------

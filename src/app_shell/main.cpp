@@ -63,7 +63,7 @@ bool bootstrap(gt::AppState& state, std::string& fatal_error) {
     } else if (state.banner.empty()) {
         state.set_banner(L"the layout file could not be loaded (" +
                              gt::wide_from_utf8(layout_error) +
-                             L"); the triple-arc default is loaded. Press Save and reload to "
+                             L"); the triple-arc default is loaded. Press Save and apply to "
                              L"write it.",
                          gt::Severity::Warning);
     }

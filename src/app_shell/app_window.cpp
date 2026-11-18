@@ -1696,7 +1696,7 @@ void AppWindow::execute(int id, int arg) {
                 state_.layout_dirty = true;
                 state_.show_toast(L"Screen added (" +
                                   std::to_wstring(state_.layout.screens.size()) +
-                                  L" of 8); Save and reload to apply it");
+                                  L" of 8); Save and apply to use it");
             }
             break;
         case kUiRemoveScreen:
@@ -1708,7 +1708,7 @@ void AppWindow::execute(int id, int arg) {
                     state_.selected_screen = state_.layout.screens.size() - 1;
                 }
                 state_.layout_dirty = true;
-                state_.show_toast(L"Screen removed; Save and reload to apply it");
+                state_.show_toast(L"Screen removed; Save and apply to use it");
             }
             break;
         case kUiRefresh:
@@ -1846,7 +1846,7 @@ void AppWindow::execute(int id, int arg) {
                 state_.selected_screen = 0;
                 state_.layout_dirty = true;
                 state_.show_toast(L"Preset '" + wide_from_utf8(layout_preset_name(preset)) +
-                                  L"' loaded; Save and reload to write it");
+                                  L"' loaded; Save and apply to write it");
             } else if (id >= kUiScreenBase && id < kUiScreenBase + 8) {
                 state_.selected_screen = static_cast<size_t>(id - kUiScreenBase);
                 state_.focus_id = id;
@@ -1872,7 +1872,7 @@ void AppWindow::execute(int id, int arg) {
                             }
                         }
                         state_.show_toast(L"Preset '" + wide_from_utf8(name) +
-                                          L"' loaded; Save and reload to write it");
+                                          L"' loaded; Save and apply to write it");
                     }
                 }
             } else if (id == kUiEditorCanvas) {
