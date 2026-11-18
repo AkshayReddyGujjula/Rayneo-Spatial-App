@@ -295,14 +295,15 @@ bool VddClient::add_display(int& index, std::string& error) {
     return true;
 }
 
-bool VddClient::remove_display(int index, std::string& error) {
+bool VddClient::remove_display(int index, std::string& error, uint32_t timeout_ms) {
     const auto input = vdd_remove_payload(index);
     uint32_t response = 0;
-    // Live 4-screen runs (2026-11-18) timed out at the old 1000 ms on most
-    // removals while Windows was re-arranging displays (Windows error 258),
-    // which left displays alive into the restore. Same budget as add_display.
+    // Live 4-screen runs (2026-11-18): a mid-session removal finished in under
+    // 250 ms, but each removal in the shutdown restore took ~3.0 s, so a 1000 ms
+    // budget there failed (Windows error 258) and left displays alive into the
+    // restore. disconnect() passes kShutdownRemoveTimeoutMs.
     const auto started = std::chrono::steady_clock::now();
-    const bool removed = ioctl(kIoctlRemove, input, 5000, &response, &error, false);
+    const bool removed = ioctl(kIoctlRemove, input, timeout_ms, &response, &error, false);
     const long long elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now() - started)
                                      .count();
@@ -400,7 +401,7 @@ void VddClient::disconnect() {
     if (handle_ != nullptr) {
         for (int index : vdd_cleanup_order(display_indices_)) {
             std::string error;
-            if (!remove_display(index, error)) {
+            if (!remove_display(index, error, kShutdownRemoveTimeoutMs)) {
                 std::printf("  failed to remove Parsec virtual display %d during disconnect: %s\n",
                             index, error.c_str());
             }

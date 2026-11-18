@@ -55,7 +55,12 @@ private:
     bool open(std::string& error);
     void close();
     bool add_display(int& index, std::string& error);
-    bool remove_display(int index, std::string& error);
+    // Mid-session removals keep the short timeout (they hold the IOCTL lock,
+    // so the keepalive ping waits): the retry loop covers a slow one. The
+    // shutdown disconnect, where nothing must stay alive, waits longer.
+    static constexpr uint32_t kRemoveTimeoutMs = 1000;
+    static constexpr uint32_t kShutdownRemoveTimeoutMs = 5000;
+    bool remove_display(int index, std::string& error, uint32_t timeout_ms = kRemoveTimeoutMs);
     bool ping();
     bool query_version(int& version);
     bool ioctl(uint32_t code, const std::array<uint8_t, 32>& input, uint32_t timeout_ms,
