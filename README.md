@@ -130,8 +130,10 @@ and `orientation_calibrate.exe` side by side. Nothing needs installing apart fro
      to turn all the way round once (a swivel chair works), then nod, tilt and look around.
    - **Layout**: keep the current layout or pick a starter arc, then **Finish**.
 
-   Every step can be skipped. **Settings → Run setup guide** opens the guide again.
-4. **Press Start workspace** on Home. Your virtual desktops appear around you. When Home shows
+   You can skip either calibration, or the whole guide with **Skip setup**.
+   **Settings → Run setup guide** opens it again.
+4. **Press Start workspace** on Home. Your virtual desktops appear around you, and the laptop
+   panel switches off until you stop. When Home shows
    **Hold your head still**, look straight ahead and keep still for a second or two: this is when
    the engine measures the gyro bias, and moving here was the biggest source of early drift.
 5. **Recenter** any time with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> while looking straight ahead.
@@ -270,9 +272,8 @@ calibration unless you pass `-IncludeCalibration`:
 powershell -ExecutionPolicy Bypass -File scripts\stage-portable.ps1 -BuildDir build\rayneo
 ```
 
-Nothing is installed and nothing is pinned. `scripts\create-start-menu-shortcut.ps1` makes a Start
-Menu shortcut you can pin. The [Windows app guide](docs/WINDOWS-APP.md) covers the controller in
-depth.
+Nothing is installed or pinned; `scripts\create-start-menu-shortcut.ps1` makes a Start Menu
+shortcut you can pin. The [Windows app guide](docs/WINDOWS-APP.md) covers the controller in depth.
 
 ## Tests
 
@@ -330,9 +331,8 @@ Eleven CTest suites run offline, without the glasses:
 - A magnetic field that changes while you work (a magnet, a speaker, a laptop lid moving near your
   head) is detected and ignored rather than corrected.
 - The glasses must be in Extend mode; duplicate or single-display modes hide them from the engine.
-- Several recent features (the calibration guide on the glasses, the startup reseed, the turn
-  prediction horizon) have so far been verified on synthetic data and recordings, not yet by a
-  wearer on the glasses.
+- Several recent features (the calibration guide on the glasses, calibration cancel, the startup
+  reseed, the turn prediction horizon) are so far verified only on synthetic data and recordings.
 
 ## Contributing
 
