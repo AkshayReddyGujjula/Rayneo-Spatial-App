@@ -110,6 +110,7 @@ calibration), `gt_imu_probe.exe` (protocol probe), plus the test binaries below.
 | 30 | Turn prediction overshot ~12.9 deg when yaw or pitch tracking was switched back on | The toggle steps the view in one frame, which the predictor read as an 1800 deg/s turn | `PoseSmoother::restart_prediction()` on all four toggle paths; `pose_scenarios` 24 (12.9 -> 0.000 deg) |
 | 31 | Controller kept a ~66 Hz animation timer running while hidden in the tray; setup guide overwrote an app.json that had failed to load; engine could start during an in-app calibration; drag stuck after lost capture; button stuck pressed after release outside | A hidden window never paints, so the frame request never cleared; Finish/Skip saved defaults; `execute()` had no calibration check; no WM_CAPTURECHANGED / press cleared only on button-up | Timer requires a visible, non-minimized window; failed-load file left untouched; start refused while `calibration_.active()`; `src/app_shell/ui_input.h` pointer helpers (capture loss ends the drag without a click, mouse-leave clears press). `app_selftest` |
 | 32 | With a *correct* startup bias, a slow nod (about 3 deg/s, under the rest ceiling) could still reseed it through the single-episode rule and leave ~2.8 deg of heading drift per minute | The gravity check compared window-mean gravity (the middle of each 1.26 s window) with rotation integrated end to end, so each side was off by half a window: up to ~3.8 deg at 3 deg/s, against a 5 deg predicted-swing gate | Rotation integrated per calibration window, and the predicted swing taken between window mid-points; no gates or parameters changed. `pose_scenarios` 28 (41 nod lengths): 16/41 false reseeds -> 0/41, worst drift 2.784 -> 0.020 deg. Replay audit neutral (mean 6.52 -> 6.51 deg, 8 of 870 starts changed) |
+| 33 | The engine failed on start and its `engine.log` was gone, so the failure could not be diagnosed | Only sessions over 10 min were archived; a short session's files were cleared at the next engine start whatever its outcome | A failed session (Failed state latched during the session, non-zero exit, or `engine-status.txt` `state=failed` read from disk) of any length keeps its files in `logs/` with a `session-failed.txt` marker and is staged as `failed-session-*.zip` just before the next start clears the folder (the status file alone covers a restarted controller). Separate strict name class, own rolling three, so failures never evict a long session. `app_selftest` per-session log archive (7 checks fail without the change) |
 
 **Standing lesson:** the IMU path is where the subtle bugs live. Every gating change must be
 accompanied by a synthetic scenario that fails before and passes after, and every claim in a commit
@@ -292,7 +293,7 @@ Run inside the MSVC environment: `call "C:\Program Files (x86)\Microsoft Visual 
 | `layout_selftest` | Layout parsing/validation, geometry, capture-policy constraints |
 | `vdd_selftest` | Parsec VDD protocol, cleanup order, index parsing |
 | `view_selftest` | Offline "virtual glasses": real layout + real camera maths projected to NDC, numeric assertions, and 640x360 PPM frames in `scratch/` |
-| `app_selftest` | Controller app model: engine command contract, status protocol + freshness gate, preference validation/persistence, presets, field normalisation, 3D face selection and view-plane drag, depth slider scale, per-session log archive (10-min gate, rolling three, real tar round trip), telemetry tail, view comfort (ranges, engine switch round-trip, tint/focus/fade maths, app.json persistence) |
+| `app_selftest` | Controller app model: engine command contract, status protocol + freshness gate, preference validation/persistence, presets, field normalisation, 3D face selection and view-plane drag, depth slider scale, per-session log archive (10-min gate, rolling three, real tar round trip; failed sessions of any length kept as `failed-session-*.zip`: failure evidence, marker and status-file staging, name validation and near-misses, an independent rolling three per class), telemetry tail, view comfort (ranges, engine switch round-trip, tint/focus/fade maths, app.json persistence) |
 | `mag_heading_selftest` | Magnetometer heading lock closed loop (stale bias bounded, integral removes lag, rate limit, disturbance rejected with zero view motion, new environment re-acquired without a jump) and the gyro-constrained hard-iron fit (recovery + rejection), fit observability / weak axis, and the opt-in online hard-iron tracker (earbud in/out learned, desk magnet reverted, passing phone ignored) |
 | `ui_snapshot` | Offscreen renders of every controller page, the setup guide and the calibration states at several sizes, DPIs and both themes (PNGs in `scratch/ui`), with hotspot checks; regenerate with `ui_snapshot --out scratch\ui` and look at them after any UI change |
 
@@ -342,8 +343,12 @@ Every fix MUST come with a regression test that fails without it. Synthetic IMU 
 - **Two tar.exe on this machine**: Git Bash's GNU tar is first on PATH and `tar -a -c -f x.zip`
   silently writes a *tar* stream under a .zip name. Windows' bsdtar (`%SystemRoot%\System32\tar.exe`)
   writes a real deflate zip (`--format zip`). The session archiver calls it by absolute path.
-- **Session logs**: the controller clears `logs/` at each launch and archives sessions over 10 min
-  into `logs/sessions/` (newest three). Replay an archived `imu_raw.csv` after extracting it.
+- **Session logs**: the controller clears `logs/` at each engine start (not at controller launch)
+  and archives sessions over 10 min into `logs/sessions/` (newest three). A failed session (Failed
+  state, non-zero exit, or `engine-status.txt` `state=failed`) of any length stays in `logs/` with a
+  `session-failed.txt` marker and is staged as `failed-session-*.zip` just before the next start
+  clears the folder; failed archives keep their own newest three. Replay an archived `imu_raw.csv`
+  after extracting it.
 - **Regexes over replay output**: `t=` also matches inside `adapt=0`; anchor on ` t=`. A lag metric that
   reads exactly 0.000 is a parser bug, not a perfect loop.
 - **Shell heredocs eat backslashes here**: a C++ `\n` written through a bash heredoc into a Python

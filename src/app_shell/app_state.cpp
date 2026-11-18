@@ -161,7 +161,28 @@ bool start_engine(AppState& state, LaunchMode mode, std::wstring& error) {
     }
 
     // Each session starts on empty files (the engine appends): the previous
-    // session was either archived when it ended or was too short to keep.
+    // session was either archived when it ended or was too short to keep,
+    // unless it failed. A failed session's files stayed in place for
+    // diagnosis (or were left by a controller that has since restarted):
+    // keep them as a failed-session archive before the directory is cleared.
+    {
+        std::string failed_stem;
+        std::string failed_error;
+        if (stage_failed_session_logs(state.paths.log_dir, failed_stem, failed_error)) {
+            if (!failed_error.empty()) {
+                state.add_event(L"failed-session archive is incomplete: " + wide_from_utf8(failed_error));
+            }
+            if (spawn_session_archiver(session_archive_dir(state.paths.log_dir), failed_error)) {
+                state.add_event(L"archiving the failed session's logs to logs\\sessions\\" +
+                                wide_from_utf8(failed_stem) + L".zip");
+            } else {
+                state.add_event(L"failed session's logs kept uncompressed (" +
+                                wide_from_utf8(failed_error) + L"); they are archived at the next start");
+            }
+        } else if (!failed_error.empty()) {
+            state.add_event(L"failed session's logs not archived: " + wide_from_utf8(failed_error));
+        }
+    }
     clear_session_logs(state.paths.log_dir);
 
     const bool head_tracking =
@@ -192,6 +213,7 @@ bool start_engine(AppState& state, LaunchMode mode, std::wstring& error) {
     state.taskbar_state_at_engine_start = gt::query_taskbar_state();
     state.taskbar_restore_until_s = 0.0;
     state.session_open = true;
+    state.session_failed = false;
     state.session_started_s = state.now_s;
     state.session_started_at = std::time(nullptr);
     state.config.last_mode = mode;
@@ -433,18 +455,54 @@ void push_comfort_setting(AppState& state, int ui_id) {
 namespace {
 
 // The launched engine is gone (stopped, quit, exited or crashed): archive its
-// logs when the session was long enough to be worth keeping.
+// logs when the session was long enough to be worth keeping, and always keep
+// a failed one.
 void finish_session_logs(AppState& state) {
     state.session_open = false;
     const double duration_s = state.now_s - state.session_started_s;
     const int minutes = static_cast<int>(duration_s / 60.0);
-    if (!session_qualifies_for_archive(duration_s)) {
-        state.add_event(L"session lasted " + std::to_wstring(minutes) +
-                        L" min: logs not archived (only sessions over 10 min are kept)");
-        return;
-    }
     std::tm local_start{};
     localtime_s(&local_start, &state.session_started_at);
+
+    // Decided here, before this poll's status check runs, so the status file
+    // is read straight from disk (no freshness gate) and the latch covers a
+    // Failed state that was later reaped as Stopped.
+    const EngineSnapshot& snapshot = state.engine.snapshot();
+    SessionEndEvidence evidence;
+    evidence.controller_failed =
+        state.session_failed || snapshot.state == EngineProcessState::Failed;
+    evidence.has_exit_code = snapshot.has_exit_code;
+    evidence.exit_code = snapshot.exit_code;
+    evidence.status_failed = session_status_reports_failure(state.paths.log_dir);
+    state.session_failed = false;
+    if (session_ended_in_failure(evidence)) {
+        // Leave the files where the Diagnostics page and "Open engine log"
+        // read them; the next start archives them before clearing.
+        const std::string failed_stem = failed_session_archive_stem(local_start);
+        std::string reason = snapshot.last_error;
+        if (reason.empty() && snapshot.has_exit_code) {
+            reason = "engine exited with code " + std::to_string(snapshot.exit_code);
+        }
+        std::string error;
+        if (mark_session_failed(state.paths.log_dir, failed_stem, reason, error)) {
+            state.add_event(L"engine session failed: its logs stay in logs\\ and are kept as "
+                            L"logs\\sessions\\" +
+                            wide_from_utf8(failed_stem) + L".zip when the next session starts");
+        } else if (stage_session_logs(state.paths.log_dir, failed_stem, error) &&
+                   spawn_session_archiver(session_archive_dir(state.paths.log_dir), error)) {
+            // No marker could be written: archive now rather than lose them.
+            state.add_event(L"archiving the failed session's logs to logs\\sessions\\" +
+                            wide_from_utf8(failed_stem) + L".zip");
+        } else {
+            state.add_event(L"failed session's logs not archived: " + wide_from_utf8(error));
+        }
+        return;
+    }
+    if (!session_qualifies_for_archive(duration_s)) {
+        state.add_event(L"session lasted " + std::to_wstring(minutes) +
+                        L" min: logs not archived (only sessions over 10 min, or failed ones, are kept)");
+        return;
+    }
     const std::string stem = session_archive_stem(local_start);
     std::string error;
     if (!stage_session_logs(state.paths.log_dir, stem, error)) {
@@ -578,6 +636,9 @@ void poll_engine(AppState& state) {
                 break;
             case EngineProcessState::Failed: {
                 state.starting = false;
+                if (state.session_open) {
+                    state.session_failed = true;
+                }
                 std::wstring reason = wide_from_utf8(snapshot.last_error);
                 if (reason.empty() && state.engine_status.parsed &&
                     !state.engine_status.error.empty()) {

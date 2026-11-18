@@ -1,5 +1,7 @@
 #include "app_shell/session_logs.h"
 
+#include "app/engine_protocol.h"
+#include "app_shell/engine_commands.h"
 #include "util/utf8_path.h"
 
 #include <windows.h>
@@ -11,6 +13,7 @@
 #include <cwctype>
 #include <fstream>
 #include <system_error>
+#include <utility>
 
 namespace gt {
 
@@ -40,8 +43,11 @@ std::vector<std::filesystem::path> list_pending(const std::filesystem::path& arc
             continue;
         }
         const std::string name = utf8_from_path(entry.path().filename());
-        if (name.rfind(prefix, 0) == 0 &&
-            is_session_archive_name(name.substr(prefix.size()) + ".zip")) {
+        if (name.rfind(prefix, 0) != 0) {
+            continue;
+        }
+        const std::string archive = name.substr(prefix.size()) + ".zip";
+        if (is_session_archive_name(archive) || is_failed_session_archive_name(archive)) {
             pending.push_back(entry.path());
         }
     }
@@ -149,9 +155,57 @@ void prune_archives(const std::filesystem::path& archive_dir) {
             names.push_back(utf8_from_path(entry.path().filename()));
         }
     }
-    for (const std::string& name : session_archives_to_prune(names, kSessionArchiveKeep)) {
+    std::vector<std::string> doomed = session_archives_to_prune(names, kSessionArchiveKeep);
+    const std::vector<std::string> failed = failed_session_archives_to_prune(names, kSessionArchiveKeep);
+    doomed.insert(doomed.end(), failed.begin(), failed.end());
+    for (const std::string& name : doomed) {
         std::filesystem::remove(archive_dir / path_from_utf8(name), error);
     }
+}
+
+// name == prefix + "YYYY-MM-DD_HH-MM-SS" + suffix, digits only where expected.
+bool matches_stamped_name(const std::string& name, const std::string& prefix,
+                          const std::string& suffix) {
+    static const std::string stamp = "0000-00-00_00-00-00";
+    if (name.size() != prefix.size() + stamp.size() + suffix.size() ||
+        name.compare(0, prefix.size(), prefix) != 0 ||
+        name.compare(prefix.size() + stamp.size(), suffix.size(), suffix) != 0) {
+        return false;
+    }
+    for (size_t i = 0; i < stamp.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(name[prefix.size() + i]);
+        if (stamp[i] == '0' ? !std::isdigit(c) : name[prefix.size() + i] != stamp[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<std::string> archives_to_prune(std::vector<std::string> names, std::size_t keep,
+                                           bool (*is_member)(const std::string&)) {
+    names.erase(std::remove_if(names.begin(), names.end(),
+                               [is_member](const std::string& name) { return !is_member(name); }),
+                names.end());
+    std::sort(names.begin(), names.end());
+    if (names.size() <= keep) {
+        return {};
+    }
+    names.resize(names.size() - keep);
+    return names;
+}
+
+constexpr const char* kSessionPrefix = "session-";
+constexpr const char* kFailedSessionPrefix = "failed-session-";
+
+std::string read_small_file(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::in | std::ios::binary);
+    if (!in) {
+        return std::string();
+    }
+    std::string text(64u << 10, '\0');
+    in.read(text.data(), static_cast<std::streamsize>(text.size()));
+    text.resize(static_cast<size_t>(in.gcount()));
+    return text;
 }
 
 }  // namespace
@@ -174,31 +228,48 @@ std::string session_archive_stem(const std::tm& local_start) {
     return buffer;
 }
 
+std::string failed_session_archive_stem(const std::tm& local_start) {
+    return "failed-" + session_archive_stem(local_start);
+}
+
 bool is_session_archive_name(const std::string& file_name) {
     // session-YYYY-MM-DD_HH-MM-SS.zip
-    static const std::string pattern = "session-0000-00-00_00-00-00.zip";
-    if (file_name.size() != pattern.size()) {
-        return false;
-    }
-    for (size_t i = 0; i < pattern.size(); ++i) {
-        const unsigned char c = static_cast<unsigned char>(file_name[i]);
-        if (pattern[i] == '0' ? !std::isdigit(c) : file_name[i] != pattern[i]) {
-            return false;
-        }
-    }
-    return true;
+    return matches_stamped_name(file_name, kSessionPrefix, ".zip");
+}
+
+bool is_failed_session_archive_name(const std::string& file_name) {
+    // failed-session-YYYY-MM-DD_HH-MM-SS.zip
+    return matches_stamped_name(file_name, kFailedSessionPrefix, ".zip");
 }
 
 std::vector<std::string> session_archives_to_prune(std::vector<std::string> names, std::size_t keep) {
-    names.erase(std::remove_if(names.begin(), names.end(),
-                               [](const std::string& name) { return !is_session_archive_name(name); }),
-                names.end());
-    std::sort(names.begin(), names.end());
-    if (names.size() <= keep) {
-        return {};
+    return archives_to_prune(std::move(names), keep, &is_session_archive_name);
+}
+
+std::vector<std::string> failed_session_archives_to_prune(std::vector<std::string> names,
+                                                          std::size_t keep) {
+    return archives_to_prune(std::move(names), keep, &is_failed_session_archive_name);
+}
+
+bool session_ended_in_failure(const SessionEndEvidence& evidence) {
+    return evidence.controller_failed || evidence.status_failed ||
+           (evidence.has_exit_code && evidence.exit_code != 0);
+}
+
+bool session_status_reports_failure(const std::filesystem::path& log_dir, std::uint64_t* updated_unix) {
+    if (updated_unix != nullptr) {
+        *updated_unix = 0;
     }
-    names.resize(names.size() - keep);
-    return names;
+    const std::string text = read_small_file(log_dir / "engine-status.txt");
+    EngineStatusFile status;
+    std::string error;
+    if (text.empty() || !parse_engine_status(text, status, error) || status.state != kStatusFailed) {
+        return false;
+    }
+    if (updated_unix != nullptr) {
+        *updated_unix = status.updated_unix;
+    }
+    return true;
 }
 
 std::filesystem::path session_archive_dir(const std::filesystem::path& log_dir) {
@@ -216,6 +287,72 @@ void clear_session_logs(const std::filesystem::path& log_dir) {
             std::filesystem::remove(rotated, error);
         }
     }
+    std::filesystem::remove(log_dir / kFailedSessionMarker, error);
+}
+
+bool mark_session_failed(const std::filesystem::path& log_dir, const std::string& stem,
+                         const std::string& reason, std::string& error) {
+    error.clear();
+    std::string line = reason;
+    std::replace(line.begin(), line.end(), '\r', ' ');
+    std::replace(line.begin(), line.end(), '\n', ' ');
+    std::ofstream out(log_dir / kFailedSessionMarker, std::ios::out | std::ios::trunc | std::ios::binary);
+    out << stem << "\n" << line << "\n";
+    out.close();
+    if (!out) {
+        error = "could not write " + std::string(kFailedSessionMarker);
+        return false;
+    }
+    return true;
+}
+
+bool stage_failed_session_logs(const std::filesystem::path& log_dir, std::string& stem,
+                               std::string& error) {
+    error.clear();
+    stem.clear();
+    const std::filesystem::path marker = log_dir / kFailedSessionMarker;
+    std::error_code fs_error;
+    const bool marked = std::filesystem::exists(marker, fs_error);
+    std::uint64_t stamp = 0;
+    const bool status_failed = session_status_reports_failure(log_dir, &stamp);
+    if (!marked && !status_failed) {
+        return false;
+    }
+    if (marked) {
+        const std::string text = read_small_file(marker);
+        const std::string first = text.substr(0, text.find('\n'));
+        if (is_failed_session_archive_name(first + ".zip")) {
+            stem = first;
+        }
+    }
+    // No usable marker stem: the status stamp (the session's last update),
+    // else now. Step past a name already taken, because the helper treats an
+    // existing archive as "already published" and drops the pending folder.
+    const std::filesystem::path archive_dir = session_archive_dir(log_dir);
+    std::time_t when = stamp != 0 ? static_cast<std::time_t>(stamp) : std::time(nullptr);
+    for (int attempt = 0; attempt < 120; ++attempt) {
+        if (!stem.empty() &&
+            !std::filesystem::exists(archive_dir / path_from_utf8(stem + ".zip"), fs_error)) {
+            break;
+        }
+        std::tm local{};
+        localtime_s(&local, &when);
+        stem = failed_session_archive_stem(local);
+        ++when;
+    }
+    if (!stage_session_logs(log_dir, stem, error)) {
+        // Nothing left to keep (the files were removed by hand).
+        std::filesystem::remove(marker, fs_error);
+        stem.clear();
+        return false;
+    }
+    if (marked) {
+        std::filesystem::rename(marker, pending_dir(archive_dir, stem) / kFailedSessionMarker, fs_error);
+        if (fs_error) {
+            std::filesystem::remove(marker, fs_error);
+        }
+    }
+    return true;
 }
 
 bool stage_session_logs(const std::filesystem::path& log_dir, const std::string& stem,

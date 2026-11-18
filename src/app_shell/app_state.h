@@ -249,6 +249,9 @@ struct AppState {
     // The engine session this controller launched, for the per-session log
     // archive: open from launch until the process is gone.
     bool session_open = false;
+    // Latched when the open session shows Failed at any point: a start
+    // timeout that then stops cleanly still counts as a failed session.
+    bool session_failed = false;
     double session_started_s = 0.0;
     std::time_t session_started_at = 0;
     // Deferred display recovery: set when the engine fails while still

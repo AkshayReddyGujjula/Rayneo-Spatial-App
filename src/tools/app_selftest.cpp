@@ -795,6 +795,165 @@ void test_session_logs(const std::filesystem::path& directory) {
             CloseHandle(foreign);
         }
     }
+
+    // Failed sessions are archived under their own prefix: the pending folder
+    // is recognised, the helper publishes it, and failed and normal archives
+    // keep a rolling three each, so failures never evict a good long session.
+    for (int day = 10; day <= 14; ++day) {
+        const std::string failed = "failed-session-2026-08-" + std::to_string(day) + "_09-00-00";
+        write_session_files(log_dir, "failed" + std::to_string(day));
+        check(gt::stage_session_logs(log_dir, failed, error) && error.empty() &&
+                  gt::has_pending_session_logs(archive_dir),
+              "a failed session's pending folder is recognised");
+        check(gt::run_session_archiver(archive_dir) == 0 && !gt::has_pending_session_logs(archive_dir),
+              "the archiver publishes the failed session");
+    }
+    const std::vector<std::string> mixed = archive_listing(archive_dir);
+    check(mixed.size() == 7 && mixed[0] == "failed-session-2026-08-12_09-00-00.zip" &&
+              mixed[1] == "failed-session-2026-08-13_09-00-00.zip" &&
+              mixed[2] == "failed-session-2026-08-14_09-00-00.zip" &&
+              mixed[3] == "reference-2026-09-25.zip" &&
+              mixed[4] == "session-2026-09-04_14-03-07.zip" &&
+              mixed[5] == "session-2026-09-05_14-03-07.zip" &&
+              mixed[6] == "session-2026-09-06_14-03-07.zip",
+          "failed and normal archives prune independently (three each), the reference survives");
+    check(file_contains(archive_dir / "failed-session-2026-08-14_09-00-00.zip", "engine.log"),
+          "the failed archive holds the engine log");
+
+    // Name validation for the failed prefix: strict, and never confused with
+    // the normal class (so the two rolling sets cannot evict each other).
+    start.tm_mday = 25;
+    const std::string failed_stem = gt::failed_session_archive_stem(start);
+    check(failed_stem == "failed-session-2026-09-25_14-03-07",
+          "the failed-session stem is the local start time");
+    check(gt::is_failed_session_archive_name(failed_stem + ".zip") &&
+              !gt::is_session_archive_name(failed_stem + ".zip") &&
+              !gt::is_failed_session_archive_name(stem + ".zip"),
+          "failed and normal archive names are distinct classes");
+    check(!gt::is_failed_session_archive_name(failed_stem + ".zip.partial") &&
+              !gt::is_failed_session_archive_name("." + failed_stem + ".partial") &&
+              !gt::is_failed_session_archive_name(".pending-" + failed_stem) &&
+              !gt::is_failed_session_archive_name(failed_stem) &&
+              !gt::is_failed_session_archive_name("Failed-session-2026-09-25_14-03-07.zip") &&
+              !gt::is_failed_session_archive_name("failed-2026-09-25_14-03-07.zip") &&
+              !gt::is_failed_session_archive_name("failed-session-2026-9-25_14-03-07.zip") &&
+              !gt::is_failed_session_archive_name("failed-session-2026-09-25_14-03-0x.zip") &&
+              !gt::is_failed_session_archive_name("failed-session-2026-09-25_14-03-07.zip.zip") &&
+              !gt::is_failed_session_archive_name("xfailed-session-2026-09-25_14-03-07.zip") &&
+              !gt::is_failed_session_archive_name("failed-session-2026-09-25 14-03-07.zip"),
+          "near-miss failed-session names are rejected");
+    const std::vector<std::string> both = {
+        "failed-session-2026-09-20_10-00-00.zip", "session-2026-09-25_10-00-00.zip",
+        "failed-session-2026-09-21_10-00-00.zip", "failed-session-2026-09-22_10-00-00.zip",
+        "failed-session-2026-09-23_10-00-00.zip", "session-2026-09-26_10-00-00.zip",
+        "failed-notes.zip"};
+    const std::vector<std::string> failed_pruned = gt::failed_session_archives_to_prune(both, 3);
+    check(failed_pruned.size() == 1 && failed_pruned[0] == "failed-session-2026-09-20_10-00-00.zip" &&
+              gt::session_archives_to_prune(both, 3).empty(),
+          "each class prunes only itself");
+
+    // What counts as a failed session.
+    gt::SessionEndEvidence clean;
+    clean.has_exit_code = true;
+    check(!gt::session_ended_in_failure(clean) && !gt::session_ended_in_failure({}),
+          "a clean exit (or a stop with no exit code) is not a failure");
+    gt::SessionEndEvidence by_code = clean;
+    by_code.exit_code = 2;
+    gt::SessionEndEvidence by_state;
+    by_state.controller_failed = true;
+    gt::SessionEndEvidence by_status = clean;
+    by_status.status_failed = true;
+    check(gt::session_ended_in_failure(by_code) && gt::session_ended_in_failure(by_state) &&
+              gt::session_ended_in_failure(by_status),
+          "a non-zero exit, the controller's Failed state or state=failed each mark a failure");
+
+    // A short successful session is not archived: nothing is staged and the
+    // next start clears it.
+    write_session_files(log_dir, "short-ok");
+    check(write_text(log_dir / "engine-status.txt", "state=stopped\nupdated_unix=1790000000\n"),
+          "status written");
+    std::string staged_stem;
+    check(!gt::session_status_reports_failure(log_dir) &&
+              !gt::stage_failed_session_logs(log_dir, staged_stem, error) && error.empty() &&
+              staged_stem.empty() && !gt::has_pending_session_logs(archive_dir),
+          "a short successful session stages nothing");
+    gt::clear_session_logs(log_dir);
+    check(!std::filesystem::exists(log_dir / "engine.log"), "and its files are cleared");
+
+    // A short failed session in this controller: marked at the end, left in
+    // place for diagnosis, archived when the next session starts.
+    write_session_files(log_dir, "short-failed");
+    check(write_text(log_dir / "engine-status.txt", "state=ready\n"), "status written");
+    check(gt::mark_session_failed(log_dir, failed_stem, "engine exited with code 1\r\nsecond", error) &&
+              std::filesystem::exists(log_dir / "engine.log") &&
+              std::filesystem::exists(log_dir / gt::kFailedSessionMarker),
+          "a failed session is marked and its files stay in place");
+    check(gt::stage_failed_session_logs(log_dir, staged_stem, error) && error.empty() &&
+              staged_stem == failed_stem && !std::filesystem::exists(log_dir / "engine.log") &&
+              !std::filesystem::exists(log_dir / gt::kFailedSessionMarker),
+          "the next start stages the marked session under its failed-session stem");
+    gt::clear_session_logs(log_dir);
+    check(gt::run_session_archiver(archive_dir) == 0 && !gt::has_pending_session_logs(archive_dir),
+          "the archiver drains the failed session");
+    const std::filesystem::path failed_zip = archive_dir / (failed_stem + ".zip");
+    check(file_contains(failed_zip, "engine.log") && file_contains(failed_zip, "engine-status.txt") &&
+              file_contains(failed_zip, gt::kFailedSessionMarker),
+          "a short failed session is archived with its logs and the failure marker");
+
+    // A controller restarted after the failure: no marker, but the status
+    // file on disk says state=failed. The stem comes from its stamp.
+    write_session_files(log_dir, "restart");
+    const std::time_t failed_at = 1790000000;
+    check(write_text(log_dir / "engine-status.txt",
+                     "state=failed\nerror=virtual display startup failed\nupdated_unix=" +
+                         std::to_string(failed_at) + "\n"),
+          "failed status written");
+    std::uint64_t stamp = 0;
+    check(gt::session_status_reports_failure(log_dir, &stamp) && stamp == 1790000000u,
+          "the status file reports the failure and its stamp");
+    std::tm failed_local{};
+    localtime_s(&failed_local, &failed_at);
+    check(gt::stage_failed_session_logs(log_dir, staged_stem, error) &&
+              staged_stem == gt::failed_session_archive_stem(failed_local),
+          "a failed status left on disk is staged under its stamp's time");
+    check(gt::run_session_archiver(archive_dir) == 0 &&
+              std::filesystem::exists(archive_dir / (staged_stem + ".zip")),
+          "and archived");
+
+    // A marker that does not name a failed-session archive is never used as a
+    // path, and a stem already published is stepped past, not overwritten.
+    write_session_files(log_dir, "tampered");
+    check(write_text(log_dir / gt::kFailedSessionMarker, "..\\..\\evil\nreason\n") &&
+              write_text(log_dir / "engine-status.txt",
+                         "state=failed\nupdated_unix=" + std::to_string(failed_at) + "\n"),
+          "tampered marker written");
+    check(gt::stage_failed_session_logs(log_dir, staged_stem, error) &&
+              gt::is_failed_session_archive_name(staged_stem + ".zip") &&
+              staged_stem != gt::failed_session_archive_stem(failed_local),
+          "a malformed marker stem falls back, stepping past the published name");
+    check(gt::run_session_archiver(archive_dir) == 0 &&
+              std::filesystem::exists(archive_dir / (staged_stem + ".zip")) &&
+              !std::filesystem::exists(directory / "evil"),
+          "the fallback archive is published beside the earlier one");
+
+    // A marker whose files were removed by hand stages nothing and is dropped.
+    check(gt::mark_session_failed(log_dir, failed_stem, "gone", error), "marker written");
+    check(!gt::stage_failed_session_logs(log_dir, staged_stem, error) && error.empty() &&
+              !std::filesystem::exists(log_dir / gt::kFailedSessionMarker),
+          "a marker without logs stages nothing");
+
+    // Failed archives never evict normal ones: the normal three survive.
+    const std::vector<std::string> final_listing = archive_listing(archive_dir);
+    size_t normal = 0;
+    size_t failed_count = 0;
+    for (const std::string& name : final_listing) {
+        normal += gt::is_session_archive_name(name) ? 1 : 0;
+        failed_count += gt::is_failed_session_archive_name(name) ? 1 : 0;
+    }
+    check(normal == 3 && failed_count == 3 &&
+              std::filesystem::exists(archive_dir / "session-2026-09-06_14-03-07.zip") &&
+              std::filesystem::exists(archive_dir / "reference-2026-09-25.zip"),
+          "after more failures, three of each class and the reference remain");
     std::filesystem::remove_all(log_dir, fs_error);
 
     check(gt::format_bytes(0) == "0 B" && gt::format_bytes(2048) == "2.0 KiB" &&

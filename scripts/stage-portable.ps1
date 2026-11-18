@@ -220,7 +220,8 @@ Logs
 logs\engine.log          engine console output (fresh for each session)
 logs\telemetry.csv       newest diagnostics CSV row shown in the dashboard
 logs\engine-status.txt   engine state the dashboard polls twice per second
-logs\sessions\*.zip      the last three sessions longer than 10 minutes
+logs\sessions\*.zip      the last three sessions longer than 10 minutes, and the last
+                         three failed sessions (failed-session-*.zip, any length)
 
 Notes
 -----

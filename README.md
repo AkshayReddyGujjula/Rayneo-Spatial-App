@@ -70,7 +70,8 @@ health checks for the glasses, the calibration, the driver and the engine.
 
 ### 🧾 Logs that are there when you need them
 Every session longer than 10 minutes is compressed into `logs/sessions/` automatically, and
-the last three are kept. Each archive can be replayed through the real estimator offline.
+the last three are kept. A session that ended in an engine failure is always kept, whatever its
+length, as a separate `failed-session-*.zip` (also the newest three). Each archive can be replayed through the real estimator offline.
 
 </td>
 </tr>
@@ -174,8 +175,10 @@ driver, the layout and the engine. Each session writes to `logs/`:
 | `telemetry.csv` | Pose, bias, rest and adaptation state (the dashboard reads the newest row) |
 | `imu_raw.csv` | Every IMU sample, for offline replay |
 | `sessions/session-YYYY-MM-DD_HH-MM-SS.zip` | Sessions longer than 10 minutes, compressed; the newest three are kept |
+| `sessions/failed-session-YYYY-MM-DD_HH-MM-SS.zip` | Sessions whose engine failed, any length; the newest three are kept, separately |
 
-Sessions start on fresh files. Shorter sessions are not archived. The compression runs in the
+Sessions start on fresh files. Shorter successful sessions are not archived. A failed session's
+files stay in `logs/` (so the engine log can be opened) until the next start archives them. The compression runs in the
 background after you quit, and anything interrupted is finished the next time the app starts.
 To investigate a session, extract its `imu_raw.csv` and replay it through the real estimator
 with `imu_replay` from your build folder:
