@@ -65,7 +65,7 @@ shows the engine state, and clicking it returns to Home. Every setting keeps its
 | **Home** | The state in one sentence with the next action (Start workspace / Start preview, or Recenter / Reload layout / Stop while running, with screens, frame rate and uptime), a **Readiness** checklist (glasses display, head calibration, sensor, virtual display driver, layout file) with a fix link for each problem, a layout thumbnail and live head angles. While the engine starts, the hero shows its startup steps (see *Startup steps* below) |
 | **Layout** | Presets, the arrangement editor (2D map / 3D view, fullscreen), the screen list with Add/Remove and the selected-screen inspector; **Save and apply** and **Revert** in the page header |
 | **Comfort** | Reading stabilisation, screen dimming (with per-screen or focus sliders), night tint and warmth, cursor to centre |
-| **Tracking** | Yaw/pitch tracking (live), preview without head tracking, motion prediction, the magnetic heading lock status, and both calibrations (in-app with live progress, or in a console window) |
+| **Tracking** | Yaw/pitch tracking (live), preview without head tracking, earbud magnet compensation (experimental), **Turn prediction** (Off / 20 / 35 / 50 ms, default 35), the magnetic heading lock status, and both calibrations (in-app with live progress, or in a console window) |
 | **Diagnostics** | All eight health checks with their raw detail, Recover displays, the engine log and logs folder, the controller activity log and the newest engine log lines; **Refresh** in the header |
 | **Settings** | Theme (Dark, Light, Match Windows), keep running in the notification area, run the setup guide again, keyboard shortcuts, version and paths, Quit |
 
@@ -83,12 +83,27 @@ and only when a preset was picked and **Finish** pressed.
 
 ### In-app calibration
 
-*Calibrate now* (Tracking page or setup guide) runs `orientation_calibrate.exe --progress-json
---output <calibration>` (plus `--mag` for the compass) with no console window and renders its
-progress: step *n of N*, a progress bar, the current instruction, an optional signal-quality bar,
-and **I'm ready** whenever the tool waits for the wearer (it sends ENTER on the tool's stdin;
-**Cancel** sends `q` and closes stdin, terminating the tool only if it has not exited 4 s later).
-The tool prints one line per state change:
+**Calibrate now** / **Calibrate compass** on the Tracking page (**Start calibration** /
+**Start compass calibration** in the setup guide) run `orientation_calibrate.exe` with no console
+window, in its hands-free `--auto` mode (`src/app_shell/calibration_progress.h`):
+
+```
+--progress-json --auto --auto-delay 5 --repeats 3 --output <calibration>         (head)
+--progress-json --auto --auto-delay 5 --mag [--earbuds] --output <calibration>   (compass)
+```
+
+The wearer is holding a pose and cannot reach the keyboard, so each step starts by itself after a
+5 s countdown (*Starts in N s*); **Start now** sends an empty line to start it early. The head
+calibration records each turn, nod and tilt three times and the tool drops an outlier and averages
+the rest; the saved result is shown as Good, Fair or Retry recommended. The compass step needs a
+head calibration first; switch **Earbuds in** on if you are wearing in-ear earbuds, since their
+magnets then become part of the saved offset (`--earbuds`). The panel shows step *n of N*, a
+progress bar, the current instruction and an optional signal-quality bar. During the head
+calibration the tool also prints `@@live` lines, which the controller draws as a live guide both in
+the panel and in a black, click-through window on the glasses (`docs/orientation-calibration.md`
+section 10; the compass flow has no live guide). **Cancel** sends `q` and closes stdin, so the tool
+turns the IMU stream off and exits through its own path; it is terminated only if it has not
+exited 4 s later. A cancelled run changes nothing. The tool prints one line per state change:
 
 ```
 @@progress {"flow":"orientation"|"mag","step":2,"steps":5,"state":"waiting"|"recording"|"ok"|"retry"|"failed"|"done","prompt":"…","detail":"…","quality":0.8}
@@ -146,7 +161,8 @@ is unavailable.
 
 While the engine runs: **Recenter**, **Yaw tracking** and **Pitch tracking** (state is read back
 from the engine, not guessed), **Reload layout**, and **Stop** (a graceful quit message; a forced
-terminate only happens if the engine ignores it for 8 s and is reported in the status panel).
+terminate only happens if the engine has not exited after 45 s, enough for the display restore,
+and is reported in the status panel).
 The existing global hotkeys keep working: `Ctrl+Shift+R` recenter, `Ctrl+Alt+Y` yaw,
 `Ctrl+Alt+P` pitch, `Ctrl+Alt+S` reading stabilisation (cycles off / low / medium / high / ultra;
 the dashboard adopts and remembers the level), `Ctrl+Alt+F` cursor to the middle of the centre
@@ -310,12 +326,12 @@ dirty working tree after running the app is expected.
 
 ## 7. Tray lifecycle and pinning
 
-* Closing the window hides it to the notification area (configurable with *Close to tray*); the
+* Closing the window hides it to the notification area (configurable with *Keep running in the notification area* on the Settings page); the
   tray menu offers **Show window**, **Start workspace**, **Start preview**, **Stop engine**,
   **Recenter**, **Reload layout** and **Quit**. The icon is re-added automatically if Explorer
   restarts. If the icon could not be created, closing quits instead of stranding the window.
 * **Quitting stops the engine first** (graceful quit message, then a bounded wait that covers
-  the 8 s forced-terminate grace), so the controller never orphans `spatial_desk.exe` or its
+  the 45 s forced-terminate grace: up to 60 s), so the controller never orphans `spatial_desk.exe` or its
   Parsec desktops. System shutdown/logoff sends the same quit request without the wait.
 * **Starting while an engine was launched by hand adopts it** instead of launching a second
   copy: the dashboard attaches to the running window and reports the adoption in the event log.
@@ -363,11 +379,13 @@ after staging: copying another machine's `orientation.json` would silently bias 
    `C:\Program Files\Parsec Virtual Display Driver\vddinstall.bat` from an elevated prompt
    (the installer only extracts files; the script registers the `Root\Parsec\VDA` device).
    No reboot was required; the dashboard row flips to `ready` immediately.
-4. **Calibration** — wear the glasses normally and run the calibration tool; it writes
-   `config/orientation.json` and the app refuses to start head tracking without it. Then run
-   `orientation_calibrate.exe --mag` once (turn fully around and nod/tilt while wearing them): it adds the
-   magnetometer calibration to the same file, and the engine then locks yaw to the local field so
-   the workspace cannot drift in heading.
+4. **Calibration** — wear the glasses normally and run **Calibrate now** on the Tracking page (or
+   the setup guide's head calibration step); it writes `config/orientation.json` and the app
+   refuses to start head tracking without it. Then run **Calibrate compass** once (turn all the way
+   around, then nod, tilt and look around while wearing them, earbuds in if you normally wear
+   them): it adds the magnetometer calibration to the same file, and the engine then locks yaw to
+   the local field. **Open in console** runs either one as `orientation_calibrate.exe` (`--mag` for
+   the compass) in its own console window instead.
 5. **Workspace sanity** — after *Start workspace*, confirm the new virtual desktops in Windows
    display settings, then move the mouse onto each one and check the dashboard telemetry and the
    engine log for capture errors.
@@ -383,7 +401,7 @@ after staging: copying another machine's `orientation.json` would silently bias 
   is handled as UTF-8 end to end (command line, status file, telemetry, layout, calibration).
 * The controller never installs a driver; that stays with you. The magnetometer heading lock is
   engine-side and switches on only when `config/orientation.json` carries a `--mag` calibration.
-  The only display change it can make is the manual Recover displays button (re-applies the Extend topology); the workspace takeover and its restore belong to the engine.
+  The only display change it can make is the manual Recover displays button (re-applies the Extend topology and the taskbar auto-hide setting); the workspace takeover and its restore belong to the engine.
 * One engine at a time: `spatial_desk.exe` keeps its single-instance guard, and the controller
   attaches to an already-running engine instead of starting a second one.
 * Without a magnetometer calibration there is no absolute heading reference, so a steady slow yaw
