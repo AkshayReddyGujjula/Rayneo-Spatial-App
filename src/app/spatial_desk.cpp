@@ -1528,8 +1528,10 @@ int wmain(int argc, wchar_t** argv) {
                         pin_error.c_str());
             // repin_pending stays set; space the blocking waits out so frames
             // keep rendering between retries.
-            next_repin_try =
-                std::chrono::duration<double>(SteadyClock::now() - start).count() + 3.0;
+            // Capped so a last retry still lands inside the watch.
+            next_repin_try = std::min(
+                std::chrono::duration<double>(SteadyClock::now() - start).count() + 3.0,
+                redetach_watch_until - 0.75);
             return {};
         }
         repin_pending = false;

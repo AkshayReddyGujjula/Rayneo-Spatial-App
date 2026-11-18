@@ -2287,6 +2287,22 @@ bool restore_pinned_layout(const std::vector<DisplayModeSnapshot>& snapshots, Vd
     // is stale and belongs to someone else).
     const std::set<std::wstring> virtual_devices = virtual_device_names();
     const auto live_r2 = live_device_identities();
+    // The detached panel is force-attached only when its identity is proven:
+    // a known monitor id that no longer enumerates means its old GDI name may
+    // belong to another display now, which must not get the panel's mode.
+    const auto forced_reattach = [&](const DisplayModeSnapshot& snapshot,
+                                     const std::vector<std::pair<std::wstring, std::wstring>>&
+                                         live_map) {
+        if (reattach_device.empty() || snapshot.device_name != reattach_device) {
+            return false;
+        }
+        if (snapshot.monitor_id.empty()) {
+            return true;
+        }
+        return std::any_of(live_map.begin(), live_map.end(), [&](const auto& entry) {
+            return entry.second == snapshot.monitor_id;
+        });
+    };
     for (const DisplayModeSnapshot& snapshot : snapshots) {
         if (snapshot.primary) {
             continue;
@@ -2296,8 +2312,7 @@ bool restore_pinned_layout(const std::vector<DisplayModeSnapshot>& snapshots, Vd
         if (virtual_devices.contains(live)) {
             continue;
         }
-        const bool must_reattach =
-            !reattach_device.empty() && snapshot.device_name == reattach_device;
+        const bool must_reattach = forced_reattach(snapshot, live_r2);
         if (!is_display_attached(live) && !must_reattach) {
             continue;  // Unplugged since the snapshot; nothing to pin.
         }
@@ -2327,13 +2342,12 @@ bool restore_pinned_layout(const std::vector<DisplayModeSnapshot>& snapshots, Vd
         if (snapshot.primary) {
             continue;
         }
-        const bool must_reattach =
-            !reattach_device.empty() && snapshot.device_name == reattach_device;
         // The attach commit above is churn that can renumber names: resolve
         // the re-attached panel through a fresh map.
+        const auto live_now = live_device_identities();
+        const bool must_reattach = forced_reattach(snapshot, live_now);
         const std::wstring live = resolve_live_device_name(
-            must_reattach ? live_device_identities() : live_r2, snapshot.device_name,
-            snapshot.monitor_id);
+            must_reattach ? live_now : live_r2, snapshot.device_name, snapshot.monitor_id);
         if (virtual_devices.contains(live)) {
             continue;
         }
