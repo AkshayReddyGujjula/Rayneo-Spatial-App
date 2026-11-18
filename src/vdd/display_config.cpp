@@ -272,56 +272,130 @@ bool wait_for_no_virtual_displays(int timeout_ms) {
     return false;
 }
 
-int select_center_driver(const std::vector<std::pair<int, float>>& driver_yaw) {
-    int best = -1;
-    float best_abs = 0.0f;
-    for (const auto& [driver, yaw] : driver_yaw) {
-        const float magnitude = std::fabs(yaw);
-        if (best < 0 || magnitude < best_abs || (magnitude == best_abs && driver < best)) {
-            best = driver;
-            best_abs = magnitude;
-        }
-    }
-    return best;
+namespace {
+
+// Lexicographic "closest to straight ahead": |yaw|, then |pitch|, then driver.
+bool nearer_forward(const ScreenPlacement& a, const ScreenPlacement& b) {
+    const float ay = std::fabs(a.yaw_deg);
+    const float by = std::fabs(b.yaw_deg);
+    if (ay != by) return ay < by;
+    const float ap = std::fabs(a.pitch_deg);
+    const float bp = std::fabs(b.pitch_deg);
+    if (ap != bp) return ap < bp;
+    return a.driver_index < b.driver_index;
 }
 
-std::vector<PlannedDesktop> plan_workspace_desktops(
-    const std::vector<std::pair<int, float>>& driver_yaw, int center_driver, int width) {
-    std::vector<std::pair<float, int>> left;  // (yaw, driver), ascending yaw
-    std::vector<std::pair<float, int>> right;
-    for (const auto& [driver, yaw] : driver_yaw) {
-        if (driver == center_driver) {
-            continue;
+bool nearer_level(const ScreenPlacement& a, const ScreenPlacement& b) {
+    const float ap = std::fabs(a.pitch_deg);
+    const float bp = std::fabs(b.pitch_deg);
+    if (ap != bp) return ap < bp;
+    return a.driver_index < b.driver_index;
+}
+
+// Groups screens into desktop columns. Screens share a column when their yaws
+// are within half the narrower screen's angular width of the column's first
+// screen AND they are vertically separated from every member (pitch apart by
+// at least half the shorter screen's angular height). Visually overlapping
+// screens therefore stay side by side. Every eligible column is considered,
+// not only the newest one (a narrow screen between two stacked screens must
+// not split the stack); the nearest anchor yaw wins, ties to the earlier
+// column. Columns come out in ascending anchor yaw; members keep ascending
+// pitch.
+std::vector<std::vector<ScreenPlacement>> group_columns(std::vector<ScreenPlacement> screens) {
+    std::sort(screens.begin(), screens.end(), [](const auto& a, const auto& b) {
+        if (a.yaw_deg != b.yaw_deg) return a.yaw_deg < b.yaw_deg;
+        return a.driver_index < b.driver_index;
+    });
+    std::vector<std::vector<ScreenPlacement>> columns;
+    for (const ScreenPlacement& screen : screens) {
+        std::vector<ScreenPlacement>* target = nullptr;
+        float target_distance = 0.0f;
+        for (auto& column : columns) {
+            const ScreenPlacement& anchor = column.front();
+            const float distance = std::fabs(screen.yaw_deg - anchor.yaw_deg);
+            const float half_width = 0.5f * std::min(anchor.width_deg, screen.width_deg);
+            bool separated = distance < half_width;
+            for (const ScreenPlacement& member : column) {
+                const float half_height = 0.5f * std::min(member.height_deg, screen.height_deg);
+                separated = separated && std::fabs(screen.pitch_deg - member.pitch_deg) >= half_height;
+            }
+            if (separated && (target == nullptr || distance < target_distance)) {
+                target = &column;
+                target_distance = distance;
+            }
         }
-        if (yaw < 0.0f) {
-            left.emplace_back(yaw, driver);
+        if (target != nullptr) {
+            target->push_back(screen);
         } else {
-            right.emplace_back(yaw, driver);
+            columns.push_back({screen});
         }
     }
-    std::sort(left.begin(), left.end());
-    std::sort(right.begin(), right.end());
-    std::map<int, int> position;
-    position[center_driver] = 0;
-    for (size_t i = 0; i < left.size(); ++i) {
-        position[left[i].second] = -width * static_cast<int>(left.size() - i);
+    for (auto& column : columns) {
+        std::sort(column.begin(), column.end(), [](const auto& a, const auto& b) {
+            if (a.pitch_deg != b.pitch_deg) return a.pitch_deg < b.pitch_deg;
+            return a.driver_index < b.driver_index;
+        });
     }
-    for (size_t i = 0; i < right.size(); ++i) {
-        position[right[i].second] = width * static_cast<int>(i + 1);
+    return columns;
+}
+
+}  // namespace
+
+int select_center_driver(const std::vector<ScreenPlacement>& screens) {
+    // The primary is the most level screen of the column nearest straight
+    // ahead, so a screen stacked above the centre never steals the origin.
+    const auto columns = group_columns(screens);
+    const ScreenPlacement* best = nullptr;
+    for (const auto& column : columns) {
+        const ScreenPlacement& base = *std::min_element(column.begin(), column.end(), nearer_level);
+        if (best == nullptr || nearer_forward(base, *best)) {
+            best = &base;
+        }
+    }
+    return best == nullptr ? -1 : best->driver_index;
+}
+
+std::vector<PlannedDesktop> plan_workspace_desktops(const std::vector<ScreenPlacement>& screens,
+                                                    int center_driver, int width, int height) {
+    const auto columns = group_columns(screens);
+    size_t center_column = 0;
+    for (size_t c = 0; c < columns.size(); ++c) {
+        for (const ScreenPlacement& member : columns[c]) {
+            if (member.driver_index == center_driver) center_column = c;
+        }
+    }
+    std::map<int, std::pair<int, int>> position;  // driver -> (x, y)
+    for (size_t c = 0; c < columns.size(); ++c) {
+        const auto& column = columns[c];
+        // Row 0 is the centre itself in its column, else the most level screen,
+        // so every column's base row lines up with the primary at y = 0.
+        size_t base = static_cast<size_t>(
+            std::min_element(column.begin(), column.end(), nearer_level) - column.begin());
+        for (size_t r = 0; r < column.size(); ++r) {
+            if (column[r].driver_index == center_driver) base = r;
+        }
+        const int x = width * (static_cast<int>(c) - static_cast<int>(center_column));
+        for (size_t r = 0; r < column.size(); ++r) {
+            // Higher pitch (looking up) is above: negative Windows y.
+            const int y = height * (static_cast<int>(base) - static_cast<int>(r));
+            position[column[r].driver_index] = {x, y};
+        }
     }
     std::vector<PlannedDesktop> planned;
-    planned.reserve(driver_yaw.size());
-    for (const auto& [driver, yaw] : driver_yaw) {
-        (void)yaw;
+    planned.reserve(screens.size());
+    for (const ScreenPlacement& screen : screens) {
         PlannedDesktop desktop;
-        desktop.driver_index = driver;
-        const auto found = position.find(driver);
-        desktop.x = found == position.end() ? 0 : found->second;
-        desktop.y = 0;
+        desktop.driver_index = screen.driver_index;
+        const auto found = position.find(screen.driver_index);
+        if (found != position.end()) {
+            desktop.x = found->second.first;
+            desktop.y = found->second.second;
+        }
         planned.push_back(desktop);
     }
     return planned;
 }
+
 
 std::wstring select_internal_display(
     const std::vector<std::tuple<std::wstring, bool, bool>>& displays) {
@@ -350,6 +424,13 @@ std::vector<PlannedAside> plan_aside_moves(
     const std::set<std::wstring>& vdd_devices) {
     int base_x = 0;
     for (const DisplayModeSnapshot& snapshot : snapshots) {
+        // Virtual displays are being re-staged into the slots, so their
+        // current positions say nothing about where free space starts: a
+        // just-added one can still sit where Windows dropped it, far right,
+        // and counting it would stage the aside past a gap.
+        if (vdd_devices.contains(snapshot.device_name)) {
+            continue;
+        }
         base_x = std::max(base_x, static_cast<int>(snapshot.mode.dmPosition.x) +
                                         static_cast<int>(snapshot.mode.dmPelsWidth));
     }
@@ -1004,6 +1085,88 @@ bool commit_topology_snapshots(const std::vector<DisplayModeSnapshot>& snapshots
 
 }  // namespace
 
+bool redetach_internal_display(const RECT& pristine_laptop, const RECT& center_rect,
+                               std::vector<MigratedWindow>& migrated, std::string& error) {
+    RedetachOps ops;
+    // By output technology, not by the takeover-time GDI name: names
+    // renumber across display churn (bug 15).
+    ops.find_panel = [](std::wstring& panel, std::string& detail) {
+        return find_internal_display(panel, detail);
+    };
+    ops.read_rect = [](const std::wstring& panel, RECT& rect) {
+        DEVMODEW mode{};
+        mode.dmSize = sizeof(mode);
+        if (!EnumDisplaySettingsExW(panel.c_str(), ENUM_CURRENT_SETTINGS, &mode, 0)) {
+            return false;
+        }
+        rect.left = mode.dmPosition.x;
+        rect.top = mode.dmPosition.y;
+        rect.right = rect.left + static_cast<LONG>(mode.dmPelsWidth);
+        rect.bottom = rect.top + static_cast<LONG>(mode.dmPelsHeight);
+        return true;
+    };
+    ops.snapshot_windows = snapshot_laptop_windows;
+    ops.place_windows = [](const std::vector<MigratedWindow>& windows, const RECT& from,
+                           const RECT& to) { place_windows_on_center(windows, from, to); };
+    ops.restore_home = [](const std::vector<MigratedWindow>& windows) {
+        restore_windows_home(windows);
+    };
+    ops.detach = deactivate_internal_path;
+    ops.wait_detached = [](const std::wstring& panel) {
+        return wait_for_attach_state(panel, false);
+    };
+    ops.repair = [&](const std::vector<MigratedWindow>& windows) {
+        repair_takeover_wave(windows, pristine_laptop, center_rect, 3000);
+    };
+    return redetach_internal_display(ops, pristine_laptop, center_rect, migrated, error);
+}
+
+bool redetach_internal_display(const RedetachOps& ops, const RECT& pristine_laptop,
+                               const RECT& center_rect, std::vector<MigratedWindow>& migrated,
+                               std::string& error) {
+    error.clear();
+    std::wstring panel;
+    if (!ops.find_panel(panel, error) || panel.empty()) {
+        return false;
+    }
+    RECT current{};
+    if (!ops.read_rect(panel, current)) {
+        error = "could not read the re-attached laptop display's position";
+        return false;
+    }
+    // Same order as the takeover: move the windows off the panel first, so
+    // the detach's minimize-on-disconnect wave has nothing of ours to hide.
+    std::vector<MigratedWindow> recorded;
+    ops.snapshot_windows(current, recorded);
+    ops.place_windows(recorded, current, center_rect);
+    std::string detach_error;
+    const bool detach_ok = ops.detach(panel, detach_error);
+    // Judge by the outcome, not the call: a detach that reports an error can
+    // still land, and then the moved windows must be recorded.
+    if (!ops.wait_detached(panel)) {
+        // Still attached: put the windows back exactly where they were on the
+        // panel (`home` is still their recorded rect there; it stays visible,
+        // so they need no restore record).
+        ops.restore_home(recorded);
+        error = detach_ok ? "the laptop display is still attached after the re-detach"
+                          : detach_error;
+        return false;
+    }
+    for (MigratedWindow& entry : recorded) {
+        entry.home = migrate_window_rect(entry.home, current, pristine_laptop);
+    }
+    ops.repair(recorded);
+    for (const MigratedWindow& entry : recorded) {
+        const bool known = std::any_of(migrated.begin(), migrated.end(), [&](const auto& other) {
+            return other.hwnd == entry.hwnd;
+        });
+        if (!known) {
+            migrated.push_back(entry);
+        }
+    }
+    return true;
+}
+
 bool restore_display_topology(WorkspaceTopology& topo, VddClient& vdd, std::string& error);
 
 bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
@@ -1314,7 +1477,7 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
             continue;
         }
         candidate.push_back(
-            ConfiguredDisplay{item.driver, item.device, width, height, item.hz, item.x, 0});
+            ConfiguredDisplay{item.driver, item.device, width, height, item.hz, item.x, item.y});
     }
     configured = std::move(candidate);
     return true;
@@ -1391,11 +1554,48 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
         snapshots.push_back(std::move(snapshot));
         staged.push_back(item);
     }
-    // The new center stages first (same primary-first rule as the takeover).
-    // When the primary moves, stage every position relative to the new origin.
-    for (bool want_primary : {true, false}) {
+    // Real displays (the glasses) that overlap a planned slot move right of
+    // everything, exactly as at takeover: a screen stacked above the centre
+    // lands where the glasses' home above the laptop usually sits. They are
+    // snapshotted too, so a failed commit puts them back.
+    {
+        std::vector<DisplayModeSnapshot> live;
+        std::string live_error;
+        if (!snapshot_attached_displays(live, live_error)) {
+            error = live_error;
+            return false;
+        }
+        for (const PlannedAside& aside :
+             plan_aside_moves(live, planned, width, height, virtual_device_names())) {
+            const auto source = std::find_if(live.begin(), live.end(), [&](const auto& entry) {
+                return entry.device_name == aside.device_name;
+            });
+            if (source == live.end()) {
+                continue;
+            }
+            StagedMode item;
+            item.device = source->device_name;
+            item.mode = source->mode;
+            item.mode.dmPosition.x = static_cast<LONG>(aside.x);
+            item.mode.dmPosition.y = static_cast<LONG>(aside.y);
+            item.mode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY | DM_POSITION;
+            item.needs_change = true;
+            item.x = aside.x;
+            item.y = aside.y;
+            std::printf("  moving %ls aside to (%d,%d) (was (%ld,%ld)) to free a planned slot\n",
+                        source->device_name.c_str(), aside.x, aside.y,
+                        source->mode.dmPosition.x, source->mode.dmPosition.y);
+            snapshots.push_back(*source);
+            staged.push_back(item);
+        }
+    }
+    // The new center stages first (same primary-first rule as the takeover),
+    // then the other virtual displays, then the aside moves. When the primary
+    // moves, stage every virtual position relative to the new origin.
+    for (int pass = 0; pass < 3; ++pass) {
         for (const StagedMode& item : staged) {
-            if ((!primary_changed && !item.needs_change) || item.primary != want_primary) {
+            const int item_pass = item.primary ? 0 : (item.driver >= 0 ? 1 : 2);
+            if ((!primary_changed && !item.needs_change) || item_pass != pass) {
                 continue;
             }
             DEVMODEW mode = item.mode;
@@ -1422,9 +1622,32 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
         }
         return false;
     }
+    // Read back what Windows actually applied (diagnostic only: the takeover's
+    // fail-on-mismatch would turn a cosmetic shift into a rollback here).
+    for (const StagedMode& item : staged) {
+        if (item.driver < 0) {
+            if (!wait_for_aside_clear(item.device, planned, width, height)) {
+                std::printf("  warning: %ls still overlaps a planned desktop after the reload\n",
+                            item.device.c_str());
+            }
+            continue;
+        }
+        if (!wait_for_display_layout(item.device, item.x, item.y, width, height, true,
+                                     item.primary)) {
+            DEVMODEW actual{};
+            actual.dmSize = sizeof(actual);
+            EnumDisplaySettingsExW(item.device.c_str(), ENUM_CURRENT_SETTINGS, &actual, 0);
+            std::printf("  warning: VDD[%d] %ls is at (%ld,%ld), planned (%d,%d)%s\n", item.driver,
+                        item.device.c_str(), actual.dmPosition.x, actual.dmPosition.y, item.x,
+                        item.y, item.primary ? " as primary" : "");
+        }
+    }
     std::vector<ConfiguredDisplay> candidate;
     candidate.reserve(staged.size());
     for (const StagedMode& item : staged) {
+        if (item.driver < 0) {
+            continue;  // an aside move, not a virtual desktop
+        }
         candidate.push_back(
             ConfiguredDisplay{item.driver, item.device, width, height, item.hz, item.x, item.y});
     }
@@ -1945,7 +2168,7 @@ std::string describe_display_landscape() {
 }
 
 bool restore_pinned_layout(const std::vector<DisplayModeSnapshot>& snapshots, VddClient& vdd,
-                           std::string& error) {
+                           std::string& error, const std::wstring& reattach_device) {
     if (snapshots.empty()) {
         error = "no display snapshots to restore";
         return false;
@@ -2042,7 +2265,9 @@ bool restore_pinned_layout(const std::vector<DisplayModeSnapshot>& snapshots, Vd
         if (virtual_devices.contains(live)) {
             continue;
         }
-        if (!is_display_attached(live)) {
+        const bool must_reattach =
+            !reattach_device.empty() && snapshot.device_name == reattach_device;
+        if (!is_display_attached(live) && !must_reattach) {
             continue;  // Unplugged since the snapshot; nothing to pin.
         }
         int x = 0;
@@ -2071,12 +2296,17 @@ bool restore_pinned_layout(const std::vector<DisplayModeSnapshot>& snapshots, Vd
         if (snapshot.primary) {
             continue;
         }
-        const std::wstring live = resolve_live_device_name(live_r2, snapshot.device_name,
-                                                           snapshot.monitor_id);
+        const bool must_reattach =
+            !reattach_device.empty() && snapshot.device_name == reattach_device;
+        // The attach commit above is churn that can renumber names: resolve
+        // the re-attached panel through a fresh map.
+        const std::wstring live = resolve_live_device_name(
+            must_reattach ? live_device_identities() : live_r2, snapshot.device_name,
+            snapshot.monitor_id);
         if (virtual_devices.contains(live)) {
             continue;
         }
-        if (!is_display_attached(live)) {
+        if (!is_display_attached(live) && !must_reattach) {
             continue;
         }
         int x = 0;
@@ -2160,7 +2390,7 @@ bool restore_display_topology(WorkspaceTopology& topo, VddClient& vdd, std::stri
     // would fight them.
     std::set<HWND> was_iconic;
     snapshot_iconic_windows(was_iconic);
-    if (!restore_pinned_layout(topo.snapshots, vdd, error)) {
+    if (!restore_pinned_layout(topo.snapshots, vdd, error, topo.detached_device)) {
         // Pins failed, but the user's taskbar preference is still ours to
         // hand back: the churn already happened either way.
         refresh_saved_taskbar_state(topo);
@@ -2171,9 +2401,17 @@ bool restore_display_topology(WorkspaceTopology& topo, VddClient& vdd, std::stri
     // center-association, one wave per vanishing device): unminimize until
     // quiet, then hand focus back where the takeover found it.
     topo.windows_repaired = 0;
+    // The windows' homes are on the panel the takeover detached, which is not
+    // always the primary (an external primary with a secondary laptop panel).
     const DisplayModeSnapshot* primary = nullptr;
     for (const DisplayModeSnapshot& snapshot : topo.snapshots) {
-        if (snapshot.primary) {
+        if (!topo.detached_device.empty() && snapshot.device_name == topo.detached_device) {
+            primary = &snapshot;
+            break;
+        }
+    }
+    for (const DisplayModeSnapshot& snapshot : topo.snapshots) {
+        if (primary == nullptr && snapshot.primary) {
             primary = &snapshot;
             break;
         }

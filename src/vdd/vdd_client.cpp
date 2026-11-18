@@ -90,7 +90,11 @@ std::vector<int> vdd_cleanup_order(const std::vector<int>& addition_order) {
 
 bool retry_vdd_removal(int index, const std::function<bool(int, std::string&)>& remove,
                        const std::function<void(int)>& sleep_ms, std::string& error) {
-    constexpr std::array delays_ms{0, 250, 750};
+    // Each attempt keeps the short IOCTL deadline (the keepalive ping waits on
+    // it); the sleeps between attempts hold no lock. Live 2026-11-18: while
+    // Windows re-arranged after one removal, the next one needed its third
+    // attempt, so a fourth after 1.5 s widens the window to ~6.5 s.
+    constexpr std::array delays_ms{0, 250, 750, 1500};
     std::string failure;
     for (size_t attempt = 0; attempt < delays_ms.size(); ++attempt) {
         const int delay_ms = delays_ms[attempt];

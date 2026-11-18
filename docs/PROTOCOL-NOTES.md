@@ -85,7 +85,8 @@ include the Windows display landscape.
 
 A failed grow gives newly added indices another bounded wait before removing
 them. Removal failures log the IOCTL error on each attempt. The selftest exercises
-one transient failure (250 ms backoff) and exhausted retries (250 and 750 ms).
+one transient failure (250 ms backoff), three failures (250, 750 and 1500 ms) and
+exhausted retries (four attempts).
 After a successful rollback the engine keeps the previous layout. A new save or
 an explicit reload request can retry a rejected edit. If rollback itself fails,
 the engine reports the failure and exits through the normal display restore path.
@@ -102,11 +103,33 @@ reload is missing from it. Capture therefore falls back to a fresh
 giving up ("the capture output is not owned by the renderer's D3D11 adapter").
 
 The remove IOCTL timeout is 5000 ms in the shutdown disconnect and 1000 ms (plus
-the 3-attempt retry) for mid-session removals, which hold the IOCTL lock and so
+the 4-attempt retry) for mid-session removals, which hold the IOCTL lock and so
 delay the keepalive ping. Measured live on 2026-11-18: a mid-session removal completes in under 250 ms, but each removal
 during the shutdown restore takes about 3.0 s, so the old 1000 ms timeout failed
 with Windows error 258 and left displays alive while the laptop panel was being
 restored. Removals taking 250 ms or more are logged as `VDD remove <n> took <ms> ms`.
+
+**Stacked desktops.** Screens whose yaw is within half a screen width of each other,
+and whose pitch differs by at least half a screen height, form a column. The column
+nearest straight ahead holds the centre, the primary desktop at (0,0). Higher pitch
+gets a lower desktop y: a screen above the centre is at (0,-1080) and one below it
+is at (0,1080). Each column's base row is its most level screen. The glasses' home
+slot (442,-1080) overlaps a desktop stacked above the centre, so both the takeover
+and a reload move the glasses right of the workspace. The render window follows
+its monitor on every 0.5 s layout tick.
+
+**Laptop re-attach on reload (measured live 2026-11-18).** Every mid-session VDD add
+or remove made Windows re-attach the detached laptop panel at the right end of the
+arrangement, which pushed the glasses further right. The panel stayed attached until
+shutdown. For 15 s after any reload that changes the screen count, the layout tick
+checks for an active internal panel. If one is active, the engine moves the panel's
+windows to the centre desktop and detaches the panel again through CCD (not
+persisted). It then repairs windows minimized by the detach and records them for the
+shutdown restore, with their homes mapped to the pristine laptop rect. Finally it
+re-pins the virtual desktops, which is a no-op when nothing moved. Grow and shrink
+were each verified on hardware for 3->4 (stacked above) and 3->5 (above and below).
+In those runs the panel was absent after the reload, the set of minimized windows
+was unchanged, and the shutdown restore was correct.
 
 ## Fusion notes (live-verified)
 

@@ -5,6 +5,7 @@
 #endif
 #include <windows.h>
 
+#include <functional>
 #include <map>
 #include <set>
 #include <string>
@@ -48,9 +49,22 @@ std::map<int, std::wstring> active_virtual_display_names(
 
 // Pure workspace-topology planning (unit-tested in vdd_selftest; no Win32 calls).
 
-// Picks the primary desktop: the bound display whose screen yaw is closest to
-// straight ahead. Ties resolve to the lowest driver index. Empty input -> -1.
-int select_center_driver(const std::vector<std::pair<int, float>>& driver_yaw);
+// One bound screen as the desktop planner sees it: its direction and angular
+// size (width_deg/height_deg = 2*atan(size/2 / distance)). The defaults are
+// the default 1.7 x 0.956 m screen at 2 m, so {driver, yaw} is a level screen.
+struct ScreenPlacement {
+    int driver_index = -1;
+    float yaw_deg = 0.0f;
+    float pitch_deg = 0.0f;  // positive = above the horizon
+    float width_deg = 46.0f;
+    float height_deg = 26.9f;
+};
+
+// Picks the primary desktop: the most level screen of the desktop column whose
+// base is closest to straight ahead (|yaw|, then |pitch|, then lowest driver
+// index), so a screen stacked above the centre never becomes primary.
+// Empty input -> -1.
+int select_center_driver(const std::vector<ScreenPlacement>& screens);
 
 struct PlannedDesktop {
     int driver_index = -1;
@@ -59,11 +73,17 @@ struct PlannedDesktop {
     bool operator==(const PlannedDesktop&) const = default;
 };
 
-// Desktop positions: the center driver at x=0, the rest ordered by yaw with
-// negative yaw stacked left (-width, -2*width, ...) and positive right.
+// Desktop positions that mirror the 3D arrangement, so the mouse crosses to the
+// neighbour you see: screens are grouped into columns by yaw (within half a
+// screen width and vertically separated), columns are laid out left to right
+// by yaw with the center's column at x = 0, and within a column screens stack
+// by pitch (higher pitch -> negative y, i.e. above). Every column's base row
+// (the center in its column, else the most level screen) sits at y = 0.
+// Single-row layouts get exactly the yaw-ordered row: -width, 0, +width, ...
 // Input order is preserved; only positions are assigned.
-std::vector<PlannedDesktop> plan_workspace_desktops(
-    const std::vector<std::pair<int, float>>& driver_yaw, int center_driver, int width);
+std::vector<PlannedDesktop> plan_workspace_desktops(const std::vector<ScreenPlacement>& screens,
+                                                    int center_driver, int width,
+                                                    int height = 1080);
 
 // Picks the laptop panel to detach: (GDI name, is_internal, is_primary).
 // Prefers the primary internal panel, else the first internal one; empty when
@@ -171,6 +191,40 @@ int repair_restore_wave(const std::vector<MigratedWindow>& windows,
 
 bool snapshot_attached_displays(std::vector<DisplayModeSnapshot>& snapshots, std::string& error);
 bool find_internal_display(std::wstring& device_name, std::string& error);
+// Mid-session guard: Windows re-attaches the laptop panel the takeover
+// detached whenever the monitor set changes (a virtual display added or
+// removed by a layout reload; measured live 2026-11-18 on grow and shrink).
+// When an internal panel is active again, the windows on it move to
+// `center_rect`, the panel is detached again (not persisted), and windows the
+// detach minimized are repaired. Newly recorded windows are appended to
+// `migrated` (deduplicated by HWND) with homes mapped onto `pristine_laptop`,
+// so the shutdown restore returns them. Returns true when it re-detached;
+// false with an empty error when no internal panel is active, false with
+// `error` set when the re-detach failed (the caller logs it and carries on).
+// A failed detach that leaves the panel attached moves the windows back onto
+// it (nothing is recorded: they are home on a visible screen); one that lands
+// despite its error is treated as a success, so no moved window goes
+// unrecorded.
+bool redetach_internal_display(const RECT& pristine_laptop, const RECT& center_rect,
+                               std::vector<MigratedWindow>& migrated, std::string& error);
+// The Win32 steps of the guard above, injectable for the selftest.
+struct RedetachOps {
+    // Sets an empty name when no internal panel is active.
+    std::function<bool(std::wstring&, std::string&)> find_panel;
+    std::function<bool(const std::wstring&, RECT&)> read_rect;
+    std::function<void(const RECT&, std::vector<MigratedWindow>&)> snapshot_windows;
+    std::function<void(const std::vector<MigratedWindow>&, const RECT& from, const RECT& to)>
+        place_windows;
+    // Moves each window back to its recorded `home` rect.
+    std::function<void(const std::vector<MigratedWindow>&)> restore_home;
+    std::function<bool(const std::wstring&, std::string&)> detach;
+    // True once the panel reports detached (bounded wait).
+    std::function<bool(const std::wstring&)> wait_detached;
+    std::function<void(const std::vector<MigratedWindow>&)> repair;
+};
+bool redetach_internal_display(const RedetachOps& ops, const RECT& pristine_laptop,
+                               const RECT& center_rect, std::vector<MigratedWindow>& migrated,
+                               std::string& error);
 // True when the named GDI device is currently attached to the desktop.
 // Used to verify a detach or a re-attach actually landed; an unknown name
 // reports false.
@@ -268,8 +322,11 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
 // phases already satisfied are skipped, never re-committed. A stale pending
 // batch is flushed before giving up: NORESET stagings survive a failed call
 // and would otherwise poison the next commit.
+// `reattach_device` (the takeover's detached panel, snapshot name) is
+// re-attached and pinned even when it is not the primary snapshot; other
+// non-primary displays that are detached are treated as unplugged.
 bool restore_pinned_layout(const std::vector<DisplayModeSnapshot>& snapshots, VddClient& vdd,
-                           std::string& error);
+                           std::string& error, const std::wstring& reattach_device = {});
 // Restores the pre-takeover topology (laptop panel back, original primary).
 // No-op unless the topology is active; clears active only on success.
 // Live (GDI name, monitor id) pairs for every display device Windows

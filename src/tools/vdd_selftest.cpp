@@ -138,12 +138,15 @@ void test_workspace_reload(const char* label, int arrival_ms, int removal_failur
                   events == std::vector<std::string>{
                       "resize 4", "reload", "reposition", "capture apply"},
               "late active display must be awaited before reposition");
-    } else if (removal_failures < 3) {
+    } else if (removal_failures < 4) {
+        const std::vector<int> all_backoff{250, 750, 1500};
+        const std::vector<int> expected_backoff(all_backoff.begin(),
+                                                all_backoff.begin() + removal_failures);
         check(!reloaded && rollback_error.empty() && configured == previous_displays &&
                   indices == std::vector<int>{0, 1, 2} && error.starts_with("timed out") &&
                   removal_attempts == removal_failures + 1 &&
-                  rollback_active_ms == (removal_failures == 0 ? -1 : 200) &&
-                  backoff == (removal_failures == 0 ? std::vector<int>{} : std::vector<int>{250}) &&
+                  rollback_active_ms == (removal_failures == 1 ? 200 : -1) &&
+                  backoff == expected_backoff &&
                   events == std::vector<std::string>{"resize 4", "reload",
                       "reload rollback settle", "resize 3", "reload rollback", "reposition",
                       "capture restore"},
@@ -152,10 +155,87 @@ void test_workspace_reload(const char* label, int arrival_ms, int removal_failur
         check(!reloaded && configured == previous_displays && indices.size() == 4 &&
                   rollback_error == "virtual display rollback failed: failed to remove Parsec "
                                     "virtual display 3: " + ioctl_error &&
-                  removal_attempts == 3 && backoff == std::vector<int>{250, 750} &&
+                  removal_attempts == 4 && backoff == std::vector<int>{250, 750, 1500} &&
                   events == std::vector<std::string>{"resize 4", "reload",
                       "reload rollback settle", "resize 3"},
               "exhausted removal retries are fatal and retain the IOCTL error");
+    }
+}
+
+// The mid-session laptop re-detach guard against faked Win32 steps.
+// `detach_reports` is what the CCD call returns; `lands` is whether the panel
+// then really reports detached.
+void test_redetach(const char* label, bool panel_active, bool detach_reports, bool lands) {
+    std::printf("  redetach: %s\n", label);
+    const auto hwnd = [](uintptr_t id) { return reinterpret_cast<HWND>(id); };
+    const RECT pristine{0, 0, 2880, 1800};
+    const RECT current{3840, 0, 6720, 1800};
+    const RECT center{0, 0, 1920, 1080};
+    std::vector<gt::MigratedWindow> migrated{{hwnd(1), RECT{100, 100, 500, 400}, false}};
+    std::vector<std::string> calls;
+    std::vector<HWND> restored;
+    std::vector<HWND> repaired;
+    gt::RedetachOps ops;
+    ops.find_panel = [&](std::wstring& panel, std::string&) {
+        panel = panel_active ? L"\\\\.\\DISPLAY1" : L"";
+        return true;
+    };
+    ops.read_rect = [&](const std::wstring&, RECT& rect) {
+        rect = current;
+        return true;
+    };
+    ops.snapshot_windows = [&](const RECT& from, std::vector<gt::MigratedWindow>& out) {
+        check(from.left == current.left, "windows are recorded on the panel's live rect");
+        // hwnd 1 is already recorded since the takeover; hwnd 2 is new.
+        out = {{hwnd(1), RECT{3940, 100, 4340, 400}, false},
+               {hwnd(2), RECT{4840, 200, 5240, 600}, false}};
+    };
+    ops.place_windows = [&](const std::vector<gt::MigratedWindow>&, const RECT& from,
+                            const RECT& to) {
+        calls.push_back(from.left == current.left && to.left == center.left ? "place" : "place?");
+    };
+    ops.restore_home = [&](const std::vector<gt::MigratedWindow>& windows) {
+        calls.push_back("restore");
+        for (const auto& entry : windows) {
+            restored.push_back(entry.hwnd);
+            if (entry.hwnd == hwnd(2)) {
+                check(entry.home.left == 4840, "a rolled-back window returns to its panel rect");
+            }
+        }
+    };
+    ops.detach = [&](const std::wstring&, std::string& detail) {
+        calls.push_back("detach");
+        if (!detach_reports) detail = "SetDisplayConfig failed (87)";
+        return detach_reports;
+    };
+    ops.wait_detached = [&](const std::wstring&) { return lands; };
+    ops.repair = [&](const std::vector<gt::MigratedWindow>& windows) {
+        calls.push_back("repair");
+        for (const auto& entry : windows) repaired.push_back(entry.hwnd);
+    };
+    std::string error;
+    const bool ok = gt::redetach_internal_display(ops, pristine, center, migrated, error);
+    if (!panel_active) {
+        check(!ok && error.empty() && calls.empty(), "no active panel: nothing happens");
+        return;
+    }
+    check(!calls.empty() && calls.front() == "place" && calls.size() >= 2 && calls[1] == "detach",
+          "windows leave the panel before the detach");
+    if (lands) {
+        check(ok, "a detach that lands is a success even when the call reported an error");
+        check(std::count(repaired.begin(), repaired.end(), hwnd(2)) == 1,
+              "the detach's minimize wave is repaired");
+        check(migrated.size() == 2, "a new window is recorded once, a known one not again");
+        check(migrated.size() == 2 && migrated[0].home.left == 100 &&
+                  migrated[1].home.left == 1000 && migrated[1].home.top == 200,
+              "the new window's home maps onto the pristine laptop rect; the old one keeps its own");
+        check(restored.empty(), "nothing is moved back after a successful detach");
+    } else {
+        check(!ok && !error.empty(), "a detach that does not land reports an error");
+        check(calls.back() == "restore" && restored.size() == 2,
+              "windows go back onto the still-attached panel");
+        check(migrated.size() == 1 && repaired.empty(),
+              "nothing is recorded or repaired while the panel stays attached");
     }
 }
 
@@ -181,26 +261,33 @@ void test_stacked_screen_binding() {
     };
     const auto before = gt::bind_displays_to_screens(triple, configure(triple_plan));
     const auto after = gt::bind_displays_to_screens(stacked, configure(stacked_plan));
-    std::vector<int> positions, paired_indices;
+    std::vector<std::pair<int, int>> positions;
+    std::vector<int> paired_indices;
     for (const auto& display : after) {
-        positions.push_back(display.x);
+        positions.emplace_back(display.x, display.y);
         paired_indices.push_back(display.driver_index);
     }
-    std::printf("  stacked above/left/center/right: center driver=%d, driver@x=",
+    std::printf("  stacked above/left/center/right: center driver=%d, driver@(x,y)=",
                 stacked_plan.center_driver);
-    for (const auto& display : after) std::printf(" %d@%d", display.driver_index, display.x);
+    for (const auto& display : after) {
+        std::printf(" %d@(%d,%d)", display.driver_index, display.x, display.y);
+    }
     std::printf("\n");
+    // The stacked screen's desktop sits directly above the centre's, so the
+    // mouse goes up into it and right into the right screen (field request
+    // 2026-11-18; it used to land at x=1920 and push the right screen out).
     check(stacked_plan.center_driver == 1 && paired_indices == std::vector<int>{3, 2, 1, 0} &&
-              positions == std::vector<int>{1920, -1920, 0, 3840},
-          "equal-yaw screens keep their binding and get four non-overlapping x slots");
+              positions == std::vector<std::pair<int, int>>{
+                               {0, -1080}, {-1920, 0}, {0, 0}, {1920, 0}},
+          "a screen stacked above the centre gets the desktop directly above it");
 
     const auto sources = gt::reusable_capture_sources(before, after);
     const auto kept = std::count_if(sources.begin(), sources.end(),
                                    [](const auto& source) { return source.has_value(); });
     std::printf("  capture reuse: kept=%td new_or_moved=%zu\n", kept,
                 after.size() - static_cast<size_t>(kept));
-    check(sources == std::vector<std::optional<size_t>>{std::nullopt, 0, 1, std::nullopt},
-          "grow reuses unchanged outputs across reorder, replacing the moved and new outputs");
+    check(sources == std::vector<std::optional<size_t>>{std::nullopt, 0, 1, 2},
+          "growing a stacked screen keeps every existing capture and opens only the new one");
 
     auto changed = before;
     changed[0].refresh_hz = 60;
@@ -353,6 +440,61 @@ int main() {
         check(planned[0].x == -1920 && planned[1].x == -3840 && planned[2].x == 0,
               "same-side screens stack by yaw closeness, not input order");
     }
+    {
+        // Vertical stacking mirrors the 3D layout (default screens: 46 x 26.9 deg).
+        using P = gt::ScreenPlacement;
+        const auto at = [](const std::vector<gt::PlannedDesktop>& planned, int driver) {
+            for (const auto& desktop : planned) {
+                if (desktop.driver_index == driver) return std::make_pair(desktop.x, desktop.y);
+            }
+            return std::make_pair(-99999, -99999);
+        };
+        const std::vector<P> stack{{0, -45.0f, 0.0f}, {1, 0.0f, 0.0f}, {2, 45.0f, 0.0f},
+                                   {3, 0.0f, 28.0f}, {4, 0.0f, -28.0f}, {5, 1.5f, 56.0f},
+                                   {6, 45.0f, 28.0f}};
+        const int center = gt::select_center_driver(stack);
+        const auto planned = gt::plan_workspace_desktops(stack, center, 1920, 1080);
+        std::printf("  stacked columns: center=%d", center);
+        for (const auto& desktop : planned) {
+            std::printf(" %d@(%d,%d)", desktop.driver_index, desktop.x, desktop.y);
+        }
+        std::printf("\n");
+        check(center == 1, "a level screen stays primary under screens stacked on it");
+        check(at(planned, 1) == std::make_pair(0, 0) && at(planned, 0) == std::make_pair(-1920, 0) &&
+                  at(planned, 2) == std::make_pair(1920, 0),
+              "the level row keeps the left/centre/right desktops");
+        check(at(planned, 3) == std::make_pair(0, -1080) && at(planned, 5) == std::make_pair(0, -2160),
+              "screens above the centre stack upward in pitch order");
+        check(at(planned, 4) == std::make_pair(0, 1080), "a screen below the centre goes below it");
+        check(at(planned, 6) == std::make_pair(1920, -1080),
+              "a screen above a side screen goes above that side's desktop");
+
+        const std::vector<P> lower_driver_above{{0, 0.0f, 30.0f}, {1, 0.0f, 0.0f}};
+        check(gt::select_center_driver(lower_driver_above) == 1,
+              "a stacked screen never wins the primary on driver order");
+        const std::vector<P> overlapping{{0, 0.0f, 0.0f}, {1, 5.0f, 3.0f}};
+        const auto side = gt::plan_workspace_desktops(overlapping, 0, 1920, 1080);
+        check(at(side, 0) == std::make_pair(0, 0) && at(side, 1) == std::make_pair(1920, 0),
+              "screens that overlap vertically stay side by side");
+        const std::vector<P> raised_side{{0, 0.0f, 0.0f}, {1, 45.0f, 30.0f}};
+        const auto raised = gt::plan_workspace_desktops(raised_side, 0, 1920, 1080);
+        check(at(raised, 1) == std::make_pair(1920, 0),
+              "a lone raised side screen is its column's base row (no gap below it)");
+        const std::vector<P> narrow{{0, 0.0f, 0.0f}, {1, 12.0f, 20.0f, 20.0f, 11.0f}};
+        const auto narrow_plan = gt::plan_workspace_desktops(narrow, 0, 1920, 1080);
+        check(at(narrow_plan, 1) == std::make_pair(1920, 0),
+              "a column needs yaws within half the narrower screen's width");
+        // A narrow screen between the centre and a screen above it must not
+        // split the stack (it opens a newer column the upper screen also
+        // could not join).
+        const std::vector<P> split{{0, 0.0f, 0.0f}, {1, 10.0f, 0.0f, 4.0f, 3.0f}, {2, 14.0f, 30.0f}};
+        const int split_center = gt::select_center_driver(split);
+        const auto split_plan = gt::plan_workspace_desktops(split, split_center, 1920, 1080);
+        check(split_center == 0 && at(split_plan, 0) == std::make_pair(0, 0) &&
+                  at(split_plan, 2) == std::make_pair(0, -1080) &&
+                  at(split_plan, 1) == std::make_pair(1920, 0),
+              "a narrow screen in between never splits a stack");
+    }
     check(gt::select_internal_display(
               {{L"\\\\.\\DISPLAY1", false, true}, {L"\\\\.\\DISPLAY2", true, false}}) ==
               L"\\\\.\\DISPLAY2",
@@ -368,7 +510,18 @@ int main() {
     test_workspace_reload("late arrival", 300, 0);
     test_workspace_reload("never arrives", 99999, 0);
     test_workspace_reload("one removal failure", 99999, 1);
-    test_workspace_reload("permanent removal failure", 99999, 3);
+    // Live 2026-11-18: shrinking 5 -> 3 needed a third attempt for the second
+    // removal (Windows still re-arranging after the first); a fourth one
+    // keeps that from being the last chance.
+    test_workspace_reload("three removal failures", 99999, 3);
+    test_workspace_reload("permanent removal failure", 99999, 4);
+
+    std::printf("vdd_selftest: laptop re-detach guard\n");
+    test_redetach("no internal panel active", false, true, true);
+    test_redetach("clean re-detach", true, true, true);
+    test_redetach("detach reports an error but lands", true, false, true);
+    test_redetach("detach rejected, panel stays attached", true, false, false);
+    test_redetach("detach call succeeds, panel stays attached", true, true, false);
 
     std::printf("vdd_selftest: aside planning\n");
     check(gt::display_rects_intersect(0, 0, 10, 10, 5, 5, 10, 10), "overlap is detected");
@@ -419,6 +572,28 @@ int main() {
         const std::vector<gt::PlannedDesktop> slots = {{0, -1920, 0}, {1, 0, 0}, {2, 1920, 0}};
         check(gt::plan_aside_moves(snapshots, slots, 1920, 1080, {L"V"}).empty(),
               "virtual displays are excluded from the aside plan");
+    }
+    {
+        // Mid-session grow to a screen stacked above the centre: its slot
+        // (0,-1080) covers the glasses' home, and the just-added VDD still sits
+        // where Windows dropped it, far right. The glasses must land flush right
+        // of the planned slots (3840), not past the stray VDD (5760).
+        const std::vector<gt::DisplayModeSnapshot> snapshots = {
+            make_snapshot(L"V0", -1920, 0, 1920, 1080, false),
+            make_snapshot(L"V1", 0, 0, 1920, 1080, true),
+            make_snapshot(L"V2", 1920, 0, 1920, 1080, false),
+            make_snapshot(L"V3", 3840, 0, 1920, 1080, false),
+            make_snapshot(L"GLASSES", 457, -1080, 1920, 1080, false),
+        };
+        const std::vector<gt::PlannedDesktop> slots = {
+            {0, -1920, 0}, {1, 0, 0}, {2, 1920, 0}, {3, 0, -1080}};
+        const auto moves =
+            gt::plan_aside_moves(snapshots, slots, 1920, 1080, {L"V0", L"V1", L"V2", L"V3"});
+        std::printf("  stacked grow aside: %zu move(s)%s%d\n", moves.size(),
+                    moves.empty() ? "" : " glasses x=", moves.empty() ? 0 : moves[0].x);
+        check(moves.size() == 1 && moves[0].device_name == L"GLASSES" && moves[0].x == 3840 &&
+                  moves[0].y == 0,
+              "a stacked slot moves the glasses flush right of the slots, ignoring stray VDDs");
     }
 
     std::printf("vdd_selftest: window migration\n");

@@ -168,6 +168,13 @@ Drag screens on the 2D map, or switch to **3D** (optionally fullscreen) to drag 
 orbit the view. Nothing is written until **Save and apply** (<kbd>Ctrl</kbd>+<kbd>S</kbd>), which
 also reloads the running engine; **Revert** discards unsaved edits.
 
+**Stacked screens.** A screen placed directly above (or below) another one, at about the same
+yaw, becomes a Windows desktop directly above (or below) it. The mouse follows the layout: move
+it up off the top edge of the centre screen to reach the screen above it, and move it right to
+reach the right screen. Screens side by side stay in one row. Windows briefly re-attaches the
+laptop panel whenever a screen is added or removed while the workspace runs; the engine detaches
+it again within about a second and keeps your windows on the centre screen.
+
 **Comfort.** Reading stabilisation: Off, Low, Medium (default), High, Ultra. Screen dimming: Off,
 Manual (a brightness slider per screen) or Focus (the screen you look at stays bright, the
 others fade). Night tint warms every screen, with a warmth slider. All apply live.

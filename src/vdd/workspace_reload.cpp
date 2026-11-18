@@ -1,6 +1,7 @@
 #include "vdd/workspace_reload.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <numeric>
 
@@ -24,17 +25,23 @@ bool plan_workspace_for_layout(const Layout& layout, const std::vector<int>& dri
         error = "capture binding requires one virtual display per layout screen";
         return false;
     }
-    std::vector<std::pair<int, float>> driver_yaw;
+    constexpr float kRadToDeg = 57.29577951f;
+    std::vector<ScreenPlacement> placements;
     const auto order = layout_screen_order(layout);
     for (size_t rank = 0; rank < order.size(); ++rank) {
-        driver_yaw.emplace_back(driver_indices[rank], layout.screens[order[rank]].yaw_deg);
+        const ScreenLayout& screen = layout.screens[order[rank]];
+        // Layout validation keeps distance >= 0.25 m and sizes >= 0.1 m.
+        placements.push_back(
+            {driver_indices[rank], screen.yaw_deg, screen.pitch_deg,
+             2.0f * std::atan(0.5f * screen.width_m / screen.distance_m) * kRadToDeg,
+             2.0f * std::atan(0.5f * screen.height_m / screen.distance_m) * kRadToDeg});
     }
-    plan.center_driver = select_center_driver(driver_yaw);
+    plan.center_driver = select_center_driver(placements);
     if (plan.center_driver < 0) {
         error = "no virtual displays bound";
         return false;
     }
-    plan.desktops = plan_workspace_desktops(driver_yaw, plan.center_driver, 1920);
+    plan.desktops = plan_workspace_desktops(placements, plan.center_driver, 1920, 1080);
     return true;
 }
 
