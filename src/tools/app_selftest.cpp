@@ -936,6 +936,29 @@ void test_session_logs(const std::filesystem::path& directory) {
               !std::filesystem::exists(directory / "evil"),
           "the fallback archive is published beside the earlier one");
 
+    // Files held open by another process (a scanner) cannot move: the marker
+    // is kept, so the verdict survives until a later start can stage them.
+    write_session_files(log_dir, "locked");
+    check(gt::mark_session_failed(log_dir, failed_stem, "locked", error), "marker written");
+    std::vector<HANDLE> locks;
+    for (const std::string& name : gt::session_log_names()) {
+        locks.push_back(CreateFileW((log_dir / name).c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr));
+    }
+    check(!gt::stage_failed_session_logs(log_dir, staged_stem, error) && !error.empty() &&
+              std::filesystem::exists(log_dir / gt::kFailedSessionMarker),
+          "a staging error keeps the failure marker");
+    for (HANDLE lock : locks) {
+        if (lock != INVALID_HANDLE_VALUE) {
+            CloseHandle(lock);
+        }
+    }
+    check(gt::stage_failed_session_logs(log_dir, staged_stem, error) && error.empty() &&
+              gt::is_failed_session_archive_name(staged_stem + ".zip") &&
+              gt::run_session_archiver(archive_dir) == 0 &&
+              std::filesystem::exists(archive_dir / (staged_stem + ".zip")),
+          "once released, the kept failure is archived (a published stem is stepped past)");
+
     // A marker whose files were removed by hand stages nothing and is dropped.
     check(gt::mark_session_failed(log_dir, failed_stem, "gone", error), "marker written");
     check(!gt::stage_failed_session_logs(log_dir, staged_stem, error) && error.empty() &&

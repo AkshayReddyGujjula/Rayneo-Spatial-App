@@ -165,6 +165,7 @@ bool start_engine(AppState& state, LaunchMode mode, std::wstring& error) {
     // unless it failed. A failed session's files stayed in place for
     // diagnosis (or were left by a controller that has since restarted):
     // keep them as a failed-session archive before the directory is cleared.
+    bool keep_failed_logs = false;
     {
         std::string failed_stem;
         std::string failed_error;
@@ -180,10 +181,16 @@ bool start_engine(AppState& state, LaunchMode mode, std::wstring& error) {
                                 wide_from_utf8(failed_error) + L"); they are archived at the next start");
             }
         } else if (!failed_error.empty()) {
-            state.add_event(L"failed session's logs not archived: " + wide_from_utf8(failed_error));
+            // Nothing could be moved: keep the files (this session appends
+            // to them) rather than clear the failure away; the marker stays.
+            keep_failed_logs = true;
+            state.add_event(L"failed session's logs not archived (" + wide_from_utf8(failed_error) +
+                            L"); kept in logs\\ and retried at the next start");
         }
     }
-    clear_session_logs(state.paths.log_dir);
+    if (!keep_failed_logs) {
+        clear_session_logs(state.paths.log_dir);
+    }
 
     const bool head_tracking =
         mode == LaunchMode::Workspace ||

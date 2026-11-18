@@ -341,8 +341,12 @@ bool stage_failed_session_logs(const std::filesystem::path& log_dir, std::string
         ++when;
     }
     if (!stage_session_logs(log_dir, stem, error)) {
-        // Nothing left to keep (the files were removed by hand).
-        std::filesystem::remove(marker, fs_error);
+        // Nothing left to keep (the files were removed by hand): drop the
+        // marker. A move that failed (a scanner holding a file) keeps it, so
+        // the verdict survives for the next attempt.
+        if (error.empty()) {
+            std::filesystem::remove(marker, fs_error);
+        }
         stem.clear();
         return false;
     }
