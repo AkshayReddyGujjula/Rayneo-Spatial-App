@@ -8,6 +8,7 @@
 #include "render/renderer.h"
 #include "vdd/display_config.h"
 #include "vdd/vdd_client.h"
+#include "vdd/workspace_reload.h"
 #include "util/utf8_path.h"
 
 #include <windows.h>
@@ -27,7 +28,6 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <numeric>
 #include <string>
 #include <thread>
 #include <vector>
@@ -715,67 +715,47 @@ struct TopologyGuard {
     }
 };
 
-struct WorkspacePlan {
-    std::vector<std::pair<int, float>> driver_yaw;  // rank order
-    int center_driver = -1;
-    std::vector<gt::PlannedDesktop> desktops;
+struct ScreenCapture {
+    gt::ConfiguredDisplay display;
+    std::unique_ptr<gt::DesktopDuplicator> duplicator;
+    bool output_removed = false;
 };
-
-// Maps layout screens (by vdd_index) onto created driver indices in bind rank
-// order, then plans the desktop arrangement: center primary, yaw-ordered sides.
-bool plan_workspace_for_layout(const gt::Layout& layout, const std::vector<int>& driver_indices,
-                               WorkspacePlan& plan, std::string& error) {
-    if (layout.screens.size() != driver_indices.size()) {
-        error = "capture binding requires one virtual display per layout screen";
-        return false;
-    }
-    std::vector<size_t> order(layout.screens.size());
-    std::iota(order.begin(), order.end(), 0);
-    std::sort(order.begin(), order.end(), [&](size_t left, size_t right) {
-        return layout.screens[left].vdd_index < layout.screens[right].vdd_index;
-    });
-    plan.driver_yaw.clear();
-    for (size_t rank = 0; rank < order.size(); ++rank) {
-        plan.driver_yaw.emplace_back(driver_indices[rank],
-                                     layout.screens[order[rank]].yaw_deg);
-    }
-    plan.center_driver = gt::select_center_driver(plan.driver_yaw);
-    if (plan.center_driver < 0) {
-        error = "no virtual displays bound";
-        return false;
-    }
-    plan.desktops = gt::plan_workspace_desktops(plan.driver_yaw, plan.center_driver, 1920);
-    return true;
-}
-
-std::map<int, std::wstring> vdd_device_names() {
-    std::map<int, std::wstring> names;
-    for (const gt::VirtualDisplayInfo& info : gt::enumerate_virtual_displays()) {
-        names[info.driver_index] = info.device_name;
-    }
-    return names;
-}
 
 bool bind_desktop_captures(
     gt::Renderer& renderer, const gt::Layout& layout,
     const std::vector<gt::ConfiguredDisplay>& displays,
-    std::vector<std::unique_ptr<gt::DesktopDuplicator>>& captures, std::string& error) {
+    std::vector<ScreenCapture>& captures, std::string& error, bool update_layout = false) {
     if (layout.screens.size() != displays.size()) {
         error = "capture binding requires one virtual display per layout screen";
         return false;
     }
-    std::vector<size_t> logical_order(layout.screens.size());
-    std::iota(logical_order.begin(), logical_order.end(), 0);
-    std::sort(logical_order.begin(), logical_order.end(), [&](size_t left, size_t right) {
-        return layout.screens[left].vdd_index < layout.screens[right].vdd_index;
-    });
+    const auto next = gt::bind_displays_to_screens(layout, displays);
+    std::vector<gt::ConfiguredDisplay> previous;
+    previous.reserve(captures.size());
+    for (const auto& capture : captures) {
+        previous.push_back(capture.duplicator && !capture.output_removed
+                               ? capture.display : gt::ConfiguredDisplay{});
+    }
+    const auto sources = gt::reusable_capture_sources(previous, next);
 
-    std::vector<std::unique_ptr<gt::DesktopDuplicator>> candidate(layout.screens.size());
-    for (size_t rank = 0; rank < logical_order.size(); ++rank) {
-        const size_t screen_index = logical_order[rank];
+    std::vector<ScreenCapture> candidate(next.size());
+    for (size_t screen_index = 0; screen_index < next.size(); ++screen_index) {
+        const auto& display = next[screen_index];
+        candidate[screen_index].display = display;
+        if (sources[screen_index]) continue;
+
+        // This output changed mode or identity. DXGI permits one duplication
+        // per output here. Release only the conflicting capture, which the
+        // workspace rollback will rebind if preparation or layout setup fails.
+        for (auto& capture : captures) {
+            if (capture.duplicator &&
+                _wcsicmp(capture.display.device_name.c_str(), display.device_name.c_str()) == 0) {
+                capture.duplicator.reset();
+            }
+        }
         auto duplicator = std::make_unique<gt::DesktopDuplicator>();
         if (!duplicator->initialize(renderer.device(), renderer.context(),
-                                    displays[rank].device_name, error)) {
+                                    display.device_name, error)) {
             error = "capture binding for screen '" + layout.screens[screen_index].id +
                     "' failed: " + error;
             return false;
@@ -784,7 +764,11 @@ bool bind_desktop_captures(
             std::printf("  screen '%s': DXGI unavailable, using CPU GDI capture fallback\n",
                         layout.screens[screen_index].id.c_str());
         }
-        candidate[screen_index] = std::move(duplicator);
+        candidate[screen_index].duplicator = std::move(duplicator);
+    }
+    if (update_layout && !renderer.set_layout(layout, error, sources)) return false;
+    for (size_t i = 0; i < sources.size(); ++i) {
+        if (sources[i]) candidate[i].duplicator = std::move(captures[*sources[i]].duplicator);
     }
     captures = std::move(candidate);
     return true;
@@ -794,7 +778,7 @@ bool bind_desktop_captures(
 // layout screen nearest straight ahead. Its monitor is re-resolved by device
 // name at use time, because display churn can move desktops after binding.
 void move_cursor_to_center_screen(const gt::Layout& layout,
-                                  const std::vector<std::unique_ptr<gt::DesktopDuplicator>>& captures) {
+                                  const std::vector<ScreenCapture>& captures) {
     if (captures.empty() || captures.size() != layout.screens.size()) {
         std::printf("  cursor to centre: no captured desktops in this mode\n");
         return;
@@ -808,7 +792,7 @@ void move_cursor_to_center_screen(const gt::Layout& layout,
             best = i;
         }
     }
-    if (!captures[best]) {
+    if (!captures[best].duplicator) {
         std::printf("  cursor to centre: centre screen has no capture\n");
         return;
     }
@@ -816,7 +800,7 @@ void move_cursor_to_center_screen(const gt::Layout& layout,
         const std::wstring* name;
         RECT rect;
         bool found;
-    } search{&captures[best]->output_name(), RECT{}, false};
+    } search{&captures[best].display.device_name, RECT{}, false};
     EnumDisplayMonitors(
         nullptr, nullptr,
         [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
@@ -962,7 +946,6 @@ int wmain(int argc, wchar_t** argv) {
 
     gt::VddClient vdd;
     std::vector<gt::ConfiguredDisplay> virtual_displays;
-    WorkspacePlan workspace_plan;
     TopologyGuard topology_guard;
     gt::WorkspaceTopology workspace_topo;
     if (opt.virtual_displays) {
@@ -970,7 +953,7 @@ int wmain(int argc, wchar_t** argv) {
         publish_status(g_status);
         std::string vdd_error;
         std::wstring internal_display;
-        WorkspacePlan plan;
+        gt::WorkspacePlan plan;
         // The pristine arrangement is captured before the VDDs exist:
         // connecting reshuffles it, and the restore pins exactly this back.
         std::vector<gt::DisplayModeSnapshot> pristine;
@@ -1065,7 +1048,7 @@ int wmain(int argc, wchar_t** argv) {
             started = vdd.connect(layout.screens.size(), vdd_error);
         }
         if (started) {
-            started = plan_workspace_for_layout(layout, vdd.display_indices(), plan, vdd_error);
+            started = gt::plan_workspace_for_layout(layout, vdd.display_indices(), plan, vdd_error);
         }
         if (started) {
             started = gt::apply_workspace_topology(
@@ -1074,6 +1057,8 @@ int wmain(int argc, wchar_t** argv) {
         }
         if (!started) {
             std::printf("virtual display startup failed: %s\n", vdd_error.c_str());
+            std::printf("display landscape at failure:\n%s",
+                        gt::describe_display_landscape().c_str());
             if (vdd.connected()) {
                 std::printf("if the laptop display looks wrong, use the controller's Recover "
                             "displays or press Win+P (Extend)\n");
@@ -1093,7 +1078,6 @@ int wmain(int argc, wchar_t** argv) {
         topology_guard.arm(std::move(workspace_topo));
         g_topology_takeover = true;
         g_status.detached = !internal_display.empty();
-        workspace_plan = plan;
         std::printf("created %zu virtual displays (Parsec VDD version %d)\n",
                     virtual_displays.size(), vdd.driver_version());
         for (const auto& display : virtual_displays) {
@@ -1311,10 +1295,11 @@ int wmain(int argc, wchar_t** argv) {
     g_status.phase_progress = opt.no_imu ? 1.0f : 0.0f;
     publish_status(g_status);
 
-    std::vector<std::unique_ptr<gt::DesktopDuplicator>> captures;
+    std::vector<ScreenCapture> captures;
     if (opt.virtual_displays &&
         !bind_desktop_captures(renderer, layout, virtual_displays, captures, error)) {
         std::printf("desktop capture startup failed: %s\n", error.c_str());
+        std::printf("display landscape at failure:\n%s", gt::describe_display_landscape().c_str());
         g_status.state = gt::kStatusFailed;
         g_status.error = gt::engine_status_sanitize("desktop capture startup failed: " + error);
         publish_status(g_status);
@@ -1436,54 +1421,55 @@ int wmain(int argc, wchar_t** argv) {
             if (mtime_changed || force_layout_reload) {
                 gt::Layout candidate;
                 std::string reload_error;
-                const size_t previous_display_count = layout.screens.size();
-                bool displays_changed = false;
-                bool plan_changed = false;
-                bool renderer_changed = false;
-                const WorkspacePlan previous_plan = workspace_plan;
-                WorkspacePlan reload_plan;
-                std::vector<std::unique_ptr<gt::DesktopDuplicator>> candidate_captures;
-                bool reload_ok = gt::load_layout(opt.layout_path, candidate, reload_error);
+                std::string rollback_error;
+                const bool loaded = gt::load_layout(opt.layout_path, candidate, reload_error);
+                bool reload_ok = loaded;
                 if (reload_ok && opt.virtual_displays) {
-                    displays_changed = candidate.screens.size() != previous_display_count;
-                    if (displays_changed) {
-                        reload_ok = vdd.resize(candidate.screens.size(), reload_error);
-                    }
-                    if (reload_ok &&
-                        plan_workspace_for_layout(candidate, vdd.display_indices(), reload_plan,
-                                                  reload_error)) {
-                        if (reload_plan.desktops != workspace_plan.desktops ||
-                            reload_plan.center_driver != workspace_plan.center_driver) {
-                            reload_ok = gt::reposition_virtual_displays(
-                                reload_plan.desktops, vdd_device_names(), reload_plan.center_driver,
-                                1920, 1080, 120, virtual_displays, reload_error);
-                            plan_changed = reload_ok;
-                        }
-                    } else {
-                        reload_ok = false;
-                    }
-                }
-                if (reload_ok) {
+                    const gt::WorkspaceReloadOps ops{
+                        [&]() -> const std::vector<int>& { return vdd.display_indices(); },
+                        [&](size_t count, std::string& detail) {
+                            const bool resized = vdd.resize(count, detail);
+                            const auto& indices = vdd.display_indices();
+                            for (auto& capture : captures) {
+                                if (std::find(indices.begin(), indices.end(),
+                                              capture.display.driver_index) == indices.end()) {
+                                    capture.output_removed = true;
+                                }
+                            }
+                            return resized;
+                        },
+                        gt::wait_for_virtual_displays,
+                        [](const gt::WorkspacePlan& plan, const std::map<int, std::wstring>& names,
+                           std::vector<gt::ConfiguredDisplay>& displays, std::string& detail) {
+                            return gt::reposition_virtual_displays(
+                                plan.desktops, names, plan.center_driver, 1920, 1080, 120,
+                                displays, detail);
+                        },
+                        [&](const auto& displays, std::string& detail) {
+                            return bind_desktop_captures(renderer, candidate, displays, captures,
+                                                         detail, true);
+                        },
+                        [&](const auto& displays, std::string& detail) {
+                            return bind_desktop_captures(renderer, layout, displays, captures, detail);
+                        },
+                    };
+                    status_heartbeat.start();
+                    reload_ok = gt::reload_workspace(layout, candidate, virtual_displays, ops,
+                                                     reload_error, rollback_error);
+                    status_heartbeat.stop();
+                } else if (reload_ok) {
                     reload_ok = renderer.set_layout(candidate, reload_error);
-                    renderer_changed = reload_ok;
                 }
-                if (reload_ok && opt.virtual_displays) {
-                    reload_ok = bind_desktop_captures(renderer, candidate, virtual_displays,
-                                                      candidate_captures, reload_error);
+                // Retry a torn read, but don't keep resizing for the same
+                // valid, rejected file. A new save or explicit request retries.
+                if (loaded && !time_error) {
+                    layout_write_time = write_time;
+                    layout_time_error.clear();
                 }
                 if (reload_ok) {
-                    // Only a successful load advances the watermark: a torn
-                    // read (possible from non-atomic hand edits) is retried
-                    // on the next check instead of being forgotten.
-                    if (!time_error) {
-                        layout_write_time = write_time;
-                        layout_time_error.clear();
-                    }
                     layout = std::move(candidate);
                     if (opt.virtual_displays) {
-                        captures = std::move(candidate_captures);
                         capture_states.assign(captures.size(), CaptureTierState{});
-                        workspace_plan = reload_plan;
                     }
                     if (!opt.fov_explicit) {
                         opt.fov = layout.fov_deg;
@@ -1493,37 +1479,15 @@ int wmain(int argc, wchar_t** argv) {
                     g_status.screens = state.screen_count;
                     publish_status(g_status);
                 } else {
-                    if (renderer_changed) {
-                        std::string renderer_rollback_error;
-                        if (!renderer.set_layout(layout, renderer_rollback_error)) {
-                            std::printf("renderer layout rollback failed: %s\n",
-                                        renderer_rollback_error.c_str());
-                            engine_failed = true;
-                            fatal_detail =
-                                "renderer layout rollback failed: " + renderer_rollback_error;
-                            state.quit = true;
-                        }
-                    }
-                    if (opt.virtual_displays && (displays_changed || plan_changed)) {
-                        std::string rollback_error;
-                        if (!vdd.resize(previous_display_count, rollback_error) ||
-                            !gt::reposition_virtual_displays(
-                                previous_plan.desktops, vdd_device_names(),
-                                previous_plan.center_driver, 1920, 1080, 120, virtual_displays,
-                                rollback_error)) {
-                            std::printf("virtual display rollback failed: %s\n",
-                                        rollback_error.c_str());
-                            engine_failed = true;
-                            fatal_detail = "virtual display rollback failed: " + rollback_error;
-                            state.quit = true;
-                        } else if (!bind_desktop_captures(renderer, layout, virtual_displays,
-                                                          captures, rollback_error)) {
-                            std::printf("desktop capture rollback failed: %s\n",
-                                        rollback_error.c_str());
-                            engine_failed = true;
-                            fatal_detail = "desktop capture rollback failed: " + rollback_error;
-                            state.quit = true;
-                        }
+                    if (!rollback_error.empty()) {
+                        std::printf("layout reload failed: %s\n", reload_error.c_str());
+                        std::printf("%s\n", rollback_error.c_str());
+                        std::printf("display landscape at failure:\n%s",
+                                    gt::describe_display_landscape().c_str());
+                        engine_failed = true;
+                        fatal_detail = rollback_error;
+                        state.quit = true;
+                        break;
                     }
                     std::printf("layout reload ignored: %s\n", reload_error.c_str());
                 }
@@ -1597,7 +1561,8 @@ int wmain(int argc, wchar_t** argv) {
 
             gt::CapturedDesktop captured;
             std::string capture_error;
-            const gt::CapturePollResult result = captures[screen_index]->poll(captured, capture_error);
+            const gt::CapturePollResult result =
+                captures[screen_index].duplicator->poll(captured, capture_error);
             if (result == gt::CapturePollResult::Failed) {
                 if (elapsed >= next_capture_error_log) {
                     std::printf("desktop capture failed for screen '%s': %s\n",

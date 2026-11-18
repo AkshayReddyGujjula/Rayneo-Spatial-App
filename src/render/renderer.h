@@ -13,6 +13,8 @@
 #include <cstdint>
 #include <cstddef>
 #include <array>
+#include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -44,7 +46,8 @@ class Renderer {
 public:
     bool init(HWND hwnd, uint32_t width, uint32_t height, std::string& error);
     void shutdown();
-    bool set_layout(const Layout& layout, std::string& error);
+    bool set_layout(const Layout& layout, std::string& error,
+                    std::span<const std::optional<size_t>> capture_sources = {});
     bool set_screen_texture(size_t screen_index, ID3D11ShaderResourceView* texture,
                             std::string& error);
     bool update_screen_cursor(size_t screen_index, const CursorUpdate& update,

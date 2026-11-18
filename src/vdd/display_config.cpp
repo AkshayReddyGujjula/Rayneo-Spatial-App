@@ -161,6 +161,8 @@ std::vector<VirtualDisplayInfo> enumerate_virtual_displays() {
                     info.driver_index = driver_index;
                     info.device_name = adapter.DeviceName;
                     info.device_id = id;
+                    info.adapter_flags = adapter.StateFlags;
+                    info.monitor_flags = monitor.StateFlags;
                     info.active = (adapter.StateFlags & DISPLAY_DEVICE_ACTIVE) != 0 &&
                                   (monitor.StateFlags & DISPLAY_DEVICE_ACTIVE) != 0;
                     // Disconnects leave registry ghosts behind that carry the
@@ -188,27 +190,68 @@ std::vector<VirtualDisplayInfo> enumerate_virtual_displays() {
 }
 
 bool wait_for_virtual_displays(const std::vector<int>& driver_indices, int timeout_ms,
-                               std::vector<VirtualDisplayInfo>& displays, std::string& error) {
+                               const char* phase, std::vector<VirtualDisplayInfo>& displays,
+                               std::string& error) {
+    using Clock = std::chrono::steady_clock;
+    using namespace std::chrono_literals;
     const std::set<int> expected(driver_indices.begin(), driver_indices.end());
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    do {
+    const auto start = Clock::now();
+    const auto deadline = start + std::chrono::milliseconds(timeout_ms);
+    std::map<int, long long> first_active_ms;
+    for (;;) {
         displays = enumerate_virtual_displays();
+        const auto now = Clock::now();
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
         std::set<int> found;
         for (const VirtualDisplayInfo& display : displays) {
-            if (expected.contains(display.driver_index) && display.active) {
+            if (expected.contains(display.driver_index) && display.active &&
+                !display.device_name.empty()) {
                 found.insert(display.driver_index);
+                first_active_ms.try_emplace(display.driver_index, elapsed);
             }
         }
         if (found == expected) {
             std::erase_if(displays, [&](const VirtualDisplayInfo& display) {
                 return !expected.contains(display.driver_index);
             });
+            std::printf("  VDD wait (%s): ready in %lld ms", phase, elapsed);
+            for (const auto& [index, first_ms] : first_active_ms) {
+                std::printf(" [%d]=%lld ms", index, first_ms);
+            }
+            std::printf("\n");
             return true;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    } while (std::chrono::steady_clock::now() < deadline);
-    error = "timed out waiting for the Parsec virtual displays to enumerate";
+        if (now >= deadline) {
+            std::printf("  VDD wait (%s): timed out after %lld ms\n", phase, elapsed);
+            for (int index : expected) {
+                const auto entry = std::find_if(displays.begin(), displays.end(),
+                    [index](const VirtualDisplayInfo& info) { return info.driver_index == index; });
+                const bool present = entry != displays.end();
+                std::printf("  VDD[%d]: found=%s device=%ls adapter_flags=0x%08lx "
+                            "monitor_flags=0x%08lx active=%s elapsed_ms=%lld\n",
+                            index, present ? "yes" : "no",
+                            present && !entry->device_name.empty() ? entry->device_name.c_str() : L"-",
+                            present ? entry->adapter_flags : 0UL,
+                            present ? entry->monitor_flags : 0UL,
+                            present && entry->active ? "yes" : "no", elapsed);
+            }
+            break;
+        }
+        std::this_thread::sleep_until(std::min(deadline, now + 100ms));
+    }
+    error = std::string("timed out waiting for active Parsec virtual displays (") + phase + ")";
     return false;
+}
+
+std::map<int, std::wstring> active_virtual_display_names(
+    const std::vector<VirtualDisplayInfo>& displays) {
+    std::map<int, std::wstring> names;
+    for (const auto& display : displays) {
+        if (display.active && !display.device_name.empty()) {
+            names.emplace(display.driver_index, display.device_name);
+        }
+    }
+    return names;
 }
 
 bool wait_for_no_virtual_displays(int timeout_ms) {
@@ -991,16 +1034,11 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
     // exposes its mode list once Windows has attached it. The name map is
     // rebuilt from that same active set, never from a pre-wait enumeration
     // that may still point at registry ghosts.
-    std::map<int, std::wstring> device_names;
-    {
-        std::vector<VirtualDisplayInfo> enumerated;
-        if (!wait_for_virtual_displays(indices, 5000, enumerated, error)) {
-            return false;
-        }
-        for (const VirtualDisplayInfo& display : enumerated) {
-            device_names[display.driver_index] = display.device_name;
-        }
+    std::vector<VirtualDisplayInfo> enumerated;
+    if (!wait_for_virtual_displays(indices, kVirtualDisplayWaitMs, "startup", enumerated, error)) {
+        return false;
     }
+    const auto device_names = active_virtual_display_names(enumerated);
     const std::set<std::wstring> vdd_devices = virtual_device_names();
 
     struct StagedMode {
@@ -1081,6 +1119,8 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
     HWND focus_window = GetForegroundWindow();
     bool touched = false;
     const auto rollback = [&]() {
+        std::printf("display landscape before startup rollback:\n%s",
+                    describe_display_landscape().c_str());
         // A failed stage/commit leaves its batch pending system-wide, where it
         // would poison the restore commits below; flush it first (a no-op when
         // the pending set is already empty).
@@ -1136,7 +1176,8 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
     }
     {
         std::vector<VirtualDisplayInfo> active;
-        if (!wait_for_virtual_displays(indices, 5000, active, error)) {
+        if (!wait_for_virtual_displays(indices, kVirtualDisplayWaitMs, "startup after positioning",
+                                       active, error)) {
             rollback();
             return false;
         }
@@ -1291,14 +1332,17 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
         std::wstring device;
         DEVMODEW mode;
         bool primary = false;
+        bool needs_change = false;
         int driver = -1;
         int hz = 0;
         int x = 0;
+        int y = 0;
     };
     std::vector<StagedMode> staged;
     staged.reserve(planned.size());
     std::vector<DisplayModeSnapshot> snapshots;
     snapshots.reserve(planned.size());
+    bool primary_changed = false;
     for (const PlannedDesktop& desktop : planned) {
         const auto name = device_names.find(desktop.driver_index);
         if (name == device_names.end() || name->second.empty()) {
@@ -1315,7 +1359,6 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
         snapshot.device_name = name->second;
         snapshot.mode = previous;
         snapshot.primary = adapter_is_primary(name->second);
-        snapshots.push_back(std::move(snapshot));
         const int refresh = choose_refresh_rate(refresh_rates(name->second, width, height),
                                                 preferred_hz);
         if (refresh == 0) {
@@ -1337,12 +1380,22 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
         item.driver = desktop.driver_index;
         item.hz = refresh;
         item.x = desktop.x;
+        item.y = desktop.y;
+        primary_changed = primary_changed || (item.primary && !snapshot.primary);
+        item.needs_change = snapshot.primary != item.primary ||
+                            previous.dmPelsWidth != mode.dmPelsWidth ||
+                            previous.dmPelsHeight != mode.dmPelsHeight ||
+                            previous.dmDisplayFrequency != mode.dmDisplayFrequency ||
+                            previous.dmPosition.x != mode.dmPosition.x ||
+                            previous.dmPosition.y != mode.dmPosition.y;
+        snapshots.push_back(std::move(snapshot));
         staged.push_back(item);
     }
     // The new center stages first (same primary-first rule as the takeover).
+    // When the primary moves, stage every position relative to the new origin.
     for (bool want_primary : {true, false}) {
         for (const StagedMode& item : staged) {
-            if (item.primary != want_primary) {
+            if ((!primary_changed && !item.needs_change) || item.primary != want_primary) {
                 continue;
             }
             DEVMODEW mode = item.mode;
@@ -1360,8 +1413,9 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
             }
         }
     }
-    if (ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr) !=
-        DISP_CHANGE_SUCCESSFUL) {
+    if (std::any_of(staged.begin(), staged.end(), [](const StagedMode& item) {
+            return item.needs_change;
+        }) && commit_display_changes() != DISP_CHANGE_SUCCESSFUL) {
         error = "Windows failed to commit the virtual display arrangement";
         if (!commit_topology_snapshots(snapshots)) {
             error += "; restoring the previous display modes also failed";
@@ -1372,7 +1426,7 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
     candidate.reserve(staged.size());
     for (const StagedMode& item : staged) {
         candidate.push_back(
-            ConfiguredDisplay{item.driver, item.device, width, height, item.hz, item.x, 0});
+            ConfiguredDisplay{item.driver, item.device, width, height, item.hz, item.x, item.y});
     }
     configured = std::move(candidate);
     return true;

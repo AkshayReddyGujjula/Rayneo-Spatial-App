@@ -72,6 +72,29 @@ Streaming persists after the host process exits; send `66 02` to stop it (or re-
 - Whether magnetometer samples are fresh every report or cached.
 - Long-session thermal bias behaviour on the final worn-glasses build.
 
+## Workspace display reload
+
+The Parsec add IOCTL returns a driver index before Windows is guaranteed to expose
+an active GDI output. Startup and layout reload wait up to 5000 ms for the full
+set of active, named outputs before positioning. Rollback repeats that wait
+against the restored indices. Positioning uses names from the successful wait.
+The `VDD wait` log reports when each index first became active relative to the
+start of that wait. On timeout it prints the last device name, adapter and monitor
+flags, and active state for every expected index. Fatal startup or reload errors
+include the Windows display landscape.
+
+A failed grow gives newly added indices another bounded wait before removing
+them. Removal failures log the IOCTL error on each attempt. The selftest exercises
+one transient failure (250 ms backoff) and exhausted retries (250 and 750 ms).
+After a successful rollback the engine keeps the previous layout. A new save or
+an explicit reload request can retry a rejected edit. If rollback itself fails,
+the engine reports the failure and exits through the normal display restore path.
+
+A layout edit keeps the capture and its last displayed frame for any output whose
+identity, position and mode still match. A changed output can require releasing
+its old duplication before opening a replacement. If the edit then fails, the
+rollback rebinds that output. DXGI fallbacks log the failing operation and HRESULT.
+
 ## Fusion notes (live-verified)
 
 - **Yaw has no absolute reference.** With the magnetometer off, a very slow steady

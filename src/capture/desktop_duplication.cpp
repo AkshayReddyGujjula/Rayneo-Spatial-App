@@ -89,8 +89,11 @@ bool DesktopDuplicator::create_duplication(std::string& error) {
 
     ComPtr<IDXGIOutput1> output1;
     result = matched.As(&output1);
+    const char* operation = SUCCEEDED(result) ? "DuplicateOutput" : "querying IDXGIOutput1";
     if (SUCCEEDED(result)) result = output1->DuplicateOutput(device_.Get(), &duplication_);
     if (FAILED(result)) {
+        std::printf("  capture output %ls: %s, using CPU GDI capture fallback\n",
+                    output_name_.c_str(), hresult_text(operation, result).c_str());
         backend_ = CaptureBackend::GdiFallback;
         return ensure_gdi_texture(error);
     }

@@ -488,7 +488,8 @@ bool Renderer::init(HWND hwnd, uint32_t width, uint32_t height, std::string& err
     return set_layout(default_layout(), error);
 }
 
-bool Renderer::set_layout(const Layout& layout, std::string& error) {
+bool Renderer::set_layout(const Layout& layout, std::string& error,
+                          std::span<const std::optional<size_t>> capture_sources) {
     if (!device_ || !context_ || !vertex_buffer_) {
         error = "renderer is not initialized";
         return false;
@@ -502,8 +503,15 @@ bool Renderer::set_layout(const Layout& layout, std::string& error) {
 
     std::vector<ScreenDraw> new_draws;
     new_draws.reserve(layout.screens.size());
-    for (const ScreenLayout& screen : layout.screens) {
+    for (size_t i = 0; i < layout.screens.size(); ++i) {
+        const ScreenLayout& screen = layout.screens[i];
         ScreenDraw draw;
+        // A reused capture may have no new frame on a quiet desktop. Carry
+        // its last texture and cursor along with it, including across a reorder.
+        if (i < capture_sources.size() && capture_sources[i] &&
+            *capture_sources[i] < screen_draws_.size()) {
+            draw = screen_draws_[*capture_sources[i]];
+        }
         draw.vertex_start = static_cast<UINT>(vertices.size());
         draw.layout = screen;
         if (!create_label_texture(device_.Get(), screen, draw.label_texture)) {
