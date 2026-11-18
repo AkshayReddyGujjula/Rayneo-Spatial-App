@@ -95,6 +95,18 @@ identity, position and mode still match. A changed output can require releasing
 its old duplication before opening a replacement. If the edit then fails, the
 rollback rebinds that output. DXGI fallbacks log the failing operation and HRESULT.
 
+The renderer's D3D11 device keeps the DXGI adapter object from its creation, and
+that object's `EnumOutputs` list is a snapshot: a virtual display added later by a
+reload is missing from it. Capture therefore falls back to a fresh
+`CreateDXGIFactory1` and re-enumerates the adapter with the same LUID before
+giving up ("the capture output is not owned by the renderer's D3D11 adapter").
+
+The remove IOCTL timeout is 5000 ms (the same as add). Measured live on
+2026-11-18: a mid-session removal completes in under 250 ms, but each removal
+during the shutdown restore takes about 3.0 s, so the old 1000 ms timeout failed
+with Windows error 258 and left displays alive while the laptop panel was being
+restored. Removals taking 250 ms or more are logged as `VDD remove <n> took <ms> ms`.
+
 ## Fusion notes (live-verified)
 
 - **Yaw has no absolute reference.** With the magnetometer off, a very slow steady

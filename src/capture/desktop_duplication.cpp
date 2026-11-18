@@ -58,20 +58,53 @@ bool DesktopDuplicator::create_duplication(std::string& error) {
     const std::wstring expected = lowercase(output_name_);
     ComPtr<IDXGIOutput> matched;
     DXGI_OUTPUT_DESC matched_description{};
-    for (UINT index = 0;; ++index) {
-        ComPtr<IDXGIOutput> output;
-        result = adapter->EnumOutputs(index, &output);
-        if (result == DXGI_ERROR_NOT_FOUND) break;
+    const auto find_output = [&](IDXGIAdapter* candidate) -> HRESULT {
+        for (UINT index = 0;; ++index) {
+            ComPtr<IDXGIOutput> output;
+            const HRESULT enumerated = candidate->EnumOutputs(index, &output);
+            if (enumerated == DXGI_ERROR_NOT_FOUND) return S_OK;
+            if (FAILED(enumerated)) return enumerated;
+            DXGI_OUTPUT_DESC description{};
+            if (SUCCEEDED(output->GetDesc(&description)) &&
+                lowercase(description.DeviceName) == expected) {
+                matched = std::move(output);
+                matched_description = description;
+                return S_OK;
+            }
+        }
+    };
+    result = find_output(adapter.Get());
+    if (FAILED(result)) {
+        error = hresult_text("enumerating adapter outputs", result);
+        return false;
+    }
+    if (!matched) {
+        // The device's adapter object lists only the outputs that existed when
+        // its factory was created, so a virtual display added mid-session
+        // (layout hot reload) is invisible to it. Re-enumerate the same
+        // physical adapter (matched by LUID) through a fresh factory.
+        DXGI_ADAPTER_DESC device_adapter{};
+        ComPtr<IDXGIFactory1> factory;
+        result = adapter->GetDesc(&device_adapter);
+        if (SUCCEEDED(result)) result = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
         if (FAILED(result)) {
-            error = hresult_text("enumerating adapter outputs", result);
+            error = hresult_text("refreshing the render adapter's outputs", result);
             return false;
         }
-        DXGI_OUTPUT_DESC description{};
-        if (SUCCEEDED(output->GetDesc(&description)) &&
-            lowercase(description.DeviceName) == expected) {
-            matched = std::move(output);
-            matched_description = description;
-            break;
+        for (UINT index = 0; !matched; ++index) {
+            ComPtr<IDXGIAdapter1> fresh;
+            if (factory->EnumAdapters1(index, &fresh) == DXGI_ERROR_NOT_FOUND) break;
+            DXGI_ADAPTER_DESC1 fresh_desc{};
+            if (FAILED(fresh->GetDesc1(&fresh_desc)) ||
+                fresh_desc.AdapterLuid.LowPart != device_adapter.AdapterLuid.LowPart ||
+                fresh_desc.AdapterLuid.HighPart != device_adapter.AdapterLuid.HighPart) {
+                continue;
+            }
+            result = find_output(fresh.Get());
+            if (FAILED(result)) {
+                error = hresult_text("enumerating refreshed adapter outputs", result);
+                return false;
+            }
         }
     }
     if (!matched) {

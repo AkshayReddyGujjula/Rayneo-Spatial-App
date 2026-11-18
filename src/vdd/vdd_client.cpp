@@ -298,7 +298,17 @@ bool VddClient::add_display(int& index, std::string& error) {
 bool VddClient::remove_display(int index, std::string& error) {
     const auto input = vdd_remove_payload(index);
     uint32_t response = 0;
-    const bool removed = ioctl(kIoctlRemove, input, 1000, &response, &error, false);
+    // Live 4-screen runs (2026-11-18) timed out at the old 1000 ms on most
+    // removals while Windows was re-arranging displays (Windows error 258),
+    // which left displays alive into the restore. Same budget as add_display.
+    const auto started = std::chrono::steady_clock::now();
+    const bool removed = ioctl(kIoctlRemove, input, 5000, &response, &error, false);
+    const long long elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - started)
+                                     .count();
+    if (removed && elapsed_ms >= 250) {
+        std::printf("  VDD remove %d took %lld ms\n", index, elapsed_ms);
+    }
     // Same post-change update as add_display (and the pre-refactor remove):
     // the driver expects an update after every add/remove.
     ping();
