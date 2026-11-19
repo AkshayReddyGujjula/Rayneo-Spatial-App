@@ -153,8 +153,11 @@ std::wstring widen(const std::string& text) {
 
 bool create_label_texture(ID3D11Device* device, const ScreenLayout& screen,
                           ComPtr<ID3D11ShaderResourceView>& view) {
-    constexpr int width = 512;
-    constexpr int height = 288;
+    // Follow the quad's shape so a portrait (tall) screen's label is not
+    // stretched: 512x288 for wide quads, 288x512 for tall ones.
+    const bool tall = screen.height_m > screen.width_m;
+    const int width = tall ? 288 : 512;
+    const int height = tall ? 512 : 288;
     BITMAPINFO bitmap_info{};
     bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bitmap_info.bmiHeader.biWidth = width;

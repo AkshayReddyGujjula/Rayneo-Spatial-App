@@ -614,7 +614,7 @@ gt::Vec3 package_from_body(const gt::Vec3& body) {
 // ---------------------------------------------------------------------------
 
 // Independent oracle: the Windows "DXGI desktop duplication" sample's
-// DisplayManager::CopyDirty destination-rect formulas, applied to the one-pixel
+// DisplayManager::SetDirtyVert destination-rect formulas, applied to the one-pixel
 // surface rect (sx, sy, sx+1, sy+1). W x H is the upright desktop size.
 void oracle_desktop_pixel(gt::DesktopRotation rotation, int sx, int sy, int W, int H, int& dx,
                           int& dy) {

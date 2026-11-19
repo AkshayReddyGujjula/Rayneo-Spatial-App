@@ -144,13 +144,18 @@ as a per-screen UV transform in the pixel shaders, so the copy stays a single
 `surface_uv_transform` in `src/render/desktop_rotation.h`: 90 -> (v, 1-u),
 180 -> (1-u, 1-v), 270 -> (1-v, u). `view_selftest` checks it pixel by pixel
 against the destination-rect formulas in Microsoft's desktop duplication sample
-(`DisplayManager::CopyDirty`).
+(`DisplayManager::SetDirtyVert`, checked verbatim against
+microsoft/Windows-classic-samples). That sample offsets the pointer position by
+`DesktopCoordinates` and never rotates the pointer position or shape.
 
 - **Sizes.** The upright desktop size is the duplicated surface size, with the
   axes swapped for 90 and 270. It is not taken from `DesktopCoordinates`, which
-  are DPI-virtualised in a process that is not per-monitor aware (capture_smoketest
-  once saw 1646x1029 coordinates for a 2880x1800 surface). It is recomputed every
-  frame. Nothing in capture or render assumes 16:9.
+  can disagree with the surface. capture_smoketest once saw 1646x1029 coordinates
+  for a 2880x1800 surface. That was not reproduced and its cause is not
+  established; DPI virtualisation is the likely candidate (2880/1646 is about 1.75).
+  The size is recomputed every frame. The capture texture, the GDI surface, the
+  cursor mapping and the per-screen label texture (288x512 for a tall quad) all
+  follow the actual sizes, so capture and render do not assume 16:9.
 - **Pointer.** The engine draws the pointer itself from the duplication pointer
   info. Windows does not composite it into the duplicated image. Its position is
   in upright desktop pixels and its shape is upright, which is how the sample uses

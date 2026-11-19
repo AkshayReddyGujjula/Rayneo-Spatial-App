@@ -399,9 +399,10 @@ bool DesktopDuplicator::ensure_copy_texture(ID3D11Texture2D* source, std::string
 }
 
 // The duplicated surface is authoritative for size: it is the unrotated
-// scan-out image in physical pixels, while DXGI_OUTPUT_DESC.DesktopCoordinates
-// are DPI-virtualised in a process that is not per-monitor aware (measured:
-// capture_smoketest saw 1646x1029 coordinates for a 2880x1800 surface). Pointer
+// scan-out image in pixels, while DXGI_OUTPUT_DESC.DesktopCoordinates can
+// disagree with it (observed once, not reproduced, cause not established:
+// capture_smoketest saw 1646x1029 coordinates for a 2880x1800 surface; DPI
+// virtualisation is the likely candidate, 2880/1646 ~ 1.75). Pointer
 // positions are physical desktop pixels, so the upright size is the surface
 // size with the axes swapped for 90/270. Recomputed every frame because a
 // rotation change re-duplicates without necessarily changing the surface size.

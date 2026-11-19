@@ -7,7 +7,8 @@
 //
 // DXGI semantics relied on (Microsoft Learn, "Desktop Duplication API" and
 // DXGI_OUTDUPL_DESC.Rotation; the Windows "DXGI desktop duplication" sample,
-// DisplayManager::CopyDirty / SetDirtyVert):
+// DisplayManager::SetDirtyVert and DuplicationManager::GetMouse,
+// microsoft/Windows-classic-samples, checked verbatim 2026-11-19):
 //   * IDXGIOutputDuplication::AcquireNextFrame returns the desktop image in the
 //     output's native, UNROTATED scan-out orientation. For a 1920x1080 mode shown
 //     with DMDO_90 the surface is 1920x1080 while the desktop is 1080x1920.
