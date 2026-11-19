@@ -131,6 +131,33 @@ were each verified on hardware for 3->4 (stacked above) and 3->5 (above and belo
 In those runs the panel was absent after the reload, the set of minimized windows
 was unchanged, and the shutdown restore was correct.
 
+**Portrait virtual desktops (2026-11-19).** The Parsec VDD offers no portrait modes
+(measured live: only landscape, 1920x1080 at 24/30/60/144/240, 2560x1440, 3840x2160,
+...). A layout screen with `portrait = true` therefore gets the 1920x1080 mode
+rotated like a real monitor: `dmDisplayOrientation = DMDO_90` with
+`dmPelsWidth = 1080`, `dmPelsHeight = 1920` and `DM_DISPLAYORIENTATION` in
+`dmFields` (`build_virtual_desktop_mode`). Windows persists a monitor's rotation
+across sessions, so every landscape slot states `DMDO_DEFAULT` explicitly;
+otherwise a VDD rotated in an earlier session comes back rotated. The refresh-rate
+query uses `EDS_ROTATEDMODE` and accepts the base mode in either dimension order
+because a display that is already rotated lists its modes rotated. The readback
+(`display_layout_matches`) and the reload's `needs_change` compare orientation, so
+a rotation change is a mode change. `ConfiguredDisplay` stores the rotated extent
+plus the orientation, so capture reuse rebinds only the rotated output.
+Arrangement: the planner gives each desktop its own extent. A column is as wide
+as its widest member, and members are centred on the column's base screen. Base
+rows are vertically centred on the centre desktop's centre line, so a portrait
+screen beside a landscape centre sits at y = -420 and landscape neighbours of a
+portrait centre sit at y = +420. Stacks use cumulative heights. Planned rects:
+portrait left `(-1080,-420)`, centre `(0,0)`, right `(1920,0)`; portrait centre:
+left `(-1920,420)`, centre `(0,0)` 1080x1920, right `(1080,420)`. A column wider
+than its base, such as a landscape screen above a portrait centre, would leave a
+gap in the base row. Windows would pack that gap, so `plan_workspace_for_layout`
+refuses such a plan through `desktops_tile_seamlessly` (which requires no area
+overlap and an edge-connected set). Desktop Duplication returns a rotated output
+unrotated, with `DXGI_OUTDUPL_DESC.Rotation` set; the capture/render side
+uprights it.
+
 ## Fusion notes (live-verified)
 
 - **Yaw has no absolute reference.** With the magnetometer off, a very slow steady

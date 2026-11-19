@@ -28,11 +28,16 @@ struct VirtualDisplayInfo {
 struct ConfiguredDisplay {
     int driver_index = -1;
     std::wstring device_name;
+    // Desktop extent as Windows reports it: 1080 x 1920 for a portrait
+    // (DMDO_90) desktop, so a rotation change is a mode change for every
+    // equality check (capture reuse included).
     int width = 0;
     int height = 0;
     int refresh_hz = 0;
     int x = 0;
     int y = 0;
+    // DMDO_DEFAULT (0) or DMDO_90 (1, portrait).
+    int orientation = 0;
 
     bool operator==(const ConfiguredDisplay&) const = default;
 };
@@ -58,6 +63,9 @@ struct ScreenPlacement {
     float pitch_deg = 0.0f;  // positive = above the horizon
     float width_deg = 46.0f;
     float height_deg = 26.9f;
+    // Portrait desktop: the landscape base mode rotated 90 degrees (Windows
+    // "Portrait", DMDO_90), so the desktop is base-height wide, base-width tall.
+    bool portrait = false;
 };
 
 // Picks the primary desktop: the most level screen of the desktop column whose
@@ -70,6 +78,10 @@ struct PlannedDesktop {
     int driver_index = -1;
     int x = 0;
     int y = 0;
+    // The desktop's own extent (1080 x 1920 when portrait).
+    int width = 1920;
+    int height = 1080;
+    bool portrait = false;
     bool operator==(const PlannedDesktop&) const = default;
 };
 
@@ -81,9 +93,33 @@ struct PlannedDesktop {
 // (the center in its column, else the most level screen) sits at y = 0.
 // Single-row layouts get exactly the yaw-ordered row: -width, 0, +width, ...
 // Input order is preserved; only positions are assigned.
+//
+// Per-display sizes: `width` x `height` is the landscape base mode; a portrait
+// placement gets the rotated extent (height x width). A column is as wide as
+// its widest member and members are centred on its base screen; columns abut
+// by those widths. Rows stack by cumulative heights. The base screens are
+// vertically centred on the centre desktop's centre line, so a portrait
+// screen beside a landscape centre sits at y = (1080 - 1920) / 2 = -420.
+// The centre desktop stays at (0, 0) whatever its orientation.
 std::vector<PlannedDesktop> plan_workspace_desktops(const std::vector<ScreenPlacement>& screens,
                                                     int center_driver, int width,
                                                     int height = 1080);
+// True when the desktops tile seamlessly (pure, unit-tested): no two overlap
+// in area, and every desktop is reachable from every other across shared
+// edges of non-zero length. Windows silently drops an overlapping batch and
+// packs a gapped display somewhere else, so a plan failing this check would
+// roll the takeover back (or land the mouse in the wrong place).
+bool desktops_tile_seamlessly(const std::vector<PlannedDesktop>& desktops, std::string& reason);
+// The DEVMODE a planned virtual desktop is staged with (pure, unit-tested):
+// its extent, position and refresh rate, and ALWAYS an explicit orientation
+// (DMDO_90 for portrait, DMDO_DEFAULT otherwise) because Windows persists a
+// monitor's rotation across sessions: a VDD rotated in an earlier session
+// would otherwise come back rotated.
+DEVMODEW build_virtual_desktop_mode(const PlannedDesktop& desktop, int refresh_hz);
+// The centre (primary) desktop's rect (pure, unit-tested): the configured
+// display at the origin, sized by its own extent (1080 x 1920 when portrait).
+// Falls back to a 1920 x 1080 rect at the origin when none is configured.
+RECT center_desktop_rect(const std::vector<ConfiguredDisplay>& displays);
 
 // Picks the laptop panel to detach: (GDI name, is_internal, is_primary).
 // Prefers the primary internal panel, else the first internal one; empty when
@@ -281,10 +317,10 @@ bool display_rects_intersect(int ax, int ay, int aw, int ah, int bx, int by, int
 // primary is always moved (it must vacate the origin); other displays move
 // only when their snapshot rect intersects a slot. VDD devices (by GDI name)
 // are never moved. Deterministic: primary first, then snapshot order.
+// Slot rects use each slot's own width/height (portrait slots are tall).
 std::vector<PlannedAside> plan_aside_moves(
     const std::vector<DisplayModeSnapshot>& snapshots,
-    const std::vector<PlannedDesktop>& slots, int slot_width, int slot_height,
-    const std::set<std::wstring>& vdd_devices);
+    const std::vector<PlannedDesktop>& slots, const std::set<std::wstring>& vdd_devices);
 
 // Full takeover. Snapshots must be taken BEFORE connecting the VDDs (a truly
 // pristine arrangement; connecting reshuffles). Phases, each verified, any
@@ -305,6 +341,8 @@ struct MigrationSeed {
     bool have_laptop_home = false;
 };
 
+// `width` x `height` is the landscape base mode the VDD must expose; each
+// planned desktop carries its own (possibly rotated) extent and orientation.
 bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
                               const std::vector<PlannedDesktop>& planned, int center_driver,
                               int width, int height, int preferred_hz,

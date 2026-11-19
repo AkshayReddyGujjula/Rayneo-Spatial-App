@@ -311,6 +311,219 @@ void test_stacked_screen_binding() {
           "geometry-only reload keeps every live capture, changed modes and names do not match");
 }
 
+std::pair<int, int> desktop_at(const std::vector<gt::PlannedDesktop>& planned, int driver) {
+    for (const auto& desktop : planned) {
+        if (desktop.driver_index == driver) return {desktop.x, desktop.y};
+    }
+    return {-99999, -99999};
+}
+
+const gt::PlannedDesktop* desktop_of(const std::vector<gt::PlannedDesktop>& planned, int driver) {
+    for (const auto& desktop : planned) {
+        if (desktop.driver_index == driver) return &desktop;
+    }
+    return nullptr;
+}
+
+void print_plan(const char* label, const std::vector<gt::PlannedDesktop>& planned) {
+    std::printf("  %s:", label);
+    for (const auto& desktop : planned) {
+        std::printf(" %d@(%d,%d %dx%d%s)", desktop.driver_index, desktop.x, desktop.y,
+                    desktop.width, desktop.height, desktop.portrait ? " portrait" : "");
+    }
+    std::printf("\n");
+}
+
+bool seamless(const std::vector<gt::PlannedDesktop>& planned) {
+    std::string reason;
+    const bool ok = gt::desktops_tile_seamlessly(planned, reason);
+    if (!ok) std::printf("    not seamless: %s\n", reason.c_str());
+    return ok;
+}
+
+// Portrait (DMDO_90) desktops: 1080 wide x 1920 tall, from the 1920x1080 mode.
+void test_portrait_planning() {
+    using P = gt::ScreenPlacement;
+    // A portrait screen's angular size is the landscape one turned on its side.
+    const auto portrait = [](int driver, float yaw, float pitch = 0.0f) {
+        return P{driver, yaw, pitch, 26.9f, 46.0f, true};
+    };
+    {
+        const std::vector<P> screens{portrait(0, -45.0f), {1, 0.0f}, {2, 45.0f}};
+        const auto planned = gt::plan_workspace_desktops(screens, 1, 1920, 1080);
+        print_plan("portrait left", planned);
+        const auto* left = desktop_of(planned, 0);
+        check(left != nullptr && left->portrait && left->width == 1080 && left->height == 1920,
+              "a portrait screen plans a 1080 x 1920 desktop");
+        check(desktop_at(planned, 0) == std::make_pair(-1080, -420) &&
+                  desktop_at(planned, 1) == std::make_pair(0, 0) &&
+                  desktop_at(planned, 2) == std::make_pair(1920, 0),
+              "portrait left abuts the centre at x = -1080, vertically centred (y = -420)");
+        check(seamless(planned), "portrait left tiles seamlessly");
+    }
+    {
+        const std::vector<P> screens{{0, -45.0f}, {1, 0.0f}, portrait(2, 45.0f)};
+        const auto planned = gt::plan_workspace_desktops(screens, 1, 1920, 1080);
+        print_plan("portrait right", planned);
+        check(desktop_at(planned, 0) == std::make_pair(-1920, 0) &&
+                  desktop_at(planned, 2) == std::make_pair(1920, -420),
+              "portrait right sits at (1920, -420)");
+        check(seamless(planned), "portrait right tiles seamlessly");
+    }
+    {
+        const std::vector<P> screens{{0, -45.0f}, portrait(1, 0.0f), {2, 45.0f}};
+        const auto planned = gt::plan_workspace_desktops(screens, 1, 1920, 1080);
+        print_plan("portrait centre", planned);
+        const auto* center = desktop_of(planned, 1);
+        check(center != nullptr && center->x == 0 && center->y == 0 && center->width == 1080 &&
+                  center->height == 1920,
+              "a portrait centre stays at the origin, 1080 x 1920");
+        check(desktop_at(planned, 0) == std::make_pair(-1920, 420) &&
+                  desktop_at(planned, 2) == std::make_pair(1080, 420),
+              "landscape neighbours centre on a portrait centre (y = 420), right at x = 1080");
+        check(seamless(planned), "portrait centre tiles seamlessly");
+    }
+    {
+        const std::vector<P> screens{{0, -45.0f}, {1, 0.0f}, {2, 45.0f}, portrait(3, 0.0f, 28.0f)};
+        const int center = gt::select_center_driver(screens);
+        const auto planned = gt::plan_workspace_desktops(screens, center, 1920, 1080);
+        print_plan("portrait above the centre", planned);
+        check(center == 1 && desktop_at(planned, 3) == std::make_pair(420, -1920),
+              "a portrait screen stacked above the centre is centred over it (420, -1920)");
+        check(desktop_at(planned, 0) == std::make_pair(-1920, 0) &&
+                  desktop_at(planned, 2) == std::make_pair(1920, 0),
+              "the row under a portrait stack is unchanged");
+        check(seamless(planned), "a portrait stack tiles seamlessly");
+    }
+    {
+        // Two portrait screens left of the centre stay adjacent.
+        const std::vector<P> screens{portrait(0, -60.0f), portrait(1, -30.0f), {2, 0.0f}};
+        const auto planned = gt::plan_workspace_desktops(screens, 2, 1920, 1080);
+        check(desktop_at(planned, 0) == std::make_pair(-2160, -420) &&
+                  desktop_at(planned, 1) == std::make_pair(-1080, -420) && seamless(planned),
+              "consecutive portrait columns abut by their own widths");
+    }
+    {
+        // A landscape screen above a portrait centre widens the column past
+        // its base: the row would have a gap, which the checker must refuse.
+        const std::vector<P> screens{{0, -45.0f}, portrait(1, 0.0f), {2, 0.0f, 40.0f}};
+        const auto planned = gt::plan_workspace_desktops(screens, 1, 1920, 1080);
+        print_plan("landscape above a portrait centre", planned);
+        std::string reason;
+        check(!gt::desktops_tile_seamlessly(planned, reason) && !reason.empty(),
+              "a column wider than its base leaves a gap and is rejected");
+        gt::Layout layout;
+        layout.screens = {{"left", 0, -45.0f}, {"center", 1, 0.0f}, {"above", 2, 0.0f, 40.0f}};
+        layout.screens[1].portrait = true;
+        std::swap(layout.screens[1].width_m, layout.screens[1].height_m);
+        gt::WorkspacePlan plan;
+        std::string error;
+        check(!gt::plan_workspace_for_layout(layout, {0, 1, 2}, plan, error) &&
+                  error.find("seamless") != std::string::npos,
+              "the layout planner refuses a gapped arrangement before touching displays");
+    }
+    {
+        std::string reason;
+        check(!gt::desktops_tile_seamlessly({{0, 0, 0}, {1, 1000, 0}}, reason),
+              "overlapping desktops are not seamless");
+        check(!gt::desktops_tile_seamlessly({{0, 0, 0}, {1, 1920, 1080}}, reason),
+              "corner-only contact is not seamless");
+        check(gt::desktops_tile_seamlessly({{0, 0, 0}, {1, 1920, 0}, {2, -1920, 0}}, reason),
+              "the landscape triple is seamless");
+    }
+    {
+        // Mode builder: explicit orientation both ways (Windows persists it).
+        const auto tall = gt::build_virtual_desktop_mode({1, -1080, -420, 1080, 1920, true}, 60);
+        check(tall.dmPelsWidth == 1080 && tall.dmPelsHeight == 1920 &&
+                  tall.dmDisplayOrientation == DMDO_90 && tall.dmDisplayFrequency == 60 &&
+                  tall.dmPosition.x == -1080 && tall.dmPosition.y == -420 &&
+                  (tall.dmFields & DM_DISPLAYORIENTATION) != 0 &&
+                  (tall.dmFields & DM_POSITION) != 0,
+              "a portrait desktop stages 1080x1920 with DMDO_90");
+        const auto wide = gt::build_virtual_desktop_mode({0, 1920, 0}, 120);
+        check(wide.dmPelsWidth == 1920 && wide.dmPelsHeight == 1080 &&
+                  wide.dmDisplayOrientation == DMDO_DEFAULT &&
+                  (wide.dmFields & DM_DISPLAYORIENTATION) != 0,
+              "a landscape desktop states DMDO_DEFAULT explicitly");
+        const RECT tall_center = gt::center_desktop_rect(
+            {{0, L"L", 1920, 1080, 120, -1920, 420}, {1, L"C", 1080, 1920, 120, 0, 0, DMDO_90}});
+        const RECT default_center = gt::center_desktop_rect({});
+        check(tall_center.left == 0 && tall_center.top == 0 && tall_center.right == 1080 &&
+                  tall_center.bottom == 1920 && default_center.right == 1920 &&
+                  default_center.bottom == 1080,
+              "the centre rect follows a portrait centre's own extent");
+    }
+}
+
+// Toggling portrait on an existing screen (same screen count) must re-mode
+// that display and rebind only its capture.
+void test_portrait_toggle_reload() {
+    const auto previous = triple_layout();
+    auto candidate = previous;
+    candidate.screens[0].portrait = true;
+    std::swap(candidate.screens[0].width_m, candidate.screens[0].height_m);
+    std::vector<int> indices{0, 1, 2};
+    std::vector<gt::ConfiguredDisplay> configured{
+        {0, L"left", 1920, 1080, 120, -1920, 0},
+        {1, L"center", 1920, 1080, 120, 0, 0},
+        {2, L"right", 1920, 1080, 120, 1920, 0},
+    };
+    const auto before = configured;
+    bool repositioned = false;
+    bool resized = false;
+    std::vector<gt::ConfiguredDisplay> applied;
+    const gt::WorkspaceReloadOps ops{
+        [&]() -> const std::vector<int>& { return indices; },
+        [&](size_t, std::string&) {
+            resized = true;
+            return true;
+        },
+        [&](const std::vector<int>&, int, const char*, std::vector<gt::VirtualDisplayInfo>& displays,
+            std::string&) {
+            displays = {{0, L"left", L"", true}, {1, L"center", L"", true},
+                        {2, L"right", L"", true}};
+            return true;
+        },
+        [&](const gt::WorkspacePlan& plan, const std::map<int, std::wstring>& names,
+            std::vector<gt::ConfiguredDisplay>& displays, std::string&) {
+            repositioned = true;
+            displays.clear();
+            for (const auto& desktop : plan.desktops) {
+                const DEVMODEW mode = gt::build_virtual_desktop_mode(desktop, 120);
+                displays.push_back({desktop.driver_index, names.at(desktop.driver_index),
+                                    static_cast<int>(mode.dmPelsWidth),
+                                    static_cast<int>(mode.dmPelsHeight), 120, desktop.x,
+                                    desktop.y, static_cast<int>(mode.dmDisplayOrientation)});
+            }
+            return true;
+        },
+        [&](const auto& displays, std::string&) {
+            applied = displays;
+            return true;
+        },
+        [&](const auto&, std::string&) { return true; },
+    };
+    std::string error, rollback_error;
+    const bool reloaded =
+        gt::reload_workspace(previous, candidate, configured, ops, error, rollback_error);
+    std::printf("  portrait toggle reload: result=%s repositioned=%d", reloaded ? "applied" : "rejected",
+                repositioned ? 1 : 0);
+    for (const auto& display : configured) {
+        std::printf(" %d@(%d,%d %dx%d o%d)", display.driver_index, display.x, display.y,
+                    display.width, display.height, display.orientation);
+    }
+    std::printf("\n");
+    check(reloaded && repositioned && !resized,
+          "a portrait toggle with an unchanged screen count re-modes the displays");
+    check(configured.size() == 3 && configured[0].width == 1080 && configured[0].height == 1920 &&
+              configured[0].orientation == DMDO_90 && configured[0].x == -1080 &&
+              configured[0].y == -420,
+          "the toggled display is configured portrait at (-1080, -420)");
+    const auto sources = gt::reusable_capture_sources(before, configured);
+    check(sources == std::vector<std::optional<size_t>>{std::nullopt, 1, 2},
+          "only the rotated display's capture is rebound");
+}
+
 }  // namespace
 
 int main() {
@@ -511,6 +724,7 @@ int main() {
                                 : "a stack behind keeps its side (-180 encoding)");
         }
     }
+    test_portrait_planning();
     check(gt::select_internal_display(
               {{L"\\\\.\\DISPLAY1", false, true}, {L"\\\\.\\DISPLAY2", true, false}}) ==
               L"\\\\.\\DISPLAY2",
@@ -523,6 +737,7 @@ int main() {
 
     std::printf("vdd_selftest: layout hot reload\n");
     test_stacked_screen_binding();
+    test_portrait_toggle_reload();
     test_workspace_reload("late arrival", 300, 0);
     test_workspace_reload("never arrives", 99999, 0);
     test_workspace_reload("one removal failure", 99999, 1);
@@ -563,7 +778,7 @@ int main() {
             make_snapshot(L"\\\\.\\DISPLAY2", 457, -1080, 1920, 1080, false),
         };
         const std::vector<gt::PlannedDesktop> slots = {{0, -1920, 0}, {1, 0, 0}, {2, 1920, 0}};
-        const auto moves = gt::plan_aside_moves(snapshots, slots, 1920, 1080, {});
+        const auto moves = gt::plan_aside_moves(snapshots, slots, {});
         check(moves.size() == 1 && moves[0].device_name == L"\\\\.\\DISPLAY1" &&
                   moves[0].x == 3840 && moves[0].y == 0,
               "only the overlapping primary moves aside, right of everything");
@@ -575,7 +790,7 @@ int main() {
             make_snapshot(L"B", 0, 0, 1920, 1080, false),
         };
         const std::vector<gt::PlannedDesktop> slots = {{0, -1920, 0}, {1, 0, 0}, {2, 1920, 0}};
-        const auto moves = gt::plan_aside_moves(snapshots, slots, 1920, 1080, {});
+        const auto moves = gt::plan_aside_moves(snapshots, slots, {});
         check(moves.size() == 2 && moves[0].device_name == L"A" && moves[0].x == 3840 &&
                   moves[1].device_name == L"B" && moves[1].x == 5760,
               "overlapping displays stack right of the slots, primary first");
@@ -586,7 +801,7 @@ int main() {
             make_snapshot(L"V", 0, 0, 1920, 1080, false),
         };
         const std::vector<gt::PlannedDesktop> slots = {{0, -1920, 0}, {1, 0, 0}, {2, 1920, 0}};
-        check(gt::plan_aside_moves(snapshots, slots, 1920, 1080, {L"V"}).empty(),
+        check(gt::plan_aside_moves(snapshots, slots, {L"V"}).empty(),
               "virtual displays are excluded from the aside plan");
     }
     {
@@ -604,12 +819,39 @@ int main() {
         const std::vector<gt::PlannedDesktop> slots = {
             {0, -1920, 0}, {1, 0, 0}, {2, 1920, 0}, {3, 0, -1080}};
         const auto moves =
-            gt::plan_aside_moves(snapshots, slots, 1920, 1080, {L"V0", L"V1", L"V2", L"V3"});
+            gt::plan_aside_moves(snapshots, slots, {L"V0", L"V1", L"V2", L"V3"});
         std::printf("  stacked grow aside: %zu move(s)%s%d\n", moves.size(),
                     moves.empty() ? "" : " glasses x=", moves.empty() ? 0 : moves[0].x);
         check(moves.size() == 1 && moves[0].device_name == L"GLASSES" && moves[0].x == 3840 &&
                   moves[0].y == 0,
               "a stacked slot moves the glasses flush right of the slots, ignoring stray VDDs");
+    }
+    {
+        // A portrait right slot is 1080 wide: the aside lands flush at 3000,
+        // not at 3840 (a gap Windows would pack, failing the exact readback).
+        const std::vector<gt::DisplayModeSnapshot> snapshots = {
+            make_snapshot(L"LAPTOP", 0, 0, 2880, 1800, true),
+        };
+        const std::vector<gt::PlannedDesktop> slots = {
+            {0, -1920, 0}, {1, 0, 0}, {2, 1920, -420, 1080, 1920, true}};
+        const auto moves = gt::plan_aside_moves(snapshots, slots, {});
+        std::printf("  portrait right aside: x=%d\n", moves.empty() ? 0 : moves[0].x);
+        check(moves.size() == 1 && moves[0].x == 3000 && moves[0].y == 0,
+              "a portrait slot's own width places the aside flush right of it");
+    }
+    {
+        // A display below the origin row that only a 1920-tall portrait centre
+        // reaches must move aside (a 1080-tall slot would miss it).
+        const std::vector<gt::DisplayModeSnapshot> snapshots = {
+            make_snapshot(L"LAPTOP", 0, -1800, 2880, 1800, true),
+            make_snapshot(L"GLASSES", 0, 1200, 1920, 1080, false),
+        };
+        const std::vector<gt::PlannedDesktop> slots = {
+            {0, -1920, 420}, {1, 0, 0, 1080, 1920, true}, {2, 1080, 420}};
+        const auto moves = gt::plan_aside_moves(snapshots, slots, {});
+        check(moves.size() == 2 && moves[1].device_name == L"GLASSES" && moves[0].x == 3000 &&
+                  moves[1].x == 5880,
+              "a portrait centre's full height decides which displays move aside");
     }
 
     std::printf("vdd_selftest: window migration\n");

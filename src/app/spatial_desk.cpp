@@ -1137,8 +1137,9 @@ int wmain(int argc, wchar_t** argv) {
         std::printf("created %zu virtual displays (Parsec VDD version %d)\n",
                     virtual_displays.size(), vdd.driver_version());
         for (const auto& display : virtual_displays) {
-            std::printf("  VDD[%d] %dx%d@%dHz at (%d,%d)%s\n", display.driver_index,
+            std::printf("  VDD[%d] %dx%d@%dHz at (%d,%d)%s%s\n", display.driver_index,
                         display.width, display.height, display.refresh_hz, display.x, display.y,
+                        display.orientation == DMDO_90 ? " portrait" : "",
                         display.driver_index == plan.center_driver ? " (primary)" : "");
         }
         if (!internal_display.empty()) {
@@ -1479,7 +1480,8 @@ int wmain(int argc, wchar_t** argv) {
             pristine_rect.left + static_cast<LONG>(pristine_panel->mode.dmPelsWidth);
         pristine_rect.bottom =
             pristine_rect.top + static_cast<LONG>(pristine_panel->mode.dmPelsHeight);
-        const RECT center_rect{0, 0, 1920, 1080};
+        // The centre desktop's own extent (1080 x 1920 when it is portrait).
+        const RECT center_rect = gt::center_desktop_rect(virtual_displays);
         // The panel the takeover detached, by stable monitor id (bug 15). With
         // a known id that no longer enumerates, nothing is touched: its old
         // GDI name may now belong to another panel.
@@ -1696,6 +1698,14 @@ int wmain(int argc, wchar_t** argv) {
                         opt.fov = layout.fov_deg;
                     }
                     std::printf("reloaded layout (%zu screens)\n", layout.screens.size());
+                    if (opt.virtual_displays) {
+                        for (const auto& display : virtual_displays) {
+                            std::printf("  VDD[%d] %dx%d@%dHz at (%d,%d)%s\n",
+                                        display.driver_index, display.width, display.height,
+                                        display.refresh_hz, display.x, display.y,
+                                        display.orientation == DMDO_90 ? " portrait" : "");
+                        }
+                    }
                     state.screen_count = static_cast<int>(layout.screens.size());
                     g_status.screens = state.screen_count;
                     publish_status(g_status);
