@@ -51,6 +51,7 @@ enum class HelpTopic {
     FieldIdleFps,
     FieldEnterDeg,
     FieldLeaveDeg,
+    FieldPortrait,
     HeaderRefresh,
     EditorFullscreen,
     EditorDimToggle,
@@ -203,7 +204,10 @@ inline const wchar_t* help_text(HelpTopic topic) {
                    L"the edges feel out of sight when looking straight.";
         case HelpTopic::FieldHeight:
             return L"Screen height in metres. Taller shows more vertical content; keep the "
-                   L"16:9 ratio with width unless you want a custom shape.";
+                   L"16:9 ratio with width (9:16 for a portrait screen) unless you want a "
+                   L"custom shape.";
+        case HelpTopic::FieldPortrait:
+            return L"Turn this screen sideways (1080 x 1920) for long documents and chats.";
         case HelpTopic::FieldFov:
             return L"Horizontal field of view of the glasses render in degrees. Match your "
                    L"glasses (46); larger shows more but shrinks everything.";

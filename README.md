@@ -175,6 +175,12 @@ reach the right screen. Screens side by side stay in one row. Windows briefly re
 laptop panel whenever a screen is added or removed while the workspace runs; the engine detaches
 it again within about a second and keeps your windows on the centre screen.
 
+**Portrait screens.** For long chats or documents, turn a screen sideways like a monitor rotated
+on its stand: select it on the Layout page and switch on **Portrait** at the top of its **Size**
+settings. Its width and height swap, so it stands tall at the same size, and its Windows desktop
+becomes 1080 x 1920. Switch it off to turn it back. A screen you add is always landscape, and
+presets keep each screen's orientation. **Save and apply** to use it.
+
 **Comfort.** Reading stabilisation: Off, Low, Medium (default), High, Ultra. Screen dimming: Off,
 Manual (a brightness slider per screen) or Focus (the screen you look at stays bright, the
 others fade). Night tint warms every screen, with a warmth slider. All apply live.

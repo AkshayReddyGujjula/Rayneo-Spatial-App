@@ -31,6 +31,15 @@ Layout preset_layout(LayoutPreset preset);
 bool add_screen(Layout& layout, std::string& error);
 bool remove_screen(Layout& layout, size_t index, std::string& error);
 int next_free_vdd_index(const Layout& layout);
+
+// Portrait screens (a monitor turned sideways, 1080 x 1920 desktop). The
+// default height for a width is 16:9 landscape or 9:16 portrait.
+float screen_height_for_width(float width_m, bool portrait);
+// Sets the portrait flag and turns the quad to match: width and height swap
+// only when the current shape disagrees with the new orientation, so toggling
+// twice is the identity. Rolls back and returns false if the result fails
+// validation. Added screens are always landscape (add_screen).
+bool set_screen_portrait(Layout& layout, ScreenLayout& screen, bool portrait, std::string& error);
 std::string next_screen_id(const Layout& layout);
 
 enum class LayoutField {

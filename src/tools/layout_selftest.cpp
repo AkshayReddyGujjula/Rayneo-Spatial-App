@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <process.h>
 #include <string>
 
@@ -46,6 +47,50 @@ int main() {
     check(loaded.screens.size() == 3 && loaded.screens[1].id == "centre" &&
               std::fabs(loaded.screens[2].yaw_deg - 45.0f) < 1e-6f,
           "layout round-trip preserves screens");
+
+    std::printf("layout_selftest: portrait screens\n");
+    const auto read_text = [](const std::filesystem::path& file) {
+        std::ifstream input(file, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    };
+    const auto count_of = [](const std::string& text, const std::string& needle) {
+        size_t count = 0;
+        for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) {
+            ++count;
+        }
+        return count;
+    };
+    check(count_of(read_text(path), "portrait") == 0, "a landscape-only layout writes no portrait key");
+    check(!loaded.screens[0].portrait && !loaded.screens[1].portrait && !loaded.screens[2].portrait,
+          "an absent portrait key loads as false");
+    gt::Layout tall = original;
+    tall.screens[0].portrait = true;
+    std::swap(tall.screens[0].width_m, tall.screens[0].height_m);
+    check(gt::save_layout(path.string(), tall, error), "a layout with a portrait screen saves");
+    check(count_of(read_text(path), "\"portrait\": true") == 1 && count_of(read_text(path), "portrait") == 1,
+          "only the portrait screen writes the key (true), false is never written");
+    gt::Layout tall_loaded;
+    check(gt::load_layout(path.string(), tall_loaded, error) && tall_loaded.screens.size() == 3 &&
+              tall_loaded.screens[0].portrait && !tall_loaded.screens[1].portrait &&
+              tall_loaded.screens[0].width_m == tall.screens[0].width_m &&
+              tall_loaded.screens[0].height_m == tall.screens[0].height_m,
+          "portrait round-trips with its swapped size");
+    {
+        // A hand-written portrait screen without height_m defaults to 9:16, not 16:9.
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << R"({"version": 1, "fov_deg": 46.0, "screens": [)"
+               << R"({"id": "side", "vdd_index": 1, "yaw_deg": -45, "pitch_deg": 0, "roll_deg": 0,)"
+               << R"( "distance_m": 2.0, "width_m": 0.9, "portrait": true},)"
+               << R"({"id": "main", "vdd_index": 2, "yaw_deg": 0, "pitch_deg": 0, "roll_deg": 0,)"
+               << R"( "distance_m": 2.0, "width_m": 1.6}]})";
+    }
+    gt::Layout implicit;
+    check(gt::load_layout(path.string(), implicit, error) && implicit.screens.size() == 2,
+          "a hand-written layout with a portrait screen loads");
+    check(implicit.screens.size() == 2 && implicit.screens[0].portrait &&
+              std::fabs(implicit.screens[0].height_m - 1.6f) < 1e-5f &&
+              !implicit.screens[1].portrait && std::fabs(implicit.screens[1].height_m - 0.9f) < 1e-5f,
+          "a missing height_m follows the orientation (9:16 portrait, 16:9 landscape)");
 
     gt::Layout duplicate = original;
     duplicate.screens[1].id = duplicate.screens[0].id;
