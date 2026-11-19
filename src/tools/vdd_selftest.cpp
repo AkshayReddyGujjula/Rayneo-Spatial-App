@@ -1,8 +1,11 @@
 #include "vdd/display_config.h"
+#include "vdd/display_scale.h"
 #include "vdd/vdd_client.h"
 #include "vdd/workspace_reload.h"
 
 #include <algorithm>
+#include <map>
+#include <string>
 #include <cstdio>
 #include <string_view>
 #include <vector>
@@ -312,6 +315,175 @@ void test_stacked_screen_binding() {
 }
 
 }  // namespace
+
+// Fake display world for DisplayScaleSession: name -> monitor id, per-id
+// scale state, and a list of the active virtual display names.
+struct FakeScaleWorld {
+    std::vector<std::pair<std::wstring, std::wstring>> identities;
+    std::vector<std::wstring> virtual_names;
+    std::map<std::wstring, gt::DisplayScaleInfo> by_id;  // keyed by monitor id
+    std::vector<std::pair<std::wstring, int>> sets;      // (name, rel) writes
+    std::vector<std::string> lines;
+    bool fail_sets = false;
+
+    std::wstring id_of(const std::wstring& name) const {
+        for (const auto& [gdi, id] : identities) {
+            if (gdi == name) return id;
+        }
+        return {};
+    }
+    gt::DisplayScaleOps ops() {
+        gt::DisplayScaleOps ops;
+        ops.query = [this](const std::wstring& name, gt::DisplayScaleInfo& info, std::string& error) {
+            const auto it = by_id.find(id_of(name));
+            if (it == by_id.end()) {
+                error = "no path";
+                return false;
+            }
+            info = it->second;
+            return true;
+        };
+        ops.set = [this](const std::wstring& name, int rel, std::string& error) {
+            sets.emplace_back(name, rel);
+            if (fail_sets) {
+                error = "simulated failure";
+                return false;
+            }
+            by_id[id_of(name)].cur_rel = rel;
+            return true;
+        };
+        ops.identities = [this] { return identities; };
+        ops.virtual_names = [this] { return virtual_names; };
+        ops.log = [this](const std::string& line) { lines.push_back(line); };
+        return ops;
+    }
+    bool logged(std::string_view needle) const {
+        for (const std::string& line : lines) {
+            if (line.find(needle) != std::string::npos) return true;
+        }
+        return false;
+    }
+};
+
+void test_display_scale() {
+    std::printf("vdd_selftest: virtual display scale\n");
+    check(gt::display_scale_step_index(100) == 0 && gt::display_scale_step_index(175) == 3 &&
+              gt::display_scale_step_index(500) == 11 && gt::display_scale_step_index(110) == -1 &&
+              gt::display_scale_step_index(0) == -1,
+          "scale step table: 100/175/500 found, 110 and 0 are not steps");
+
+    // Measured on the VDDs: recommended 100%, current 100%, max 175%.
+    const gt::DisplayScaleInfo vdd{0, 0, 3};
+    check(gt::display_scale_recommended_percent(vdd) == 100 && gt::display_scale_current_percent(vdd) == 100 &&
+              gt::display_scale_max_percent(vdd) == 175,
+          "VDD range min 0 cur 0 max 3 reads 100/100/175%");
+    auto t = gt::plan_display_scale(vdd, 150);
+    check(t.valid && t.rel == 2 && t.percent == 150 && !t.clamped, "150% on the VDD writes rel 2");
+    t = gt::plan_display_scale(vdd, 200);
+    check(t.valid && t.rel == 3 && t.percent == 175 && t.clamped,
+          "200% on a 175%-max display clamps to rel 3 (175%), never above max");
+    t = gt::plan_display_scale(vdd, 500);
+    check(t.valid && t.rel == vdd.max_rel && t.clamped, "500% clamps to max too");
+    t = gt::plan_display_scale(vdd, 130);
+    check(!t.valid, "a percent outside the step list is rejected");
+    // A laptop-style panel: recommended 150% (min -2), current 125%, max 225%.
+    const gt::DisplayScaleInfo panel{-2, -1, 3};
+    check(gt::display_scale_recommended_percent(panel) == 150 && gt::display_scale_current_percent(panel) == 125 &&
+              gt::display_scale_max_percent(panel) == 225,
+          "recommended 150% maps: min -2 cur -1 max 3 reads 150/125/225%");
+    t = gt::plan_display_scale(panel, 100);
+    check(t.valid && t.rel == -2 && t.percent == 100 && !t.clamped, "100% with a 150% recommendation writes rel -2");
+    t = gt::plan_display_scale(panel, 175);
+    check(t.valid && t.rel == 1 && t.percent == 175, "175% with a 150% recommendation writes rel 1");
+    const gt::DisplayScaleInfo odd{0, 14, 14};
+    check(gt::display_scale_current_percent(odd) == 0, "an off-table current scale reads as unknown (0)");
+    const gt::DisplayScaleInfo broken{5, 0, 3};
+    check(!gt::plan_display_scale(broken, 150).valid, "a positive min (no recommended step) is not written");
+
+    // Session: two VDDs, the glasses, and the laptop panel.
+    FakeScaleWorld world;
+    world.identities = {{L"\\\\.\\DISPLAY5", L"MONITOR\\PSCCDD0\\1"},
+                        {L"\\\\.\\DISPLAY6", L"MONITOR\\PSCCDD0\\2"},
+                        {L"\\\\.\\DISPLAY2", L"MONITOR\\TCL\\glasses"},
+                        {L"\\\\.\\DISPLAY1", L"MONITOR\\LAPTOP\\panel"}};
+    world.virtual_names = {L"\\\\.\\DISPLAY5", L"\\\\.\\DISPLAY6"};
+    world.by_id[L"MONITOR\\PSCCDD0\\1"] = {0, 0, 3};
+    world.by_id[L"MONITOR\\PSCCDD0\\2"] = {0, 1, 3};  // was left at 125%
+    world.by_id[L"MONITOR\\TCL\\glasses"] = {0, 0, 3};
+    world.by_id[L"MONITOR\\LAPTOP\\panel"] = {-2, 0, 3};
+    {
+        gt::DisplayScaleSession session(200, world.ops());
+        session.apply({{0, L"\\\\.\\DISPLAY5"}, {1, L"\\\\.\\DISPLAY6"}, {9, L"\\\\.\\DISPLAY2"}});
+        check(world.sets.size() == 2 && world.by_id[L"MONITOR\\PSCCDD0\\1"].cur_rel == 3 &&
+                  world.by_id[L"MONITOR\\PSCCDD0\\2"].cur_rel == 3,
+              "apply writes both VDDs at the clamped max");
+        check(world.by_id[L"MONITOR\\TCL\\glasses"].cur_rel == 0 &&
+                  world.by_id[L"MONITOR\\LAPTOP\\panel"].cur_rel == 0,
+              "a non-virtual name (the glasses) is never written");
+        check(world.logged("clamped 200% to 175%") && world.logged("skipped"),
+              "the clamp and the refused glasses write are logged");
+        check(session.recorded() == 2, "two originals recorded");
+        // A reload re-applies: the recorded original must stay the pre-session value.
+        session.apply({{0, L"\\\\.\\DISPLAY5"}, {1, L"\\\\.\\DISPLAY6"}});
+        check(session.recorded() == 2 && world.sets.size() == 2, "re-apply keeps the originals and writes nothing");
+
+        // Display churn renumbers the GDI names (bug 15): restore follows the id.
+        world.identities = {{L"\\\\.\\DISPLAY7", L"MONITOR\\PSCCDD0\\1"},
+                            {L"\\\\.\\DISPLAY8", L"MONITOR\\PSCCDD0\\2"},
+                            {L"\\\\.\\DISPLAY5", L"MONITOR\\LAPTOP\\panel"}};
+        world.virtual_names = {L"\\\\.\\DISPLAY7", L"\\\\.\\DISPLAY8"};
+        world.sets.clear();
+        session.restore_driver(1);
+        check(world.sets.size() == 1 && world.sets[0].first == L"\\\\.\\DISPLAY8" && world.sets[0].second == 1 &&
+                  world.by_id[L"MONITOR\\PSCCDD0\\2"].cur_rel == 1,
+              "restore_driver puts the removed VDD back to its original 125% by monitor id");
+        check(session.recorded() == 1 && world.by_id[L"MONITOR\\LAPTOP\\panel"].cur_rel == 0,
+              "the restored record is dropped; the renumbered laptop name is untouched");
+        session.restore_driver(1);
+        check(world.sets.size() == 1, "a second restore of the same driver writes nothing");
+        // The destructor restores the rest.
+    }
+    check(world.by_id[L"MONITOR\\PSCCDD0\\1"].cur_rel == 0 && world.logged("restored 100%"),
+          "session end restores the remaining VDD to 100%");
+
+    // An id that no longer resolves to an active virtual display: zero writes.
+    FakeScaleWorld gone;
+    gone.identities = {{L"\\\\.\\DISPLAY5", L"MONITOR\\PSCCDD0\\1"}};
+    gone.virtual_names = {L"\\\\.\\DISPLAY5"};
+    gone.by_id[L"MONITOR\\PSCCDD0\\1"] = {0, 0, 3};
+    {
+        gt::DisplayScaleSession session(150, gone.ops());
+        session.apply({{0, L"\\\\.\\DISPLAY5"}});
+        check(gone.sets.size() == 1 && gone.by_id[L"MONITOR\\PSCCDD0\\1"].cur_rel == 2, "150% applied");
+        gone.virtual_names.clear();  // the VDD went away before the restore
+        gone.sets.clear();
+        session.restore_all();
+        check(gone.sets.empty() && gone.logged("skipped"), "an unresolved id is skipped with zero writes");
+        check(session.recorded() == 0, "restore_all is idempotent");
+    }
+
+    // Set failures are logged, never fatal; 0 means Windows is never touched.
+    FakeScaleWorld failing;
+    failing.identities = {{L"\\\\.\\DISPLAY5", L"MONITOR\\PSCCDD0\\1"}};
+    failing.virtual_names = {L"\\\\.\\DISPLAY5"};
+    failing.by_id[L"MONITOR\\PSCCDD0\\1"] = {0, 0, 3};
+    failing.fail_sets = true;
+    {
+        gt::DisplayScaleSession session(125, failing.ops());
+        session.apply({{0, L"\\\\.\\DISPLAY5"}});
+        check(failing.logged("failed: simulated failure"), "a failed set is logged and the session continues");
+    }
+    FakeScaleWorld off;
+    off.identities = failing.identities;
+    off.virtual_names = failing.virtual_names;
+    off.by_id[L"MONITOR\\PSCCDD0\\1"] = {0, 0, 3};
+    {
+        gt::DisplayScaleSession session(0, off.ops());
+        session.apply({{0, L"\\\\.\\DISPLAY5"}});
+        check(off.sets.empty() && session.recorded() == 0 && !session.enabled(),
+              "target 0 (Windows default) touches nothing");
+    }
+}
 
 int main() {
     std::printf("vdd_selftest: protocol serialization\n");
@@ -703,6 +875,8 @@ int main() {
                   (mode.dmFields & DM_POSITION) != 0,
               "frequency strip drops the rate and keeps the geometry");
     }
+
+    test_display_scale();
 
     std::printf("vdd_selftest: %s (%d failures)\n", failures == 0 ? "PASS" : "FAIL", failures);
     return failures == 0 ? 0 : 1;

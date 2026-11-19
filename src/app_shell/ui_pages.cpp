@@ -609,10 +609,16 @@ int tracking_card_head(Ui& ui, int left, int top, int width) {
     const int predict_desc_h = wrapped_text_height(ui.c.dc(), ui.f.small, text_w, predict_desc);
     const int predict_h = ui.px(24) + predict_desc_h + ui.px(space::md) + ui.px(size::control) +
                           ui.px(space::lg) * 2 + 1;
+    const std::wstring scale_desc =
+        L"Makes text larger on the virtual screens by changing Windows' scale on them while the "
+        L"workspace runs; each goes back when it stops. Applies at the next start.";
+    const int scale_desc_h = wrapped_text_height(ui.c.dc(), ui.f.small, text_w, scale_desc);
+    const int scale_h = ui.px(24) + scale_desc_h + ui.px(space::md) + ui.px(size::control) +
+                        ui.px(space::lg) * 2 + 1;
     const std::wstring lock_detail = heading_lock_detail(s.heading_lock);
     const int lock_h = ui.px(24) + wrapped_text_height(ui.c.dc(), ui.f.small, text_w, lock_detail);
     const int height =
-        pad + ui.px(30) + ui.px(space::sm) + rows_h + predict_h + std::max(ui.px(44), lock_h) + pad;
+        pad + ui.px(30) + ui.px(space::sm) + rows_h + predict_h + scale_h + std::max(ui.px(44), lock_h) + pad;
     RECT frame = rect_of(left, top, width, height);
     card(ui, frame);
     ui.c.text(ui.f.title, ui.t.text, rect_of(left + pad, top + pad, inner_w, ui.px(28)), L"Head tracking");
@@ -639,6 +645,26 @@ int tracking_card_head(Ui& ui, int left, int top, int width) {
         segmented(ui, kUiPredictBase, seg, kNames, kPredictMsChoiceCount,
                   predict_ms_choice_index(s.config.engine.predict_ms));
         ui.help(kHelpEngine, kRowPrediction, HelpTopic::EngineMotionPrediction,
+                rect_of(seg.right + ui.px(space::md), y + (rh(seg) - help_w) / 2, help_w, help_w));
+        y += rh(seg) + ui.px(space::lg);
+        ui.c.fill(rect_of(left + pad, y, inner_w, 1), ui.t.border);
+        y += 1;
+    }
+    // Screen scaling (--display-scale): Windows default / 100 / 125 / 150 / 175%.
+    {
+        const int help_w = help_mark_width(ui.dpi);
+        y += ui.px(space::lg);
+        ui.c.text(ui.f.body_strong, ui.t.text, rect_of(left + pad, y, text_w, ui.px(22)), L"Screen scaling");
+        ui.c.text(ui.f.small, ui.t.text_dim, rect_of(left + pad, y + ui.px(24), text_w, scale_desc_h), scale_desc,
+                  DT_LEFT | DT_TOP | DT_WORDBREAK);
+        y += ui.px(24) + scale_desc_h + ui.px(space::md);
+        static const wchar_t* const kNames[kDisplayScaleChoiceCount] = {L"Windows default", L"100%", L"125%",
+                                                                        L"150%", L"175%"};
+        RECT seg = rect_of(left + pad, y, std::min(inner_w - help_w - ui.px(space::md), ui.px(700)),
+                           ui.px(size::control));
+        segmented(ui, kUiDisplayScaleBase, seg, kNames, kDisplayScaleChoiceCount,
+                  display_scale_choice_index(s.config.engine.display_scale_pct));
+        ui.help(kHelpEngine, kRowDisplayScale, HelpTopic::EngineDisplayScale,
                 rect_of(seg.right + ui.px(space::md), y + (rh(seg) - help_w) / 2, help_w, help_w));
         y += rh(seg) + ui.px(space::lg);
         ui.c.fill(rect_of(left + pad, y, inner_w, 1), ui.t.border);

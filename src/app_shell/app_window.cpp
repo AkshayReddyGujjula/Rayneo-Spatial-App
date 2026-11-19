@@ -1277,6 +1277,7 @@ void AppWindow::adjust_focused(WPARAM key) {
                             {kUiDimModeBase, kDimModeCount},
                             {kUiThemeBase, kThemeModeCount},
                             {kUiPredictBase, kPredictMsChoiceCount},
+                            {kUiDisplayScaleBase, kDisplayScaleChoiceCount},
                             {kUiEditor2D, 2}};
     for (const Group& group : groups) {
         if (focus >= group.base && focus < group.base + group.count && (key == VK_LEFT || key == VK_RIGHT)) {
@@ -1589,6 +1590,17 @@ void AppWindow::execute(int id, int arg) {
                               ? std::wstring(L"Turn prediction off; applies the next time the engine starts")
                               : L"Turn prediction " + std::to_wstring(state_.config.engine.predict_ms) +
                                     L" ms; applies the next time the engine starts");
+        invalidate();
+        return;
+    }
+    if (id >= kUiDisplayScaleBase && id < kUiDisplayScaleBase + kDisplayScaleChoiceCount) {
+        state_.config.engine.display_scale_pct = kDisplayScaleChoices[id - kUiDisplayScaleBase];
+        save_comfort(state_);
+        state_.show_toast(state_.config.engine.display_scale_pct == 0
+                              ? std::wstring(L"Screen scaling: Windows default; applies the next time the "
+                                             L"workspace starts")
+                              : L"Screen scaling " + std::to_wstring(state_.config.engine.display_scale_pct) +
+                                    L"%; applies the next time the workspace starts");
         invalidate();
         return;
     }

@@ -87,6 +87,9 @@ inline constexpr const char* kEngineArgNoImu = "--no-imu";
 inline constexpr const char* kEngineArgPredictMs = "--predict-ms";
 // Experimental online hard-iron tracking for head-worn magnets (default off).
 inline constexpr const char* kEngineArgMagTrackHardIron = "--mag-track-hard-iron";
+// Windows display scale % on the virtual displays while the workspace runs
+// (restored on exit). Absent or 0 = Windows is left alone.
+inline constexpr const char* kEngineArgDisplayScale = "--display-scale";
 
 // Status-file keys and values (one "key=value" per line, LF terminated).
 inline constexpr const char* kStatusKeyState = "state";

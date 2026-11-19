@@ -58,6 +58,12 @@ inline constexpr int kPredictMsChoiceCount = 4;
 inline constexpr int kPredictMsChoices[kPredictMsChoiceCount] = {0, 20, 35, 50};
 // Index of value in kPredictMsChoices, or -1 for a hand-edited other value.
 int predict_ms_choice_index(int predict_ms);
+// Screen scaling choices (engine --display-scale; 0 = Windows default, never
+// touched). 175% is the most Windows allows on a 1920x1080 virtual display.
+inline constexpr int kDisplayScaleChoiceCount = 5;
+inline constexpr int kDisplayScaleChoices[kDisplayScaleChoiceCount] = {0, 100, 125, 150, 175};
+// Index of value in kDisplayScaleChoices, or -1 when it is not offered.
+int display_scale_choice_index(int display_scale_pct);
 
 struct EngineOptions {
     // Motion-to-photon prediction horizon during fast head turns, passed as
@@ -66,9 +72,13 @@ struct EngineOptions {
     // Experimental online hard-iron tracking for head-worn magnets such as
     // earbuds (--mag-track-hard-iron). Off by default: unverified on glasses.
     bool mag_track_hard_iron = false;
+    // Windows display scale on the virtual screens while the workspace runs
+    // (--display-scale, restored on exit). 0 = Windows default (untouched).
+    int display_scale_pct = 0;
 
     bool operator==(const EngineOptions& other) const {
-        return predict_ms == other.predict_ms && mag_track_hard_iron == other.mag_track_hard_iron;
+        return predict_ms == other.predict_ms && mag_track_hard_iron == other.mag_track_hard_iron &&
+               display_scale_pct == other.display_scale_pct;
     }
     bool operator!=(const EngineOptions& other) const { return !(*this == other); }
 };

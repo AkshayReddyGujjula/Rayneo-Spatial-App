@@ -27,6 +27,7 @@ target_link_libraries(rayneo_layout PUBLIC nlohmann_json::nlohmann_json)
 
 add_library(rayneo_vdd STATIC
   src/vdd/display_config.cpp
+  src/vdd/display_scale.cpp
   src/vdd/vdd_client.cpp
   src/vdd/workspace_reload.cpp
 )

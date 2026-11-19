@@ -7,6 +7,7 @@
 #include "layout/layout.h"
 #include "render/renderer.h"
 #include "vdd/display_config.h"
+#include "vdd/display_scale.h"
 #include "vdd/vdd_client.h"
 #include "vdd/workspace_reload.h"
 #include "util/utf8_path.h"
@@ -103,6 +104,7 @@ struct Options {
     std::string layout_path;
     std::string status_path;
     bool virtual_displays = true;
+    int display_scale = 0;  // --display-scale: Windows scale % on the virtual displays; 0 = untouched
 };
 
 enum HotkeyId : int {
@@ -524,6 +526,9 @@ void print_usage() {
         "  --calibration FILE  sensor-to-head calibration (default config/orientation.json)\n"
         "  --layout FILE  screen layout (default config/layouts/default.json)\n"
         "  --no-virtual-displays  render labelled test screens without Parsec VDD\n"
+        "  --display-scale P  Windows display scale %% on the virtual displays while the\n"
+        "                workspace runs (100,125,150,175,...; clamped to the display's\n"
+        "                maximum); each display's own scale is restored on exit (0 = untouched)\n"
         "  --status FILE  write a key=value engine status file for the controller\n"
         "  workspace mode detaches the laptop panel until exit (its windows move to\n"
         "                the center desktop); Ctrl+Shift+\\ exits the engine\n"
@@ -576,6 +581,19 @@ bool parse_args(int argc, char** argv, Options& opt, bool& show_help) {
             opt.status_path = argv[++i];
         } else if (std::strcmp(a, "--no-virtual-displays") == 0) {
             opt.virtual_displays = false;
+        } else if (std::strcmp(a, gt::kEngineArgDisplayScale) == 0 && i + 1 < argc) {
+            // Strict: atoi would turn "150%" or "abc" into 0 (silently off).
+            const char* text = argv[++i];
+            char* end = nullptr;
+            const long value = std::strtol(text, &end, 10);
+            if (end == text || *end != '\0' ||
+                (value != 0 && gt::display_scale_step_index(static_cast<int>(value)) < 0)) {
+                std::printf("invalid --display-scale '%s': use 0 (leave Windows alone) or one of "
+                            "100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500\n",
+                            text);
+                return false;
+            }
+            opt.display_scale = static_cast<int>(value);
         } else if (std::strcmp(a, "--help") == 0 || std::strcmp(a, "-h") == 0) {
             print_usage();
             show_help = true;
@@ -680,9 +698,14 @@ std::string default_repo_path(const std::filesystem::path& relative) {
 struct TopologyGuard {
     gt::WorkspaceTopology topo;
     gt::VddClient* vdd = nullptr;
+    gt::DisplayScaleSession* scale = nullptr;
     bool armed = false;
     ~TopologyGuard() {
         try {
+            // Scales first, while the virtual displays still exist.
+            if (scale != nullptr) {
+                scale->restore_all();
+            }
             if (armed && topo.active && vdd != nullptr) {
                 std::string error;
                 if (!gt::restore_display_topology(topo, *vdd, error)) {
@@ -1002,7 +1025,23 @@ int wmain(int argc, wchar_t** argv) {
 
     gt::VddClient vdd;
     std::vector<gt::ConfiguredDisplay> virtual_displays;
+    if (opt.display_scale > 0 && !opt.virtual_displays) {
+        std::printf("display scale: --display-scale ignored without virtual displays\n");
+    }
+    gt::DisplayScaleSession display_scale(opt.virtual_displays ? opt.display_scale : 0,
+                                          gt::win32_display_scale_ops());
+    const auto apply_display_scale = [&]() {
+        if (!display_scale.enabled()) {
+            return;
+        }
+        std::vector<std::pair<int, std::wstring>> targets;
+        for (const gt::ConfiguredDisplay& display : virtual_displays) {
+            targets.emplace_back(display.driver_index, display.device_name);
+        }
+        display_scale.apply(targets);
+    };
     TopologyGuard topology_guard;
+    topology_guard.scale = &display_scale;
     gt::WorkspaceTopology workspace_topo;
     if (opt.virtual_displays) {
         g_status.phase = gt::kPhaseTakeover;
@@ -1133,6 +1172,9 @@ int wmain(int argc, wchar_t** argv) {
         const int repaired_takeover = workspace_topo.windows_repaired;
         topology_guard.arm(std::move(workspace_topo));
         g_topology_takeover = true;
+        // The takeover has created and positioned the virtual displays (its
+        // window migration already ran inside apply_workspace_topology).
+        apply_display_scale();
         g_status.detached = !internal_display.empty();
         std::printf("created %zu virtual displays (Parsec VDD version %d)\n",
                     virtual_displays.size(), vdd.driver_version());
@@ -1633,6 +1675,12 @@ int wmain(int argc, wchar_t** argv) {
                     const gt::WorkspaceReloadOps ops{
                         [&]() -> const std::vector<int>& { return vdd.display_indices(); },
                         [&](size_t count, std::string& detail) {
+                            // resize removes from the back: restore those
+                            // displays' own scale while they still exist.
+                            const auto& current = vdd.display_indices();
+                            for (size_t i = count; i < current.size(); ++i) {
+                                display_scale.restore_driver(current[i]);
+                            }
                             const bool resized = vdd.resize(count, detail);
                             const auto& indices = vdd.display_indices();
                             for (auto& capture : captures) {
@@ -1663,6 +1711,11 @@ int wmain(int argc, wchar_t** argv) {
                     reload_ok = gt::reload_workspace(layout, candidate, virtual_displays, ops,
                                                      reload_error, rollback_error);
                     status_heartbeat.stop();
+                    // Added displays (or a rollback's re-added ones) get the
+                    // scale; displays already scaled are left alone.
+                    if (rollback_error.empty()) {
+                        apply_display_scale();
+                    }
                     // A reposition can move the glasses aside (a stacked
                     // screen takes their home slot) or re-base every desktop.
                     fit_window_to_display(hwnd, render_monitor_id);
@@ -2043,6 +2096,8 @@ int wmain(int argc, wchar_t** argv) {
 
     std::printf("shutting down\n");
     captures.clear();
+    // Before the restore removes the virtual displays.
+    display_scale.restore_all();
     if (topology_guard.armed) {
         g_status.phase = gt::kPhaseRestoring;
         publish_status(g_status);

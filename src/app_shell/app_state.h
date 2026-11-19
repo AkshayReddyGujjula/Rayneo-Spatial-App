@@ -99,6 +99,7 @@ enum UiId : int {
     kUiPredictBase = 1480,       // + index into kPredictMsChoices (Off/20/35/50 ms)
     kUiMagTrackHardIron = 1484,  // earbud magnet compensation (--mag-track-hard-iron)
     kUiCalEarbuds = 1485,        // compass calibration "earbuds in" (--earbuds)
+    kUiDisplayScaleBase = 1490,  // + index into kDisplayScaleChoices (Windows default/100..175%)
 };
 
 inline bool ui_is_wizard(int id) {
