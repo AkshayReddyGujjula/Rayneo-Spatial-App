@@ -346,6 +346,43 @@ void test_engine_commands() {
               gt::predict_ms_choice_index(50) == 3 && gt::predict_ms_choice_index(40) == -1,
           "prediction choices map to segment indices; other values select none");
 
+    // Screen scaling (--display-scale): only when nonzero, only in workspace mode.
+    check(gt::build_engine_launch_command(engine, working, layout, calibration, status, engine_log, telemetry,
+                                          gt::LaunchMode::Workspace, true, -1, 0.0f, command, error) &&
+              !has_flag(command.arguments, gt::kEngineArgDisplayScale) &&
+              command.command_line.find("--display-scale") == std::string::npos,
+          "the default (Windows default) passes no --display-scale");
+    gt::EngineOptions scale_options;
+    scale_options.display_scale_pct = 150;
+    check(gt::build_engine_launch_command(engine, working, layout, calibration, status, engine_log, telemetry,
+                                          gt::LaunchMode::Workspace, true, -1, 0.0f, command, error,
+                                          gt::ViewComfort{}, scale_options) &&
+              value_after(command.arguments, gt::kEngineArgDisplayScale) == "150" &&
+              command.command_line.find(" --display-scale 150") != std::string::npos,
+          "screen scaling 150% passes --display-scale 150 to the workspace");
+    scale_options.display_scale_pct = 175;
+    check(gt::build_engine_launch_command(engine, working, layout, calibration, status, engine_log, telemetry,
+                                          gt::LaunchMode::Workspace, false, -1, 0.0f, command, error,
+                                          gt::ViewComfort{}, scale_options) &&
+              value_after(command.arguments, gt::kEngineArgDisplayScale) == "175",
+          "screen scaling does not depend on head tracking");
+    check(gt::build_engine_launch_command(engine, working, layout, calibration, status, engine_log, telemetry,
+                                          gt::LaunchMode::Preview, true, -1, 0.0f, command, error,
+                                          gt::ViewComfort{}, scale_options) &&
+              !has_flag(command.arguments, gt::kEngineArgDisplayScale),
+          "preview (no virtual displays) passes no --display-scale");
+    for (const int bad : {200, 110, -100}) {
+        scale_options.display_scale_pct = bad;
+        check(!gt::build_engine_launch_command(engine, working, layout, calibration, status, engine_log,
+                                               telemetry, gt::LaunchMode::Workspace, true, -1, 0.0f, command,
+                                               error, gt::ViewComfort{}, scale_options) &&
+                  error.find("screen scaling") != std::string::npos,
+              "a screen scaling value outside 0/100/125/150/175 is rejected");
+    }
+    check(gt::display_scale_choice_index(0) == 0 && gt::display_scale_choice_index(100) == 1 &&
+              gt::display_scale_choice_index(175) == 4 && gt::display_scale_choice_index(200) == -1,
+          "screen scaling choices map to segment indices; 200% is not offered");
+
     // Heading-lock status keys -> Tracking page badge state.
     const auto lock_of = [&](const std::string& text) {
         gt::EngineStatusFile parsed;
@@ -1391,14 +1428,16 @@ void test_ui_model(const std::filesystem::path& directory) {
     custom.last_page = gt::AppPage::Diagnostics;
     custom.engine.predict_ms = 20;
     custom.engine.mag_track_hard_iron = true;
+    custom.engine.display_scale_pct = 125;
     std::string error;
     gt::AppConfig loaded;
     check(gt::save_app_config(directory / "ui-prefs.json", custom, error) &&
               gt::load_app_config(directory / "ui-prefs.json", loaded, error) &&
               loaded.onboarding_complete && loaded.theme == gt::ThemeMode::System &&
               loaded.last_page == gt::AppPage::Diagnostics && loaded.engine.predict_ms == 20 &&
-              loaded.engine.mag_track_hard_iron,
+              loaded.engine.mag_track_hard_iron && loaded.engine.display_scale_pct == 125,
           "guide completion, theme, last page and engine options round-trip through app.json");
+    check(defaults.engine.display_scale_pct == 0, "screen scaling defaults to 0 (Windows default)");
     write_text(directory / "ui-legacy.json", "{\"version\": 1, \"close_to_tray\": false}\n");
     check(gt::load_app_config(directory / "ui-legacy.json", loaded, error) &&
               !loaded.onboarding_complete && loaded.theme == gt::ThemeMode::Dark &&
@@ -1432,6 +1471,19 @@ void test_ui_model(const std::filesystem::path& directory) {
                "{\"version\": 1, \"engine_options\": {\"predict_ms\": \"fast\"}}\n");
     check(!gt::load_app_config(directory / "ui-predict-bad.json", loaded, error),
           "a non-integer prediction horizon is rejected");
+    check(gt::load_app_config(directory / "ui-legacy.json", loaded, error) && loaded.engine.display_scale_pct == 0,
+          "an app.json without display_scale_pct loads with Windows default scaling");
+    for (const char* bad : {"200", "130", "-125", "50"}) {
+        write_text(directory / "ui-scale-bad.json",
+                   std::string("{\"version\": 1, \"engine_options\": {\"display_scale_pct\": ") + bad + "}}\n");
+        check(gt::load_app_config(directory / "ui-scale-bad.json", loaded, error) &&
+                  loaded.engine.display_scale_pct == 0,
+              "a hand-edited screen scaling outside 0/100/125/150/175 normalises to 0");
+    }
+    write_text(directory / "ui-scale-ok.json",
+               "{\"version\": 1, \"engine_options\": {\"display_scale_pct\": 175}}\n");
+    check(gt::load_app_config(directory / "ui-scale-ok.json", loaded, error) && loaded.engine.display_scale_pct == 175,
+          "screen scaling 175% loads as saved");
 }
 
 void test_calibration_progress() {

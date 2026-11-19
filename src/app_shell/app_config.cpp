@@ -190,6 +190,14 @@ bool read_ui_fields(const Json& document, AppConfig& parsed, std::string& error)
         if (!read_bool(node, "mag_track_hard_iron", parsed.engine.mag_track_hard_iron, error)) {
             return false;
         }
+        if (!read_int(node, "display_scale_pct", parsed.engine.display_scale_pct, error)) {
+            return false;
+        }
+        // Only the offered steps reach the engine; anything else (a hand
+        // edit, 200%) falls back to the Windows default.
+        if (display_scale_choice_index(parsed.engine.display_scale_pct) < 0) {
+            parsed.engine.display_scale_pct = 0;
+        }
     }
     return true;
 }
@@ -370,7 +378,8 @@ std::string app_config_to_json_text(const AppConfig& config) {
         {"theme", theme_mode_name(config.theme)},
         {"last_page", app_page_key(config.last_page)},
         {"engine_options", Json{{"predict_ms", config.engine.predict_ms},
-                                {"mag_track_hard_iron", config.engine.mag_track_hard_iron}}},
+                                {"mag_track_hard_iron", config.engine.mag_track_hard_iron},
+                                {"display_scale_pct", config.engine.display_scale_pct}}},
     };
     return document.dump(2) + "\n";
 }

@@ -54,6 +54,7 @@ enum EngineHelpRow : int {
     kRowPrediction = 22,
     kRowHeadingLock = 23,
     kRowMagTrack = 24,
+    kRowDisplayScale = 25,
 };
 
 // Fixed rows inside kHelpTools.

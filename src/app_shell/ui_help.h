@@ -69,6 +69,7 @@ enum class HelpTopic {
     SettingsSetupGuide,
     EngineMagTrackHardIron,
     CalibrationEarbuds,
+    EngineDisplayScale,
     Count,
 };
 
@@ -266,6 +267,11 @@ inline const wchar_t* help_text(HelpTopic topic) {
                    L"This follows such a change instead. Measured only on recordings, never on "
                    L"glasses; it can also react to a real field change. Needs a compass "
                    L"calibration. Applies at the next start.";
+        case HelpTopic::EngineDisplayScale:
+            return L"Changes Windows' display scale on the virtual screens while the workspace "
+                   L"runs, so text and controls are larger. Each screen goes back to its own "
+                   L"scale when the workspace stops. 175% is the most Windows allows on a "
+                   L"1080p screen. Applies at the next start.";
         case HelpTopic::CalibrationEarbuds:
             return L"Turn on if you are wearing in-ear earbuds for this compass calibration. "
                    L"Calibrate the way you normally work: their magnets are then part of the "

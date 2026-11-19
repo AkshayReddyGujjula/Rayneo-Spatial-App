@@ -143,6 +143,10 @@ bool build_engine_launch_command(const std::string& engine_executable,
         error = "turn prediction must be 0..100 ms";
         return false;
     }
+    if (display_scale_choice_index(options.display_scale_pct) < 0) {
+        error = "screen scaling must be 0 (Windows default), 100, 125, 150 or 175";
+        return false;
+    }
 
     EngineLaunchCommand built;
     built.executable = engine_executable;
@@ -181,6 +185,11 @@ bool build_engine_launch_command(const std::string& engine_executable,
         if (options.mag_track_hard_iron) {
             built.arguments.push_back(kEngineArgMagTrackHardIron);
         }
+    }
+    // Only the workspace has virtual displays to scale; 0 leaves Windows alone.
+    if (mode == LaunchMode::Workspace && options.display_scale_pct != 0) {
+        built.arguments.push_back(kEngineArgDisplayScale);
+        built.arguments.push_back(std::to_string(options.display_scale_pct));
     }
     if (!telemetry_path.empty()) {
         built.arguments.push_back(kEngineArgLog);

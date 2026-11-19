@@ -157,7 +157,7 @@ Every setting has a `?` hover help.
 | **Home** | Start workspace / Start preview, or Recenter / Reload layout / Stop while running; a **Readiness** checklist with a fix for each problem; startup steps; live head angles |
 | **Layout** | Presets, the arrangement editor, the screen list and the selected screen's settings |
 | **Comfort** | Reading stabilisation, screen dimming, night tint, cursor to centre |
-| **Tracking** | Yaw/pitch tracking, preview without head tracking, **Turn prediction**, the compass lock status, and both calibrations (**Calibrate now**, **Calibrate compass**, or **Open in console**) |
+| **Tracking** | Yaw/pitch tracking, preview without head tracking, **Turn prediction**, **Screen scaling**, the compass lock status, and both calibrations (**Calibrate now**, **Calibrate compass**, or **Open in console**) |
 | **Diagnostics** | Health checks, **Recover displays**, the engine log and logs folder |
 | **Settings** | Theme (Dark, Light, Match Windows), keep running in the notification area, **Run setup guide**, shortcuts, version and paths, Quit |
 
@@ -182,6 +182,13 @@ others fade). Night tint warms every screen, with a warmth slider. All apply liv
 **Turn prediction** shows the world slightly ahead during fast head turns so it keeps up with
 you: Off, 20, 35 (default) or 50 ms. Raise it if screens trail a quick turn, lower it if they
 overshoot when you stop. It has no effect while you read, and applies at the next start.
+
+**Screen scaling** makes text larger on the virtual screens: Windows default (untouched), 100,
+125, 150 or 175%. While the workspace runs, the engine sets Windows' own display scale (the
+Settings > Display > Scale value, not the resolution) on each virtual screen only, never on the
+glasses or the laptop panel, and puts every screen back to its own previous scale when the
+workspace stops or a screen is removed. 175% is the most Windows allows on a 1080p screen; a
+higher engine value (`--display-scale`) is clamped and logged. It applies at the next start.
 
 Calibration needs the sensor to itself, so stop the engine before calibrating.
 

@@ -131,6 +131,22 @@ were each verified on hardware for 3->4 (stacked above) and 3->5 (above and belo
 In those runs the panel was absent after the reload, the set of minimized windows
 was unchanged, and the shutdown restore was correct.
 
+**Per-monitor display scale (measured live 2026-11-19).** The Settings > Display > Scale
+value has no documented API. `DisplayConfigGetDeviceInfo` with header type `-3` fills
+`{header; int32 minScaleRel; int32 curScaleRel; int32 maxScaleRel}` and
+`DisplayConfigSetDeviceInfo` with type `-4` takes `{header; int32 scaleRel}`; the header's
+`adapterId`/`id` are the active path's *source* (QDC_ONLY_ACTIVE_PATHS, matched to the GDI
+name with `DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME`). Values index the step table
+{100,125,150,175,200,225,250,300,350,400,450,500} relative to the recommended step, whose
+index is `-minScaleRel`. On the 1920x1080 VDDs: min 0, cur 0, max 3 (recommended 100%, max
+175%); 175 then 100 set and read back (168 dpi at 175%). **Trap:** writing a rel above max
+(200%) returns 0 and reads back 200%, but the effective DPI stays clamped at 175%, so
+`plan_display_scale` (`src/vdd/display_scale.*`) clamps to max itself and the engine logs it.
+Windows persists the scale per monitor, so a VDD keeps the last value unless restored: the
+engine records each original by monitor id at first touch and restores it before the VDD is
+removed (normal shutdown, the topology guard, and a reload that shrinks the screen count).
+Engine log lines start with `display scale:`.
+
 ## Fusion notes (live-verified)
 
 - **Yaw has no absolute reference.** With the magnetometer off, a very slow steady

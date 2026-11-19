@@ -298,6 +298,15 @@ StartupView startup_view(EnginePhase phase, double phase_progress, bool head_tra
     return view;
 }
 
+int display_scale_choice_index(int display_scale_pct) {
+    for (int i = 0; i < kDisplayScaleChoiceCount; ++i) {
+        if (kDisplayScaleChoices[i] == display_scale_pct) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 int predict_ms_choice_index(int predict_ms) {
     for (int i = 0; i < kPredictMsChoiceCount; ++i) {
         if (kPredictMsChoices[i] == predict_ms) {
