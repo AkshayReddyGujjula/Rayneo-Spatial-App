@@ -1807,9 +1807,12 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
             DEVMODEW actual{};
             actual.dmSize = sizeof(actual);
             EnumDisplaySettingsExW(item.device.c_str(), ENUM_CURRENT_SETTINGS, &actual, 0);
-            std::printf("  warning: VDD[%d] %ls is at (%ld,%ld), planned (%d,%d)%s\n", item.driver,
-                        item.device.c_str(), actual.dmPosition.x, actual.dmPosition.y, item.x,
-                        item.y, item.primary ? " as primary" : "");
+            std::printf("  warning: VDD[%d] %ls is at (%ld,%ld) %lux%lu orientation %lu, planned "
+                        "(%d,%d) %dx%d orientation %lu%s\n",
+                        item.driver, item.device.c_str(), actual.dmPosition.x,
+                        actual.dmPosition.y, actual.dmPelsWidth, actual.dmPelsHeight,
+                        actual.dmDisplayOrientation, item.x, item.y, item.w, item.h,
+                        item.orientation, item.primary ? " as primary" : "");
         }
     }
     std::vector<ConfiguredDisplay> candidate;
