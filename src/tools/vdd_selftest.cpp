@@ -1053,6 +1053,14 @@ int main() {
         check(!gt::is_taskbar_autohide_notice(L"Taskbar", L"#32770",
                                               LR"(C:\Windows\explorer.exe)", {}),
               "a Taskbar dialog with no OK button is left alone");
+        std::vector<std::wstring> with_cancel = notice;
+        with_cancel.push_back(L"Cancel");
+        check(!gt::is_taskbar_autohide_notice(L"Taskbar", L"#32770",
+                                              LR"(C:\Windows\explorer.exe)", with_cancel),
+              "the notice text with a Cancel button is left alone");
+        check(!gt::is_taskbar_autohide_notice(L"Taskbar", L"#32770",
+                                              LR"(C:\Windows\explorer.exe)", {notice[1]}),
+              "the notice text without its OK button is left alone");
         check(!gt::is_taskbar_autohide_notice(L"Taskbar settings", L"#32770",
                                               LR"(C:\Windows\explorer.exe)", notice),
               "a differently titled window is left alone");

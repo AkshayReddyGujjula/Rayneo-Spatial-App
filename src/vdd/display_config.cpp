@@ -2709,18 +2709,19 @@ bool is_taskbar_autohide_notice(const std::wstring& title, const std::wstring& w
     // Measured live: the notice is a TaskDialog whose message lives in a
     // DirectUIHWND (no readable window text); its only readable child is the
     // OK button. A classic MessageBox variant exposes the message as a Static.
+    // Every readable child must be the message or the OK button: any other
+    // control (Cancel, a choice) means this is not the notice.
     bool ok_button = false;
     for (const std::wstring& text : texts) {
         const std::wstring lowered = lower_copy(text);
         if (lowered.find(L"auto-hide toolbar") != std::wstring::npos ||
             lowered.find(L"already hidden on this side") != std::wstring::npos) {
-            return true;
+            continue;
         }
-        if (lowered == L"ok") {
-            ok_button = true;
-        } else {
-            return false;  // any other control (Cancel, a choice) is not this notice
+        if (lowered != L"ok") {
+            return false;
         }
+        ok_button = true;
     }
     return ok_button;
 }

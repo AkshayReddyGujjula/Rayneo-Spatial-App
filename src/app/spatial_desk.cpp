@@ -1502,6 +1502,9 @@ int wmain(int argc, wchar_t** argv) {
     // after the reload returns. For a while after any screen-count change the
     // layout tick detaches it again, exactly as the takeover did.
     double redetach_watch_until = -1.0;
+    // Explorer's auto-hide notice follows a display change by up to a few
+    // seconds; the takeover and every reload open a 20 s sweep window.
+    double notice_sweep_until = 20.0;
     // A transient failure (the returning panel's mode not readable yet) gets
     // retried on later ticks; a detach that keeps failing stops after three.
     int redetach_failures = 0;
@@ -1673,8 +1676,14 @@ int wmain(int argc, wchar_t** argv) {
                 fit_window_to_display(hwnd, render_monitor_id);
                 // Explorer's "toolbar already hidden on this side" notice
                 // appears after primary-display changes; it is clutter only.
-                if (const int dismissed = gt::dismiss_taskbar_autohide_notices(); dismissed > 0) {
-                    std::printf("dismissed %d Explorer auto-hide taskbar notice(s)\n", dismissed);
+                // Swept only for a while after the workspace changed the
+                // displays, so a warning the user raises later stays put.
+                if (elapsed < notice_sweep_until) {
+                    if (const int dismissed = gt::dismiss_taskbar_autohide_notices();
+                        dismissed > 0) {
+                        std::printf("dismissed %d Explorer auto-hide taskbar notice(s)\n",
+                                    dismissed);
+                    }
                 }
             }
             std::error_code time_error;
@@ -1750,6 +1759,8 @@ int wmain(int argc, wchar_t** argv) {
                     // A reposition can move the glasses aside (a stacked
                     // screen takes their home slot) or re-base every desktop.
                     fit_window_to_display(hwnd, render_monitor_id);
+                    notice_sweep_until =
+                        std::chrono::duration<double>(SteadyClock::now() - start).count() + 20.0;
                     // Any add or remove (a rollback included) can re-attach
                     // the laptop panel; a fatal rollback quits below anyway.
                     if (rollback_error.empty() &&
