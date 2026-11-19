@@ -192,7 +192,9 @@ void paint_tracking(Ui& ui, const RECT& content);
 void paint_diagnostics(Ui& ui, const RECT& content);
 void paint_settings(Ui& ui, const RECT& content);
 // Header actions for the pages that have them (right-aligned at right).
-void paint_layout_header_actions(Ui& ui, int right, int top, int height);
+// title_right: where the page title ends; the "Unsaved changes" badge is
+// dropped rather than drawn over it in a narrow window (Revert still shows).
+void paint_layout_header_actions(Ui& ui, int right, int top, int height, int title_right);
 void paint_wizard(Ui& ui, const RECT& client);
 
 // Matches the VERSIONINFO block in resources/rayneo_spatial.rc.

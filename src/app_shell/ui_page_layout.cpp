@@ -731,7 +731,7 @@ void paint_inspector(Ui& ui, const RECT& frame) {
             // height swap) and the engine gives the screen a 1080 x 1920
             // desktop. Its help mark lines up with the sliders' column.
             cy += switch_row(ui, kUiScreenPortrait, frame.left + pad, cy, inner_w - ui.px(space::sm), L"Portrait",
-                             L"Stand the screen on its end (1080 x 1920).", screen.portrait, true, kHelpFields,
+                             L"Stand the screen on its end (1080 x 1920).", screen.portrait, true, kHelpFields,
                              static_cast<int>(LayoutField::Count), HelpTopic::FieldPortrait);
             cy += ui.px(space::xs);
         }
@@ -775,7 +775,7 @@ void paint_arc_preview(Ui& ui, const RECT& rect, const Layout& layout, int selec
     ui.c.pop_clip();
 }
 
-void paint_layout_header_actions(Ui& ui, int right, int top, int height) {
+void paint_layout_header_actions(Ui& ui, int right, int top, int height, int title_right) {
     const AppState& s = ui.s;
     const int help_w = help_mark_width(ui.dpi);
     int x = right;
@@ -790,6 +790,9 @@ void paint_layout_header_actions(Ui& ui, int right, int top, int height) {
     if (s.layout_dirty) {
         const std::wstring text = L"Unsaved changes";
         const int w = text_width(ui.c.dc(), ui.f.small_strong, text) + ui.px(28);
+        if (revert.left - ui.px(space::lg) - w < title_right + ui.px(space::lg)) {
+            return;
+        }
         draw_badge(ui.c, rect_of(revert.left - ui.px(space::lg) - w, top + (height - ui.px(26)) / 2, w, ui.px(26)), text,
                    ui.t.warning, ui.f.small_strong);
     }

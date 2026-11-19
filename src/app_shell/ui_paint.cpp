@@ -639,9 +639,9 @@ int paint_banner(Ui& ui, int left, int top, int width) {
     return height;
 }
 
-void paint_page_actions(Ui& ui, int right, int top, int height) {
+void paint_page_actions(Ui& ui, int right, int top, int height, int title_right) {
     if (ui.s.page == AppPage::Layout) {
-        paint_layout_header_actions(ui, right, top, height);
+        paint_layout_header_actions(ui, right, top, height, title_right);
         return;
     }
     if (ui.s.page == AppPage::Diagnostics || ui.s.page == AppPage::Home) {
@@ -689,7 +689,9 @@ void paint_content(Ui& ui, const RECT& content) {
     const int actions_w = std::min(ui.px(420), (right - left) / 2);
     ui.c.text(ui.f.display, ui.t.text, rect_of(left, y, right - left - actions_w, ui.px(38)),
               app_page_title(s.page), DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    paint_page_actions(ui, right, y, actions_h);
+    const int title_right =
+        std::min(right - actions_w, left + text_width(ui.c.dc(), ui.f.display, app_page_title(s.page)));
+    paint_page_actions(ui, right, y, actions_h, title_right);
     y += ui.px(40);
     ui.c.text(ui.f.body, ui.t.text_dim, rect_of(left, y, right - left, ui.px(22)),
               app_page_subtitle(s.page), DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);

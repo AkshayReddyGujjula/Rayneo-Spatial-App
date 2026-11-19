@@ -605,7 +605,7 @@ std::vector<Shot> shots() {
     list.push_back({"layout-narrow-820x640", 820, 640, 96, true, page(AppPage::Layout, true, false)});
     // A portrait screen on the left (a monitor turned sideways for long
     // chats), selected so the inspector shows its Portrait switch on.
-    const auto portrait_left = [](bool dark, bool three_d, bool fullscreen) {
+    const auto portrait_left = [](bool dark, bool three_d, bool fullscreen, int inspector_scroll = 0) {
         return [=](AppState& s) {
             base_state(s, dark);
             s.page = AppPage::Layout;
@@ -615,11 +615,18 @@ std::vector<Shot> shots() {
             s.layout_dirty = true;
             s.editor_3d = three_d;
             s.editor_fullscreen = fullscreen;
+            if (inspector_scroll > 0) {
+                s.scroll[gt::kScrollInspector].offset = inspector_scroll;
+                s.scroll[gt::kScrollInspector].max_offset = 2000;  // clamped by the paint pass
+            }
         };
     };
     list.push_back({"layout-portrait-1280x800", 1280, 800, 96, true, portrait_left(true, false, false)});
     list.push_back({"layout-portrait-1280x800-light", 1280, 800, 96, false, portrait_left(false, false, false)});
-    list.push_back({"layout-portrait-narrow-820x640", 820, 640, 96, true, portrait_left(true, false, false)});
+    // Scrolled to the Size group so the switch itself is in the picture.
+    list.push_back({"layout-portrait-size-1280x800", 1280, 800, 96, true, portrait_left(true, false, false, 220)});
+    list.push_back({"layout-portrait-size-1280x800-light", 1280, 800, 96, false, portrait_left(false, false, false, 220)});
+    list.push_back({"layout-portrait-narrow-820x640", 820, 640, 96, true, portrait_left(true, false, false, 300)});
     list.push_back({"layout-portrait-3d-1920x1080-150", 1920, 1080, 144, true, portrait_left(true, true, false)});
     list.push_back({"layout-portrait-fullscreen-3d-1280x800-light", 1280, 800, 96, false,
                     portrait_left(false, true, true)});
