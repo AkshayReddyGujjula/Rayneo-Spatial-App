@@ -624,9 +624,25 @@ std::vector<Shot> shots() {
     list.push_back({"layout-portrait-1280x800", 1280, 800, 96, true, portrait_left(true, false, false)});
     list.push_back({"layout-portrait-1280x800-light", 1280, 800, 96, false, portrait_left(false, false, false)});
     // Scrolled to the Size group so the switch itself is in the picture.
-    list.push_back({"layout-portrait-size-1280x800", 1280, 800, 96, true, portrait_left(true, false, false, 220)});
-    list.push_back({"layout-portrait-size-1280x800-light", 1280, 800, 96, false, portrait_left(false, false, false, 220)});
-    list.push_back({"layout-portrait-narrow-820x640", 820, 640, 96, true, portrait_left(true, false, false, 300)});
+    // The inspector must offer the Portrait switch for the selected screen.
+    const auto portrait_switch_offered = [](const std::string& name, const AppState& s, const uint32_t*,
+                                            const auto& hotspots) {
+        const auto spot = std::find_if(hotspots.begin(), hotspots.end(), [](const gt::ui::Hotspot& h) {
+            return h.id == gt::kUiScreenPortrait;
+        });
+        if (spot == hotspots.end() || !spot->enabled) {
+            fail(name, "the Layout inspector offers no Portrait switch");
+        }
+        if (!s.layout.screens[s.selected_screen].portrait) {
+            fail(name, "the selected screen is not portrait");
+        }
+    };
+    list.push_back({"layout-portrait-size-1280x800", 1280, 800, 96, true, portrait_left(true, false, false, 220),
+                    portrait_switch_offered});
+    list.push_back({"layout-portrait-size-1280x800-light", 1280, 800, 96, false,
+                    portrait_left(false, false, false, 220), portrait_switch_offered});
+    list.push_back({"layout-portrait-narrow-820x640", 820, 640, 96, true, portrait_left(true, false, false, 270),
+                    portrait_switch_offered});
     list.push_back({"layout-portrait-3d-1920x1080-150", 1920, 1080, 144, true, portrait_left(true, true, false)});
     list.push_back({"layout-portrait-fullscreen-3d-1280x800-light", 1280, 800, 96, false,
                     portrait_left(false, true, true)});

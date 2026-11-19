@@ -791,6 +791,12 @@ void paint_layout_header_actions(Ui& ui, int right, int top, int height, int tit
         const std::wstring text = L"Unsaved changes";
         const int w = text_width(ui.c.dc(), ui.f.small_strong, text) + ui.px(28);
         if (revert.left - ui.px(space::lg) - w < title_right + ui.px(space::lg)) {
+            // Narrow window: the badge would cover the page title, so a
+            // warning dot beside Revert marks the unsaved edits instead.
+            const int dot_x = revert.left - ui.px(space::md);
+            if (dot_x - ui.px(5) > title_right) {
+                ui.c.fill_circle(dot_x, top + height / 2, static_cast<float>(ui.px(5)), ui.t.warning);
+            }
             return;
         }
         draw_badge(ui.c, rect_of(revert.left - ui.px(space::lg) - w, top + (height - ui.px(26)) / 2, w, ui.px(26)), text,
