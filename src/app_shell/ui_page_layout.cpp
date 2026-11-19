@@ -726,6 +726,15 @@ void paint_inspector(Ui& ui, const RECT& frame) {
         cy += ui.px(space::sm);
         ui.c.text(ui.f.caption, t.text_faint, rect_of(frame.left + pad, cy, inner_w, ui.px(18)), group.title);
         cy += ui.px(20);
+        if (group.fields.front() == LayoutField::Width) {
+            // Portrait leads the Size group: it turns the quad (width and
+            // height swap) and the engine gives the screen a 1080 x 1920
+            // desktop. Its help mark lines up with the sliders' column.
+            cy += switch_row(ui, kUiScreenPortrait, frame.left + pad, cy, inner_w - ui.px(space::sm), L"Portrait",
+                             L"Stand the screen on its end (1080 x 1920).", screen.portrait, true, kHelpFields,
+                             static_cast<int>(LayoutField::Count), HelpTopic::FieldPortrait);
+            cy += ui.px(space::xs);
+        }
         for (const LayoutField field : group.fields) {
             const float value = layout_field_value(s.layout, screen, field);
             RECT r = rect_of(frame.left + pad, cy, slider_w, ui.px(size::slider));

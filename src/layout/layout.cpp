@@ -175,11 +175,13 @@ bool load_layout(const std::string& path, Layout& layout, std::string& error) {
             screen.roll_deg = required<float>(value, "roll_deg");
             screen.distance_m = required<float>(value, "distance_m");
             screen.width_m = required<float>(value, "width_m");
-            screen.height_m = value.value("height_m", screen.width_m * 9.0f / 16.0f);
+            screen.portrait = value.value("portrait", false);
+            // A missing height follows the orientation: 16:9, or 9:16 portrait.
+            screen.height_m = value.value("height_m", screen.portrait ? screen.width_m * 16.0f / 9.0f
+                                                                      : screen.width_m * 9.0f / 16.0f);
             if (value.contains("color")) {
                 screen.color = value.at("color").get<std::array<float, 3>>();
             }
-            screen.portrait = value.value("portrait", false);
             parsed.screens.push_back(std::move(screen));
         }
         if (document.contains("capture_policy")) {

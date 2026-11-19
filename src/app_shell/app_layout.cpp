@@ -48,7 +48,7 @@ ScreenLayout make_screen(const std::string& id, int vdd_index, float yaw_deg, fl
     screen.roll_deg = 0.0f;
     screen.distance_m = distance_m;
     screen.width_m = width_m;
-    screen.height_m = width_m * 9.0f / 16.0f;
+    screen.height_m = screen_height_for_width(width_m, false);
     screen.color = kScreenColors[color_index % kScreenColors.size()];
     return screen;
 }
@@ -215,6 +215,11 @@ bool add_screen(Layout& layout, std::string& error) {
         screen = make_screen(id, vdd_index, std::min(180.0f, last.yaw_deg + 30.0f),
                              last.distance_m, last.width_m, layout.screens.size());
         screen.height_m = last.height_m;
+        // A new screen is always landscape: copying a portrait neighbour's
+        // tall size would give a tall quad whose desktop is 1920 x 1080.
+        if (screen.height_m > screen.width_m) {
+            std::swap(screen.width_m, screen.height_m);
+        }
         screen.pitch_deg = last.pitch_deg;
         screen.roll_deg = last.roll_deg;
         screen.color = kScreenColors[layout.screens.size() % kScreenColors.size()];
@@ -222,6 +227,28 @@ bool add_screen(Layout& layout, std::string& error) {
     layout.screens.push_back(screen);
     if (!validate_layout(layout, error)) {
         layout.screens.pop_back();
+        return false;
+    }
+    return true;
+}
+
+float screen_height_for_width(float width_m, bool portrait) {
+    return portrait ? width_m * 16.0f / 9.0f : width_m * 9.0f / 16.0f;
+}
+
+bool set_screen_portrait(Layout& layout, ScreenLayout& screen, bool portrait, std::string& error) {
+    const ScreenLayout before = screen;
+    screen.portrait = portrait;
+    // Same metres, turned: swap only when the shape disagrees with the new
+    // orientation, so on -> off -> on (and off -> on -> off) is the identity
+    // and a square screen keeps its size.
+    const bool tall = screen.height_m > screen.width_m;
+    const bool wide = screen.width_m > screen.height_m;
+    if ((portrait && wide) || (!portrait && tall)) {
+        std::swap(screen.width_m, screen.height_m);
+    }
+    if (!validate_layout(layout, error)) {
+        screen = before;
         return false;
     }
     return true;

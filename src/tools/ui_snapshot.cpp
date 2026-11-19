@@ -603,6 +603,26 @@ std::vector<Shot> shots() {
                         s.layout_dirty = true;
                     }});
     list.push_back({"layout-narrow-820x640", 820, 640, 96, true, page(AppPage::Layout, true, false)});
+    // A portrait screen on the left (a monitor turned sideways for long
+    // chats), selected so the inspector shows its Portrait switch on.
+    const auto portrait_left = [](bool dark, bool three_d, bool fullscreen) {
+        return [=](AppState& s) {
+            base_state(s, dark);
+            s.page = AppPage::Layout;
+            std::string error;
+            gt::set_screen_portrait(s.layout, s.layout.screens[0], true, error);
+            s.selected_screen = 0;
+            s.layout_dirty = true;
+            s.editor_3d = three_d;
+            s.editor_fullscreen = fullscreen;
+        };
+    };
+    list.push_back({"layout-portrait-1280x800", 1280, 800, 96, true, portrait_left(true, false, false)});
+    list.push_back({"layout-portrait-1280x800-light", 1280, 800, 96, false, portrait_left(false, false, false)});
+    list.push_back({"layout-portrait-narrow-820x640", 820, 640, 96, true, portrait_left(true, false, false)});
+    list.push_back({"layout-portrait-3d-1920x1080-150", 1920, 1080, 144, true, portrait_left(true, true, false)});
+    list.push_back({"layout-portrait-fullscreen-3d-1280x800-light", 1280, 800, 96, false,
+                    portrait_left(false, true, true)});
     list.push_back({"comfort-1280x800", 1280, 800, 96, true, [](AppState& s) {
                         base_state(s, true);
                         running_state(s);

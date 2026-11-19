@@ -575,6 +575,64 @@ void test_presets_and_screens() {
     check(gt::validate_layout(layout, error), "a one-screen layout is still valid");
 }
 
+void test_portrait_screens() {
+    std::printf("app_selftest: portrait screens\n");
+    std::string error;
+    check(std::fabs(gt::screen_height_for_width(1.6f, false) - 0.9f) < 1e-5f &&
+              std::fabs(gt::screen_height_for_width(0.9f, true) - 1.6f) < 1e-5f,
+          "the default height is 16:9 landscape and 9:16 portrait");
+
+    gt::Layout layout = gt::preset_layout(gt::LayoutPreset::TripleArc);
+    const gt::ScreenLayout original = layout.screens[0];
+    gt::ScreenLayout& left = layout.screens[0];
+    check(!original.portrait && original.width_m > original.height_m, "the triple arc starts landscape");
+    check(gt::set_screen_portrait(layout, left, true, error) && left.portrait &&
+              left.width_m == original.height_m && left.height_m == original.width_m,
+          "turning portrait on swaps width and height (same metres, tall)");
+    check(gt::set_screen_portrait(layout, left, true, error) && left.portrait &&
+              left.width_m == original.height_m && left.height_m == original.width_m,
+          "turning portrait on again leaves an already-tall screen alone");
+    check(gt::set_screen_portrait(layout, left, false, error) && !left.portrait &&
+              left.width_m == original.width_m && left.height_m == original.height_m,
+          "off -> on -> off is the identity");
+    check(gt::set_screen_portrait(layout, left, false, error) && left.width_m == original.width_m &&
+              left.height_m == original.height_m,
+          "turning portrait off on a landscape screen leaves it alone");
+    check(gt::set_screen_portrait(layout, left, true, error), "portrait on again");
+    const gt::ScreenLayout started_tall = left;
+    check(gt::set_screen_portrait(layout, left, false, error) &&
+              gt::set_screen_portrait(layout, left, true, error) && left.portrait &&
+              left.width_m == started_tall.width_m && left.height_m == started_tall.height_m,
+          "on -> off -> on is the identity");
+    check(layout.screens[1].width_m == original.width_m && !layout.screens[1].portrait,
+          "toggling one screen leaves the others alone");
+
+    gt::Layout square_layout = gt::preset_layout(gt::LayoutPreset::Single);
+    gt::ScreenLayout& square = square_layout.screens[0];
+    square.width_m = square.height_m = 1.0f;
+    check(gt::set_screen_portrait(square_layout, square, true, error) && square.portrait &&
+              square.width_m == 1.0f && square.height_m == 1.0f,
+          "a square screen keeps its size when turned");
+
+    // add_screen copies the last screen's size; a portrait neighbour must not
+    // make the new (landscape) screen tall.
+    gt::Layout grow = gt::preset_layout(gt::LayoutPreset::TripleArc);
+    check(gt::set_screen_portrait(grow, grow.screens.back(), true, error), "the last screen turns portrait");
+    check(gt::add_screen(grow, error) && !grow.screens.back().portrait &&
+              grow.screens.back().width_m > grow.screens.back().height_m &&
+              grow.screens.back().width_m == grow.screens[2].height_m,
+          "a screen added after a portrait one is landscape with the same metres");
+    gt::Layout fresh = gt::preset_layout(gt::LayoutPreset::Single);
+    check(gt::add_screen(fresh, error) && !fresh.screens.back().portrait, "an added screen is not portrait");
+
+    // The Height help names the 9:16 rule for portrait screens.
+    check(std::wstring(gt::help_text(gt::HelpTopic::FieldHeight)).find(L"9:16") != std::wstring::npos,
+          "the height help names the 9:16 portrait ratio");
+    check(std::wstring(gt::help_text(gt::HelpTopic::FieldPortrait)) ==
+              L"Turn this screen sideways (1080 x 1920) for long documents and chats.",
+          "the portrait toggle has its help text");
+}
+
 void test_field_normalisation() {
     std::printf("app_selftest: field normalisation\n");
     gt::Layout layout = gt::preset_layout(gt::LayoutPreset::TripleArc);
@@ -1058,6 +1116,19 @@ void test_user_presets(const std::filesystem::path& directory) {
     check(gt::delete_layout_preset(presets, "solo", error), "a preset deletes");
     check(!gt::delete_layout_preset(presets, "solo", error), "deleting twice fails");
     check(gt::list_layout_presets(presets).size() == 1, "the deleted preset is gone");
+
+    gt::Layout portrait_layout = gt::preset_layout(gt::LayoutPreset::TripleArc);
+    check(gt::set_screen_portrait(portrait_layout, portrait_layout.screens[0], true, error) &&
+              gt::save_layout_preset(presets, "reading", portrait_layout, error),
+          "a preset with a portrait screen saves");
+    gt::Layout portrait_loaded;
+    check(gt::load_layout_preset(presets, "reading", portrait_loaded, error) &&
+              portrait_loaded.screens.size() == 3 && portrait_loaded.screens[0].portrait &&
+              !portrait_loaded.screens[1].portrait && !portrait_loaded.screens[2].portrait &&
+              portrait_loaded.screens[0].width_m == portrait_layout.screens[0].width_m &&
+              portrait_loaded.screens[0].height_m == portrait_layout.screens[0].height_m,
+          "a preset round-trips the portrait flag and its tall size");
+    check(gt::delete_layout_preset(presets, "reading", error), "the portrait preset deletes");
 
     gt::AppConfig config;
     check(config.active_preset == "triple", "the default active preset is triple");
@@ -2422,6 +2493,7 @@ int main() {
     test_startup_phase();
     test_app_config(directory);
     test_presets_and_screens();
+    test_portrait_screens();
     test_user_presets(directory);
     test_help_topics();
     test_orbit();

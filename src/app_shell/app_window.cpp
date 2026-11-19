@@ -1699,6 +1699,20 @@ void AppWindow::execute(int id, int arg) {
                                   L" of 8); Save and apply to use it");
             }
             break;
+        case kUiScreenPortrait:
+            if (state_.selected_screen < state_.layout.screens.size()) {
+                ScreenLayout& screen = state_.layout.screens[state_.selected_screen];
+                const bool portrait = !screen.portrait;
+                if (!set_screen_portrait(state_.layout, screen, portrait, layout_error)) {
+                    state_.set_banner(L"Could not turn the screen: " + wide_from_utf8(layout_error),
+                                      Severity::Error);
+                } else {
+                    state_.layout_dirty = true;
+                    state_.show_toast(portrait ? L"Portrait (1080 x 1920); Save and apply to use it"
+                                               : L"Landscape (1920 x 1080); Save and apply to use it");
+                }
+            }
+            break;
         case kUiRemoveScreen:
             if (!remove_screen(state_.layout, state_.selected_screen, layout_error)) {
                 state_.set_banner(L"Could not remove the screen: " + wide_from_utf8(layout_error),

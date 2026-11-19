@@ -52,6 +52,7 @@ enum UiId : int {
     kUiPresetDelete = 21,
     kUiEditorFullscreen = 22,
     kUiEditorDimToggle = 23,
+    kUiScreenPortrait = 24,  // selected screen's Portrait switch (Layout inspector)
     kUiPresetBase = 100,
     kUiFieldBase = 200,
     kUiScreenBase = 300,
