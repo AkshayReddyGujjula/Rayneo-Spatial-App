@@ -280,7 +280,12 @@ CapturePollResult DesktopDuplicator::poll_gdi(CapturedDesktop& frame, std::strin
     const ULONGLONG now_ms = GetTickCount64();
     if (now_ms >= gdi_next_rect_check_ms_) {
         gdi_next_rect_check_ms_ = now_ms + 1000;
-        if (!refresh_gdi_output_rect(error)) return CapturePollResult::Failed;
+        if (!refresh_gdi_output_rect(error)) {
+            // The resize is still pending: retry on the next poll instead of
+            // capturing the old-size surface from a stale rect for a second.
+            gdi_next_rect_check_ms_ = 0;
+            return CapturePollResult::Failed;
+        }
     }
     const BOOL copied = BitBlt(gdi_memory_dc_, 0, 0, static_cast<int>(width_),
                                static_cast<int>(height_), gdi_desktop_dc_, output_rect_.left,
@@ -511,10 +516,9 @@ CapturePollResult DesktopDuplicator::poll(CapturedDesktop& frame, std::string& e
         ID3D11ShaderResourceView* unbound[] = {nullptr, nullptr};
         context_->PSSetShaderResources(0, 2, unbound);
         context_->CopyResource(copy_texture_.Get(), source.Get());
-        published_.valid = true;
-        published_.rotation = rotation_;
-        published_.surface_width = surface_width_;
-        published_.surface_height = surface_height_;
+        // published_ is committed only when the frame is returned below: a
+        // later Failed return never reaches set_screen_texture, so the next
+        // frame must publish again.
     }
     if (info.LastMouseUpdateTime.QuadPart != 0) {
         frame.pointer.position_updated = true;
@@ -552,6 +556,12 @@ CapturePollResult DesktopDuplicator::poll(CapturedDesktop& frame, std::string& e
     if (FAILED(result)) {
         error = hresult_text("ReleaseFrame", result);
         return CapturePollResult::Failed;
+    }
+    if (frame.desktop_updated) {
+        published_.valid = true;
+        published_.rotation = rotation_;
+        published_.surface_width = surface_width_;
+        published_.surface_height = surface_height_;
     }
     ++frames_captured_;
     return CapturePollResult::Frame;
