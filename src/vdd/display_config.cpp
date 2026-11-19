@@ -41,13 +41,20 @@ bool contains_case_insensitive(const std::wstring& text, const wchar_t* needle) 
     return lower_text.find(lower_needle) != std::wstring::npos;
 }
 
+// Rates of the width x height base mode in either orientation: a display that
+// is currently rotated (portrait, possibly persisted from an earlier session)
+// lists its modes in the rotated orientation, so 1920x1080 reads as 1080x1920.
+// EDS_ROTATEDMODE asks for every orientation's modes.
 std::vector<int> refresh_rates(const std::wstring& device_name, int width, int height) {
     std::set<int> unique;
     DEVMODEW mode{};
     mode.dmSize = sizeof(mode);
-    for (DWORD index = 0; EnumDisplaySettingsExW(device_name.c_str(), index, &mode, 0); ++index) {
-        if (static_cast<int>(mode.dmPelsWidth) == width &&
-            static_cast<int>(mode.dmPelsHeight) == height && mode.dmDisplayFrequency > 1) {
+    for (DWORD index = 0;
+         EnumDisplaySettingsExW(device_name.c_str(), index, &mode, EDS_ROTATEDMODE); ++index) {
+        const int w = static_cast<int>(mode.dmPelsWidth);
+        const int h = static_cast<int>(mode.dmPelsHeight);
+        if (((w == width && h == height) || (w == height && h == width)) &&
+            mode.dmDisplayFrequency > 1) {
             unique.insert(static_cast<int>(mode.dmDisplayFrequency));
         }
         mode = DEVMODEW{};
@@ -399,36 +406,154 @@ std::vector<PlannedDesktop> plan_workspace_desktops(const std::vector<ScreenPlac
             if (member.driver_index == center_driver) center_column = c;
         }
     }
-    std::map<int, std::pair<int, int>> position;  // driver -> (x, y)
+    // Per-display extents: a portrait desktop is the landscape base mode rotated.
+    const auto extent_w = [&](const ScreenPlacement& s) { return s.portrait ? height : width; };
+    const auto extent_h = [&](const ScreenPlacement& s) { return s.portrait ? width : height; };
+    // Row 0 of each column is the centre itself in its column, else the most
+    // level screen, so every column's base row lines up with the primary.
+    std::vector<size_t> bases(columns.size(), 0);
+    std::vector<int> column_widths(columns.size(), 0);
     for (size_t c = 0; c < columns.size(); ++c) {
         const auto& column = columns[c];
-        // Row 0 is the centre itself in its column, else the most level screen,
-        // so every column's base row lines up with the primary at y = 0.
-        size_t base = static_cast<size_t>(
+        bases[c] = static_cast<size_t>(
             std::min_element(column.begin(), column.end(), nearer_level) - column.begin());
         for (size_t r = 0; r < column.size(); ++r) {
-            if (column[r].driver_index == center_driver) base = r;
+            if (column[r].driver_index == center_driver) bases[c] = r;
+            column_widths[c] = std::max(column_widths[c], extent_w(column[r]));
         }
-        const int x = width * (static_cast<int>(c) - static_cast<int>(center_column));
+    }
+    // Base x relative to its column's left edge (members centre on the base).
+    const auto base_offset = [&](size_t c) {
+        return (column_widths[c] - extent_w(columns[c][bases[c]])) / 2;
+    };
+    // The centre desktop sits at (0,0); every base row is vertically centred
+    // on its centre line.
+    const int center_height =
+        columns.empty() ? height : extent_h(columns[center_column][bases[center_column]]);
+    // Column left edges: the centre column is placed so its base lands at
+    // x = 0; the others abut outward by their (widest-member) widths.
+    std::vector<int> column_left(columns.size(), 0);
+    if (!columns.empty()) {
+        column_left[center_column] = -base_offset(center_column);
+        for (size_t c = center_column + 1; c < columns.size(); ++c) {
+            column_left[c] = column_left[c - 1] + column_widths[c - 1];
+        }
+        for (size_t c = center_column; c-- > 0;) {
+            column_left[c] = column_left[c + 1] - column_widths[c];
+        }
+    }
+    std::map<int, PlannedDesktop> position;  // driver -> desktop
+    for (size_t c = 0; c < columns.size(); ++c) {
+        const auto& column = columns[c];
+        const size_t base = bases[c];
+        const int base_x = column_left[c] + base_offset(c);
+        const int base_w = extent_w(column[base]);
+        std::vector<int> ys(column.size(), 0);
+        ys[base] = (center_height - extent_h(column[base])) / 2;
+        // Higher pitch (looking up) is above: negative Windows y, cumulative
+        // heights.
+        for (size_t r = base + 1; r < column.size(); ++r) {
+            ys[r] = ys[r - 1] - extent_h(column[r]);
+        }
+        for (size_t r = base; r-- > 0;) {
+            ys[r] = ys[r + 1] + extent_h(column[r + 1]);
+        }
         for (size_t r = 0; r < column.size(); ++r) {
-            // Higher pitch (looking up) is above: negative Windows y.
-            const int y = height * (static_cast<int>(base) - static_cast<int>(r));
-            position[column[r].driver_index] = {x, y};
+            PlannedDesktop desktop;
+            desktop.driver_index = column[r].driver_index;
+            desktop.width = extent_w(column[r]);
+            desktop.height = extent_h(column[r]);
+            desktop.portrait = column[r].portrait;
+            desktop.x = base_x + (base_w - desktop.width) / 2;
+            desktop.y = ys[r];
+            position[desktop.driver_index] = desktop;
         }
     }
     std::vector<PlannedDesktop> planned;
     planned.reserve(screens.size());
     for (const ScreenPlacement& screen : screens) {
-        PlannedDesktop desktop;
-        desktop.driver_index = screen.driver_index;
         const auto found = position.find(screen.driver_index);
         if (found != position.end()) {
-            desktop.x = found->second.first;
-            desktop.y = found->second.second;
+            planned.push_back(found->second);
+        } else {
+            PlannedDesktop desktop;
+            desktop.driver_index = screen.driver_index;
+            planned.push_back(desktop);
         }
-        planned.push_back(desktop);
     }
     return planned;
+}
+
+bool desktops_tile_seamlessly(const std::vector<PlannedDesktop>& desktops, std::string& reason) {
+    reason.clear();
+    const auto overlaps = [](const PlannedDesktop& a, const PlannedDesktop& b) {
+        return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height &&
+               b.y < a.y + a.height;
+    };
+    const auto share_edge = [](const PlannedDesktop& a, const PlannedDesktop& b) {
+        const bool vertical_edge = a.x + a.width == b.x || b.x + b.width == a.x;
+        const bool vertical_overlap = a.y < b.y + b.height && b.y < a.y + a.height;
+        const bool horizontal_edge = a.y + a.height == b.y || b.y + b.height == a.y;
+        const bool horizontal_overlap = a.x < b.x + b.width && b.x < a.x + a.width;
+        return (vertical_edge && vertical_overlap) || (horizontal_edge && horizontal_overlap);
+    };
+    for (size_t i = 0; i < desktops.size(); ++i) {
+        for (size_t j = i + 1; j < desktops.size(); ++j) {
+            if (overlaps(desktops[i], desktops[j])) {
+                reason = "virtual desktops " + std::to_string(desktops[i].driver_index) + " and " +
+                         std::to_string(desktops[j].driver_index) + " overlap";
+                return false;
+            }
+        }
+    }
+    if (desktops.empty()) return true;
+    std::vector<bool> reached(desktops.size(), false);
+    std::vector<size_t> frontier{0};
+    reached[0] = true;
+    while (!frontier.empty()) {
+        const size_t current = frontier.back();
+        frontier.pop_back();
+        for (size_t j = 0; j < desktops.size(); ++j) {
+            if (!reached[j] && share_edge(desktops[current], desktops[j])) {
+                reached[j] = true;
+                frontier.push_back(j);
+            }
+        }
+    }
+    for (size_t i = 0; i < desktops.size(); ++i) {
+        if (!reached[i]) {
+            reason = "virtual desktop " + std::to_string(desktops[i].driver_index) +
+                     " shares no edge with the rest of the workspace (a gap)";
+            return false;
+        }
+    }
+    return true;
+}
+
+DEVMODEW build_virtual_desktop_mode(const PlannedDesktop& desktop, int refresh_hz) {
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    mode.dmPelsWidth = static_cast<DWORD>(desktop.width);
+    mode.dmPelsHeight = static_cast<DWORD>(desktop.height);
+    mode.dmDisplayFrequency = static_cast<DWORD>(refresh_hz);
+    mode.dmPosition.x = static_cast<LONG>(desktop.x);
+    mode.dmPosition.y = static_cast<LONG>(desktop.y);
+    mode.dmDisplayOrientation = desktop.portrait ? DMDO_90 : DMDO_DEFAULT;
+    mode.dmFields =
+        DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY | DM_POSITION | DM_DISPLAYORIENTATION;
+    return mode;
+}
+
+RECT center_desktop_rect(const std::vector<ConfiguredDisplay>& displays) {
+    RECT rect{0, 0, 1920, 1080};
+    for (const ConfiguredDisplay& display : displays) {
+        if (display.x == 0 && display.y == 0 && display.width > 0 && display.height > 0) {
+            rect.right = display.width;
+            rect.bottom = display.height;
+            break;
+        }
+    }
+    return rect;
 }
 
 
@@ -455,8 +580,7 @@ bool display_rects_intersect(int ax, int ay, int aw, int ah, int bx, int by, int
 
 std::vector<PlannedAside> plan_aside_moves(
     const std::vector<DisplayModeSnapshot>& snapshots,
-    const std::vector<PlannedDesktop>& slots, int slot_width, int slot_height,
-    const std::set<std::wstring>& vdd_devices) {
+    const std::vector<PlannedDesktop>& slots, const std::set<std::wstring>& vdd_devices) {
     int base_x = 0;
     for (const DisplayModeSnapshot& snapshot : snapshots) {
         // Virtual displays are being re-staged into the slots, so their
@@ -470,7 +594,7 @@ std::vector<PlannedAside> plan_aside_moves(
                                         static_cast<int>(snapshot.mode.dmPelsWidth));
     }
     for (const PlannedDesktop& slot : slots) {
-        base_x = std::max(base_x, slot.x + slot_width);
+        base_x = std::max(base_x, slot.x + slot.width);
     }
     const auto needs_aside = [&](const DisplayModeSnapshot& snapshot) {
         if (vdd_devices.contains(snapshot.device_name)) {
@@ -484,7 +608,7 @@ std::vector<PlannedAside> plan_aside_moves(
         const int w = static_cast<int>(snapshot.mode.dmPelsWidth);
         const int h = static_cast<int>(snapshot.mode.dmPelsHeight);
         for (const PlannedDesktop& slot : slots) {
-            if (display_rects_intersect(x, y, w, h, slot.x, slot.y, slot_width, slot_height)) {
+            if (display_rects_intersect(x, y, w, h, slot.x, slot.y, slot.width, slot.height)) {
                 return true;
             }
         }
@@ -995,22 +1119,26 @@ LONG commit_display_changes() {
 
 // True when the display currently reports the expected geometry (and, when
 // asked, the expected primary flag). Single shot; the waiter below polls it.
+// A rotation is part of the mode: the orientation must match too (a portrait
+// toggle that did not land reads back as the old orientation).
 bool display_layout_matches(const std::wstring& device_name, int x, int y, int w, int h,
-                            bool check_primary, bool want_primary) {
+                            DWORD orientation, bool check_primary, bool want_primary) {
     DEVMODEW mode{};
     mode.dmSize = sizeof(mode);
     return EnumDisplaySettingsExW(device_name.c_str(), ENUM_CURRENT_SETTINGS, &mode, 0) != 0 &&
            static_cast<int>(mode.dmPosition.x) == x && static_cast<int>(mode.dmPosition.y) == y &&
            static_cast<int>(mode.dmPelsWidth) == w && static_cast<int>(mode.dmPelsHeight) == h &&
+           mode.dmDisplayOrientation == orientation &&
            (!check_primary || adapter_is_primary(device_name) == want_primary);
 }
 
 // Polls the layout check: commits apply synchronously, but a bounded re-check
 // absorbs transient re-layout.
 bool wait_for_display_layout(const std::wstring& device_name, int x, int y, int w, int h,
-                             bool check_primary, bool want_primary) {
+                             DWORD orientation, bool check_primary, bool want_primary) {
     for (int attempt = 0; attempt < 5; ++attempt) {
-        if (display_layout_matches(device_name, x, y, w, h, check_primary, want_primary)) {
+        if (display_layout_matches(device_name, x, y, w, h, orientation, check_primary,
+                                   want_primary)) {
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -1022,8 +1150,7 @@ bool wait_for_display_layout(const std::wstring& device_name, int x, int y, int 
 // slots. Asides are verified by non-overlap (not exact coordinates) because
 // Windows packs a gapped display adjacent instead of honoring the gap.
 bool wait_for_aside_clear(const std::wstring& device_name,
-                          const std::vector<PlannedDesktop>& slots, int slot_width,
-                          int slot_height) {
+                          const std::vector<PlannedDesktop>& slots) {
     for (int attempt = 0; attempt < 5; ++attempt) {
         DEVMODEW mode{};
         mode.dmSize = sizeof(mode);
@@ -1034,8 +1161,8 @@ bool wait_for_aside_clear(const std::wstring& device_name,
                 if (display_rects_intersect(
                         static_cast<int>(mode.dmPosition.x), static_cast<int>(mode.dmPosition.y),
                         static_cast<int>(mode.dmPelsWidth),
-                        static_cast<int>(mode.dmPelsHeight), slot.x, slot.y, slot_width,
-                        slot_height)) {
+                        static_cast<int>(mode.dmPelsHeight), slot.x, slot.y, slot.width,
+                        slot.height)) {
                     clear = false;
                     break;
                 }
@@ -1251,6 +1378,9 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
         int hz = 0;
         int x = 0;
         int y = 0;
+        int w = 0;  // the desktop's own extent (rotated when portrait)
+        int h = 0;
+        DWORD orientation = DMDO_DEFAULT;
     };
     // Resolve every mode before touching anything: a failure here changes nothing.
     std::vector<StagedMode> staged;
@@ -1267,14 +1397,9 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
             error = "the Parsec VDD does not expose the requested display mode on " + ascii_device_name(name->second);
             return false;
         }
-        DEVMODEW mode{};
-        mode.dmSize = sizeof(mode);
-        mode.dmPelsWidth = static_cast<DWORD>(width);
-        mode.dmPelsHeight = static_cast<DWORD>(height);
-        mode.dmDisplayFrequency = static_cast<DWORD>(refresh);
-        mode.dmPosition.x = static_cast<LONG>(desktop.x);
-        mode.dmPosition.y = static_cast<LONG>(desktop.y);
-        mode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY | DM_POSITION;
+        // Explicit orientation every time: Windows persists rotation per
+        // monitor, so a landscape slot must say DMDO_DEFAULT.
+        const DEVMODEW mode = build_virtual_desktop_mode(desktop, refresh);
         StagedMode item;
         item.device = name->second;
         item.mode = mode;
@@ -1283,11 +1408,13 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
         item.hz = refresh;
         item.x = desktop.x;
         item.y = desktop.y;
+        item.w = desktop.width;
+        item.h = desktop.height;
+        item.orientation = mode.dmDisplayOrientation;
         staged.push_back(item);
     }
     const auto live_aside = live_device_identities();
-    for (const PlannedAside& aside : plan_aside_moves(snapshots, planned, width, height,
-                                                      vdd_devices)) {
+    for (const PlannedAside& aside : plan_aside_moves(snapshots, planned, vdd_devices)) {
         const DisplayModeSnapshot* snapshot = nullptr;
         for (const DisplayModeSnapshot& candidate : snapshots) {
             if (candidate.device_name == aside.device_name) {
@@ -1391,7 +1518,8 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
         if (item.driver < 0) {
             continue;
         }
-        if (!wait_for_display_layout(item.device, item.x, item.y, width, height, true,
+        if (!wait_for_display_layout(item.device, item.x, item.y, item.w, item.h,
+                                     item.orientation, true,
                                      item.primary)) {
             error = item.primary ? "the center desktop did not become the primary display"
                                  : "a virtual desktop did not reach its arranged position";
@@ -1403,7 +1531,7 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
         if (item.driver >= 0) {
             continue;
         }
-        if (!wait_for_aside_clear(item.device, planned, width, height)) {
+        if (!wait_for_aside_clear(item.device, planned)) {
             error = "a display did not move out of the workspace slots";
             rollback();
             return false;
@@ -1420,10 +1548,14 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
     if (!detach_device.empty() && !migrated.empty()) {
         int center_x = 0;
         int center_y = 0;
+        int center_w = width;
+        int center_h = height;
         for (const PlannedDesktop& slot : planned) {
             if (slot.driver_index == center_driver) {
                 center_x = slot.x;
                 center_y = slot.y;
+                center_w = slot.width;
+                center_h = slot.height;
             }
         }
         DEVMODEW aside_mode{};
@@ -1437,8 +1569,8 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
             from.bottom = from.top + static_cast<LONG>(aside_mode.dmPelsHeight);
             center_rect.left = static_cast<LONG>(center_x);
             center_rect.top = static_cast<LONG>(center_y);
-            center_rect.right = center_rect.left + static_cast<LONG>(width);
-            center_rect.bottom = center_rect.top + static_cast<LONG>(height);
+            center_rect.right = center_rect.left + static_cast<LONG>(center_w);
+            center_rect.bottom = center_rect.top + static_cast<LONG>(center_h);
             have_center = true;
             windows_placed = place_windows_on_center(migrated, from, center_rect);
         }
@@ -1459,7 +1591,8 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
                 if (item.driver < 0) {
                     continue;
                 }
-                if (!wait_for_display_layout(item.device, item.x, item.y, width, height, true,
+                if (!wait_for_display_layout(item.device, item.x, item.y, item.w, item.h,
+                                     item.orientation, true,
                                              item.primary)) {
                     return false;
                 }
@@ -1519,7 +1652,8 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
             continue;
         }
         candidate.push_back(
-            ConfiguredDisplay{item.driver, item.device, width, height, item.hz, item.x, item.y});
+            ConfiguredDisplay{item.driver, item.device, item.w, item.h, item.hz, item.x, item.y,
+                              static_cast<int>(item.orientation)});
     }
     configured = std::move(candidate);
     return true;
@@ -1542,6 +1676,9 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
         int hz = 0;
         int x = 0;
         int y = 0;
+        int w = 0;  // the desktop's own extent (rotated when portrait)
+        int h = 0;
+        DWORD orientation = DMDO_DEFAULT;
     };
     std::vector<StagedMode> staged;
     staged.reserve(planned.size());
@@ -1563,6 +1700,8 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
         DisplayModeSnapshot snapshot;
         snapshot.device_name = name->second;
         snapshot.mode = previous;
+        // A failed portrait toggle must roll the rotation back too.
+        snapshot.mode.dmFields |= DM_DISPLAYORIENTATION;
         snapshot.primary = adapter_is_primary(name->second);
         const int refresh = choose_refresh_rate(refresh_rates(name->second, width, height),
                                                 preferred_hz);
@@ -1570,14 +1709,9 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
             error = "the Parsec VDD does not expose the requested display mode on " + ascii_device_name(name->second);
             return false;
         }
-        DEVMODEW mode{};
-        mode.dmSize = sizeof(mode);
-        mode.dmPelsWidth = static_cast<DWORD>(width);
-        mode.dmPelsHeight = static_cast<DWORD>(height);
-        mode.dmDisplayFrequency = static_cast<DWORD>(refresh);
-        mode.dmPosition.x = static_cast<LONG>(desktop.x);
-        mode.dmPosition.y = static_cast<LONG>(desktop.y);
-        mode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY | DM_POSITION;
+        // Explicit orientation every time: Windows persists rotation per
+        // monitor, so a landscape slot must say DMDO_DEFAULT.
+        const DEVMODEW mode = build_virtual_desktop_mode(desktop, refresh);
         StagedMode item;
         item.device = name->second;
         item.mode = mode;
@@ -1586,10 +1720,14 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
         item.hz = refresh;
         item.x = desktop.x;
         item.y = desktop.y;
+        item.w = desktop.width;
+        item.h = desktop.height;
+        item.orientation = mode.dmDisplayOrientation;
         primary_changed = primary_changed || (item.primary && !snapshot.primary);
         item.needs_change = snapshot.primary != item.primary ||
                             previous.dmPelsWidth != mode.dmPelsWidth ||
                             previous.dmPelsHeight != mode.dmPelsHeight ||
+                            previous.dmDisplayOrientation != mode.dmDisplayOrientation ||
                             previous.dmDisplayFrequency != mode.dmDisplayFrequency ||
                             previous.dmPosition.x != mode.dmPosition.x ||
                             previous.dmPosition.y != mode.dmPosition.y;
@@ -1608,7 +1746,7 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
             return false;
         }
         for (const PlannedAside& aside :
-             plan_aside_moves(live, planned, width, height, virtual_device_names())) {
+             plan_aside_moves(live, planned, virtual_device_names())) {
             const auto source = std::find_if(live.begin(), live.end(), [&](const auto& entry) {
                 return entry.device_name == aside.device_name;
             });
@@ -1668,20 +1806,24 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
     // fail-on-mismatch would turn a cosmetic shift into a rollback here).
     for (const StagedMode& item : staged) {
         if (item.driver < 0) {
-            if (!wait_for_aside_clear(item.device, planned, width, height)) {
+            if (!wait_for_aside_clear(item.device, planned)) {
                 std::printf("  warning: %ls still overlaps a planned desktop after the reload\n",
                             item.device.c_str());
             }
             continue;
         }
-        if (!wait_for_display_layout(item.device, item.x, item.y, width, height, true,
+        if (!wait_for_display_layout(item.device, item.x, item.y, item.w, item.h,
+                                     item.orientation, true,
                                      item.primary)) {
             DEVMODEW actual{};
             actual.dmSize = sizeof(actual);
             EnumDisplaySettingsExW(item.device.c_str(), ENUM_CURRENT_SETTINGS, &actual, 0);
-            std::printf("  warning: VDD[%d] %ls is at (%ld,%ld), planned (%d,%d)%s\n", item.driver,
-                        item.device.c_str(), actual.dmPosition.x, actual.dmPosition.y, item.x,
-                        item.y, item.primary ? " as primary" : "");
+            std::printf("  warning: VDD[%d] %ls is at (%ld,%ld) %lux%lu orientation %lu, planned "
+                        "(%d,%d) %dx%d orientation %lu%s\n",
+                        item.driver, item.device.c_str(), actual.dmPosition.x,
+                        actual.dmPosition.y, actual.dmPelsWidth, actual.dmPelsHeight,
+                        actual.dmDisplayOrientation, item.x, item.y, item.w, item.h,
+                        item.orientation, item.primary ? " as primary" : "");
         }
     }
     std::vector<ConfiguredDisplay> candidate;
@@ -1691,7 +1833,8 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
             continue;  // an aside move, not a virtual desktop
         }
         candidate.push_back(
-            ConfiguredDisplay{item.driver, item.device, width, height, item.hz, item.x, item.y});
+            ConfiguredDisplay{item.driver, item.device, item.w, item.h, item.hz, item.x, item.y,
+                              static_cast<int>(item.orientation)});
     }
     configured = std::move(candidate);
     return true;
@@ -2274,7 +2417,8 @@ bool restore_pinned_layout(const std::vector<DisplayModeSnapshot>& snapshots, Vd
         int w = 0;
         int h = 0;
         layout_of(*primary, x, y, w, h);
-        if (!display_layout_matches(primary_r1b, x, y, w, h, true, true)) {
+        if (!display_layout_matches(primary_r1b, x, y, w, h, primary->mode.dmDisplayOrientation, true,
+                                    true)) {
             DEVMODEW mode = primary->mode;
             const LONG stage_result = stage_restore_mode(
                 primary_r1b, mode, CDS_UPDATEREGISTRY | CDS_NORESET | CDS_SET_PRIMARY);
@@ -2288,7 +2432,8 @@ bool restore_pinned_layout(const std::vector<DisplayModeSnapshot>& snapshots, Vd
                 error = "Windows failed to restore the primary display";
                 return false;
             }
-            if (!wait_for_display_layout(primary_r1b, x, y, w, h, true, true)) {
+            if (!wait_for_display_layout(primary_r1b, x, y, w, h,
+                                         primary->mode.dmDisplayOrientation, true, true)) {
                 error = "the primary display did not return to its position";
                 return false;
             }
@@ -2332,7 +2477,8 @@ bool restore_pinned_layout(const std::vector<DisplayModeSnapshot>& snapshots, Vd
         int w = 0;
         int h = 0;
         layout_of(snapshot, x, y, w, h);
-        if (display_layout_matches(live, x, y, w, h, true, false)) {
+        if (display_layout_matches(live, x, y, w, h, snapshot.mode.dmDisplayOrientation, true,
+                                   false)) {
             continue;
         }
         DEVMODEW mode = snapshot.mode;
@@ -2370,7 +2516,8 @@ bool restore_pinned_layout(const std::vector<DisplayModeSnapshot>& snapshots, Vd
         int w = 0;
         int h = 0;
         layout_of(snapshot, x, y, w, h);
-        if (!wait_for_display_layout(live, x, y, w, h, true, false)) {
+        if (!wait_for_display_layout(live, x, y, w, h, snapshot.mode.dmDisplayOrientation,
+                                     true, false)) {
             error = "a display did not return to its position";
             return false;
         }

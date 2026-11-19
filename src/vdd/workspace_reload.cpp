@@ -34,7 +34,8 @@ bool plan_workspace_for_layout(const Layout& layout, const std::vector<int>& dri
         placements.push_back(
             {driver_indices[rank], screen.yaw_deg, screen.pitch_deg,
              2.0f * std::atan(0.5f * screen.width_m / screen.distance_m) * kRadToDeg,
-             2.0f * std::atan(0.5f * screen.height_m / screen.distance_m) * kRadToDeg});
+             2.0f * std::atan(0.5f * screen.height_m / screen.distance_m) * kRadToDeg,
+             screen.portrait});
     }
     plan.center_driver = select_center_driver(placements);
     if (plan.center_driver < 0) {
@@ -42,6 +43,14 @@ bool plan_workspace_for_layout(const Layout& layout, const std::vector<int>& dri
         return false;
     }
     plan.desktops = plan_workspace_desktops(placements, plan.center_driver, 1920, 1080);
+    // Mixed orientations can leave a gap (a column wider than its base) that
+    // Windows would pack elsewhere; refuse it before touching any display.
+    std::string tiling;
+    if (!desktops_tile_seamlessly(plan.desktops, tiling)) {
+        error = "the screen arrangement cannot be laid out as seamless Windows desktops: " +
+                tiling;
+        return false;
+    }
     return true;
 }
 
