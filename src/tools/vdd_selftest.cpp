@@ -941,6 +941,23 @@ void test_display_scale_backup() {
     check(store.save(backup, error) && std::filesystem::exists(path), "save writes the file");
     check(store.load(loaded, error) && loaded == backup, "the file loads back what was saved");
     check(store.save({}, error) && !std::filesystem::exists(path), "an empty backup deletes the file");
+    {
+        // An unreadable backup may be the only record of an unclean exit's
+        // originals: the session must not scale (and so never overwrite it).
+        gt::DisplayScaleBackupStore broken;
+        int saves = 0;
+        broken.load = [](gt::DisplayScaleBackup&, std::string& load_error) {
+            load_error = "locked";
+            return false;
+        };
+        broken.save = [&saves](const gt::DisplayScaleBackup&, std::string&) {
+            ++saves;
+            return true;
+        };
+        gt::DisplayScaleSession session(175, gt::DisplayScaleOps{}, broken);
+        check(!session.enabled() && !session.active() && saves == 0,
+              "an unreadable backup turns scaling off for the session and is never overwritten");
+    }
 
     // Crash: 100% -> 175%, then the engine is killed (no restore). Windows
     // keeps 175%; the next session must still return the display to 100%.

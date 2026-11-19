@@ -147,6 +147,7 @@ message must be reproducible from the test output.
   part when the turn stops (no reverse slide). A genuinely stale estimate therefore converges over
   tens of seconds, not seconds. Startup tracking stays closed until one valid bias window is
   available; Ctrl+Shift+R (or the controller's Recenter) recenters after an unavoidable ambiguous ultra-slow turn.
+- **Stacked mixed-orientation tie (portrait).** The controller's arrangement preflight numbers screens in `vdd_index` order, the engine by live driver index. If two screens in one column are exactly as level as each other (e.g. -30 and +30 deg pitch, nothing at 0) and differ in orientation, the base pick can differ, so the controller may accept a layout the engine then refuses on reload (logged, nothing changes). Very unlikely in practice; the fix is to tie-break on layout rank.
 - **Bias band.** The estimator assumes |bias| <= 1.5 deg/s. A larger true bias cannot be corrected and
   would show as creep; better to recalibrate.
 - **Virtual displays need the signed Parsec VDD driver**, which is not installed by default. Without

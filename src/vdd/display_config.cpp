@@ -144,11 +144,13 @@ int choose_refresh_rate(const std::vector<int>& available, int preferred);
 
 // Measured live 2026-11-19: right after a VDD removal Windows can be
 // re-applying its saved arrangement for the remaining monitors, and a VDD
-// briefly lists no modes. Poll for up to 2 s instead of failing the reload.
-int settled_refresh_rate(const std::wstring& device_name, int width, int height, int preferred) {
+// briefly lists no modes. Poll instead of failing the reload, against one
+// deadline shared by the whole batch (2 s in total, not per display).
+int settled_refresh_rate(const std::wstring& device_name, int width, int height, int preferred,
+                         std::chrono::steady_clock::time_point deadline) {
     for (int waited = 0;; waited += 100) {
         const int refresh = choose_refresh_rate(refresh_rates(device_name, width, height), preferred);
-        if (refresh != 0 || waited >= 2000) {
+        if (refresh != 0 || std::chrono::steady_clock::now() >= deadline) {
             if (refresh != 0 && waited > 0) {
                 std::printf("  %ls listed its modes again after %d ms\n", device_name.c_str(), waited);
             }
@@ -1478,13 +1480,15 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
     // Resolve every mode before touching anything: a failure here changes nothing.
     std::vector<StagedMode> staged;
     staged.reserve(planned.size());
+    const auto mode_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     for (const PlannedDesktop& desktop : planned) {
         const auto name = device_names.find(desktop.driver_index);
         if (name == device_names.end() || name->second.empty()) {
             error = "a planned virtual display has no Windows display name";
             return false;
         }
-        const int refresh = settled_refresh_rate(name->second, width, height, preferred_hz);
+        const int refresh = settled_refresh_rate(name->second, width, height, preferred_hz,
+                                                 mode_deadline);
         if (refresh == 0) {
             error = "the Parsec VDD does not expose the requested display mode on " + ascii_device_name(name->second);
             return false;
@@ -1776,6 +1780,7 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
     staged.reserve(planned.size());
     std::vector<DisplayModeSnapshot> snapshots;
     snapshots.reserve(planned.size());
+    const auto mode_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     bool primary_changed = false;
     for (const PlannedDesktop& desktop : planned) {
         const auto name = device_names.find(desktop.driver_index);
@@ -1795,7 +1800,8 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
         // A failed portrait toggle must roll the rotation back too.
         snapshot.mode.dmFields |= DM_DISPLAYORIENTATION;
         snapshot.primary = adapter_is_primary(name->second);
-        const int refresh = settled_refresh_rate(name->second, width, height, preferred_hz);
+        const int refresh = settled_refresh_rate(name->second, width, height, preferred_hz,
+                                                 mode_deadline);
         if (refresh == 0) {
             error = "the Parsec VDD does not expose the requested display mode on " + ascii_device_name(name->second);
             return false;
@@ -1941,7 +1947,11 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
                         actual.dmPelsWidth, actual.dmPelsHeight, actual.dmDisplayOrientation,
                         got.primary ? " as primary" : "", item.x, item.y, item.w, item.h,
                         item.orientation, item.primary ? " as primary" : "");
-            if (verdict == ReadbackVerdict::Mismatch && attempt < 2) {
+            // A recalled arrangement can also keep the right mode at the old
+            // position (a screen back to the right of the centre instead of
+            // above it), so a position-only shift is retried too and only
+            // tolerated on the last attempt.
+            if (verdict != ReadbackVerdict::Match && attempt < 2) {
                 std::printf("  re-applying the arrangement (attempt %d): Windows changed "
                             "VDD[%d] after the commit\n",
                             attempt + 2, item.driver);

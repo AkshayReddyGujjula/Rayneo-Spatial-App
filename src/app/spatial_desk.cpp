@@ -1607,8 +1607,16 @@ int wmain(int argc, wchar_t** argv) {
                                                         pinned, pin_error);
         }
         if (!pinned_ok) {
-            std::printf("warning: could not re-pin the virtual desktops after the re-detach: %s\n",
+            std::printf("warning: could not re-pin the virtual desktops after the re-detach; "
+                        "retrying: %s\n",
                         pin_error.c_str());
+            // Windows can recall a saved arrangement after the detach: keep
+            // the re-pin pending for later ticks of the watch, spaced as above.
+            repin_pending = true;
+            const double retry_now =
+                std::chrono::duration<double>(SteadyClock::now() - start).count();
+            next_repin_try = std::max(retry_now + 0.5,
+                                      std::min(retry_now + 3.0, redetach_watch_until - 0.75));
         } else if (pinned != virtual_displays) {
             // Same reuse rule as a reload: unchanged outputs keep their capture.
             if (!bind_desktop_captures(renderer, layout, pinned, captures, pin_error)) {

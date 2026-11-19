@@ -465,8 +465,13 @@ DisplayScaleSession::DisplayScaleSession(int target_percent, DisplayScaleOps ops
     if (store_.load) {
         std::string error;
         if (!store_.load(backup_, error)) {
+            // The unreadable file may hold the only record of an unclean
+            // exit's originals: scaling stays off for this session so nothing
+            // overwrites it (a missing file loads fine and is not this case).
             backup_.clear();
-            log("backup unreadable, ignored: " + error);
+            target_ = 0;
+            log("backup unreadable, scaling is off for this session so the saved originals "
+                "are not overwritten: " + error);
         }
     }
     for (const auto& [id, saved] : backup_) {
