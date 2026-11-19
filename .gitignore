@@ -11,3 +11,6 @@ dist/
 *.pdb
 # per-device orientation calibration (regenerate with orientation_calibrate.exe)
 config/orientation.json
+
+# Engine runtime state: originals of the virtual-display scale (crash safety)
+config/display-scale-backup.json
