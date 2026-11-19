@@ -411,7 +411,13 @@ DisplayScaleBackupStore file_display_scale_backup(const std::filesystem::path& p
     store.load = [path](DisplayScaleBackup& backup, std::string& error) {
         backup.clear();
         std::error_code exists_error;
-        if (!std::filesystem::exists(path, exists_error)) {
+        const bool exists = std::filesystem::exists(path, exists_error);
+        if (exists_error) {
+            // Not provably absent: treat as unreadable so nothing overwrites it.
+            error = "cannot check " + narrow(path.wstring()) + ": " + exists_error.message();
+            return false;
+        }
+        if (!exists) {
             return true;
         }
         std::ifstream in(path, std::ios::binary);
