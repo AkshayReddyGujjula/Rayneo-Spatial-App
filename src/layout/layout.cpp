@@ -39,6 +39,9 @@ Json to_json_value(const Layout& layout) {
             {"height_m", screen.height_m},
             {"color", screen.color},
         });
+        if (screen.portrait) {
+            screens.back()["portrait"] = true;
+        }
     }
     return Json{
         {"version", layout.version},
@@ -176,6 +179,7 @@ bool load_layout(const std::string& path, Layout& layout, std::string& error) {
             if (value.contains("color")) {
                 screen.color = value.at("color").get<std::array<float, 3>>();
             }
+            screen.portrait = value.value("portrait", false);
             parsed.screens.push_back(std::move(screen));
         }
         if (document.contains("capture_policy")) {

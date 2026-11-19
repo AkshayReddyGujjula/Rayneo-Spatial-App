@@ -16,6 +16,9 @@ struct ScreenLayout {
     float width_m = 1.6f;
     float height_m = 0.9f;
     std::array<float, 3> color{0.24f, 0.45f, 0.95f};
+    // Portrait: the virtual desktop is rotated 90 degrees (1080 wide x 1920 tall).
+    // width_m/height_m stay the physical quad size; the editor swaps them on toggle.
+    bool portrait = false;
 };
 
 struct CapturePolicy {
