@@ -9,7 +9,9 @@
 // -minScaleRel. A rel above maxScaleRel reads back but is silently clamped
 // by Windows, so callers clamp first and log it.
 
+#include <filesystem>
 #include <functional>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -58,34 +60,65 @@ struct DisplayScaleOps {
     std::function<bool(const std::wstring&, int, std::string&)> set;
     // Live (GDI name, monitor id) pairs (live_device_identities).
     std::function<std::vector<std::pair<std::wstring, std::wstring>>()> identities;
-    // GDI names of the active virtual displays: the only names ever written.
-    std::function<std::vector<std::wstring>()> virtual_names;
+    // Fresh driver index -> GDI name of the active virtual displays
+    // (active_virtual_display_names): the only names ever written.
+    std::function<std::map<int, std::wstring>()> virtual_displays;
     std::function<void(const std::string&)> log;
 };
 // Real Win32 ops; log prints to stdout (the engine log).
 DisplayScaleOps win32_display_scale_ops();
 
+// One display's scale before this program touched it.
+struct DisplayScaleSaved {
+    int rel = 0;
+    int percent = 0;  // 0 when off-table (informational only; rel is what is written)
+    bool operator==(const DisplayScaleSaved&) const = default;
+};
+using DisplayScaleBackup = std::map<std::wstring, DisplayScaleSaved>;  // keyed by monitor id
+
+// Crash-safe copy of the originals. load: a missing file is an empty backup.
+// save: an empty backup deletes the file. Either may be left empty (no
+// persistence, the unit tests' default).
+struct DisplayScaleBackupStore {
+    std::function<bool(DisplayScaleBackup&, std::string&)> load;
+    std::function<bool(const DisplayScaleBackup&, std::string&)> save;
+};
+// JSON: {"<monitor id>": {"rel": R, "percent": P}, ...} (UTF-8, pure, unit-tested).
+std::string serialize_display_scale_backup(const DisplayScaleBackup& backup);
+bool parse_display_scale_backup(const std::string& text, DisplayScaleBackup& backup, std::string& error);
+// File store: replaced atomically (temp file + rename), deleted when empty.
+DisplayScaleBackupStore file_display_scale_backup(const std::filesystem::path& path);
+
 // Applies one scale to the virtual displays and puts each display back to
 // exactly what it was. Originals are keyed by the stable monitor id (GDI names
 // renumber across display churn, bug 15), recorded on first touch only, and
-// dropped once restored so a re-added display records afresh. A name is
-// resolved from the id at write time and must be an active virtual display;
-// otherwise nothing is written. Every failure is logged, none is fatal.
+// kept until a restore succeeds (a failed or skipped restore keeps them for a
+// later attempt). Before the first write each original is saved to the backup
+// store; a backup entry left by an unclean exit (the engine was killed while a
+// display was scaled) is the original in place of the current value, and is
+// restored even when scaling is now off. Targets are resolved from a fresh
+// enumeration (driver index -> live name -> monitor id) on every apply; a
+// restore writes only when exactly one active virtual display carries the id.
+// Every failure is logged, none is fatal.
 class DisplayScaleSession {
 public:
-    DisplayScaleSession(int target_percent, DisplayScaleOps ops);
+    DisplayScaleSession(int target_percent, DisplayScaleOps ops, DisplayScaleBackupStore store = {});
     ~DisplayScaleSession();
     DisplayScaleSession(const DisplayScaleSession&) = delete;
     DisplayScaleSession& operator=(const DisplayScaleSession&) = delete;
 
     bool enabled() const { return target_ > 0; }
-    // Scales each named virtual display; driver_index is kept for remove_driver.
-    void apply(const std::vector<std::pair<int, std::wstring>>& displays);
+    // Scaling on, or originals from an unclean exit still waiting for their display.
+    bool active() const { return enabled() || !backup_.empty(); }
+    // Scales the active virtual display of each VDD driver index (scaling
+    // off: only puts back displays with a pending backup entry).
+    void apply(const std::vector<int>& driver_indices);
     // Restores the display recorded for this VDD driver index (one about to be removed).
     bool restore_driver(int driver_index);
-    // Restores every recorded display. Idempotent.
+    // Restores every recorded display. Idempotent; failures stay recorded.
     void restore_all();
     size_t recorded() const { return originals_.size(); }
+    const DisplayScaleBackup& backup() const { return backup_; }
 
 private:
     struct Original {
@@ -94,12 +127,18 @@ private:
         int rel = 0;
         int percent = 0;
     };
-    std::wstring live_name(const std::wstring& monitor_id) const;
+    // The one active virtual display carrying this id; empty (logged by the
+    // caller from reason) when none or several do.
+    std::wstring live_name(const std::wstring& monitor_id, std::string& reason) const;
     bool restore_one(const Original& original);
+    void forget(const std::wstring& monitor_id);
+    bool persist(const std::wstring& monitor_id, const DisplayScaleSaved& saved);
     void log(const std::string& line) const;
 
     int target_ = 0;
     DisplayScaleOps ops_;
+    DisplayScaleBackupStore store_;
+    DisplayScaleBackup backup_;
     std::vector<Original> originals_;
 };
 

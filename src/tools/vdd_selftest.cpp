@@ -4,11 +4,17 @@
 #include "vdd/workspace_reload.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <map>
 #include <string>
 #include <cstdio>
 #include <string_view>
 #include <vector>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 namespace {
 
@@ -426,15 +432,6 @@ void test_portrait_planning() {
               "the layout planner refuses a gapped arrangement before touching displays");
     }
     {
-        std::string reason;
-        check(!gt::desktops_tile_seamlessly({{0, 0, 0}, {1, 1000, 0}}, reason),
-              "overlapping desktops are not seamless");
-        check(!gt::desktops_tile_seamlessly({{0, 0, 0}, {1, 1920, 1080}}, reason),
-              "corner-only contact is not seamless");
-        check(gt::desktops_tile_seamlessly({{0, 0, 0}, {1, 1920, 0}, {2, -1920, 0}}, reason),
-              "the landscape triple is seamless");
-    }
-    {
         // Review finding: a landscape screen above a portrait centre AND a
         // landscape screen above the left base. The upper row connects
         // everything, hiding a 420 px gap between the left base (ends at
@@ -536,6 +533,15 @@ void test_portrait_planning() {
               "the landscape triple passes the preflight");
     }
     {
+        std::string reason;
+        check(!gt::desktops_tile_seamlessly({{0, 0, 0}, {1, 1000, 0}}, reason),
+              "overlapping desktops are not seamless");
+        check(!gt::desktops_tile_seamlessly({{0, 0, 0}, {1, 1920, 1080}}, reason),
+              "corner-only contact is not seamless");
+        check(gt::desktops_tile_seamlessly({{0, 0, 0}, {1, 1920, 0}, {2, -1920, 0}}, reason),
+              "the landscape triple is seamless");
+    }
+    {
         // Mode builder: explicit orientation both ways (Windows persists it).
         const auto tall = gt::build_virtual_desktop_mode({1, -1080, -420, 1080, 1920, true}, 60);
         check(tall.dmPelsWidth == 1080 && tall.dmPelsHeight == 1920 &&
@@ -631,14 +637,19 @@ void test_portrait_toggle_reload() {
 }  // namespace
 
 // Fake display world for DisplayScaleSession: name -> monitor id, per-id
-// scale state, and a list of the active virtual display names.
+// scale state, the active virtual displays by driver index, and an in-memory
+// backup file.
 struct FakeScaleWorld {
     std::vector<std::pair<std::wstring, std::wstring>> identities;
-    std::vector<std::wstring> virtual_names;
+    std::map<int, std::wstring> live;  // driver index -> active virtual display name
     std::map<std::wstring, gt::DisplayScaleInfo> by_id;  // keyed by monitor id
     std::vector<std::pair<std::wstring, int>> sets;      // (name, rel) writes
     std::vector<std::string> lines;
+    std::vector<std::string> events;  // "set" / "save" in call order
     bool fail_sets = false;
+    gt::DisplayScaleBackup backup_file;
+    bool backup_exists = false;
+    bool fail_saves = false;
 
     std::wstring id_of(const std::wstring& name) const {
         for (const auto& [gdi, id] : identities) {
@@ -659,6 +670,7 @@ struct FakeScaleWorld {
         };
         ops.set = [this](const std::wstring& name, int rel, std::string& error) {
             sets.emplace_back(name, rel);
+            events.push_back("set");
             if (fail_sets) {
                 error = "simulated failure";
                 return false;
@@ -667,9 +679,27 @@ struct FakeScaleWorld {
             return true;
         };
         ops.identities = [this] { return identities; };
-        ops.virtual_names = [this] { return virtual_names; };
+        ops.virtual_displays = [this] { return live; };
         ops.log = [this](const std::string& line) { lines.push_back(line); };
         return ops;
+    }
+    gt::DisplayScaleBackupStore store() {
+        gt::DisplayScaleBackupStore store;
+        store.load = [this](gt::DisplayScaleBackup& backup, std::string&) {
+            backup = backup_exists ? backup_file : gt::DisplayScaleBackup{};
+            return true;
+        };
+        store.save = [this](const gt::DisplayScaleBackup& backup, std::string& error) {
+            events.push_back("save");
+            if (fail_saves) {
+                error = "simulated save failure";
+                return false;
+            }
+            backup_file = backup;
+            backup_exists = !backup.empty();
+            return true;
+        };
+        return store;
     }
     bool logged(std::string_view needle) const {
         for (const std::string& line : lines) {
@@ -720,32 +750,32 @@ void test_display_scale() {
                         {L"\\\\.\\DISPLAY6", L"MONITOR\\PSCCDD0\\2"},
                         {L"\\\\.\\DISPLAY2", L"MONITOR\\TCL\\glasses"},
                         {L"\\\\.\\DISPLAY1", L"MONITOR\\LAPTOP\\panel"}};
-    world.virtual_names = {L"\\\\.\\DISPLAY5", L"\\\\.\\DISPLAY6"};
+    world.live = {{0, L"\\\\.\\DISPLAY5"}, {1, L"\\\\.\\DISPLAY6"}};
     world.by_id[L"MONITOR\\PSCCDD0\\1"] = {0, 0, 3};
     world.by_id[L"MONITOR\\PSCCDD0\\2"] = {0, 1, 3};  // was left at 125%
     world.by_id[L"MONITOR\\TCL\\glasses"] = {0, 0, 3};
     world.by_id[L"MONITOR\\LAPTOP\\panel"] = {-2, 0, 3};
     {
         gt::DisplayScaleSession session(200, world.ops());
-        session.apply({{0, L"\\\\.\\DISPLAY5"}, {1, L"\\\\.\\DISPLAY6"}, {9, L"\\\\.\\DISPLAY2"}});
+        session.apply({0, 1, 9});
         check(world.sets.size() == 2 && world.by_id[L"MONITOR\\PSCCDD0\\1"].cur_rel == 3 &&
                   world.by_id[L"MONITOR\\PSCCDD0\\2"].cur_rel == 3,
               "apply writes both VDDs at the clamped max");
         check(world.by_id[L"MONITOR\\TCL\\glasses"].cur_rel == 0 &&
                   world.by_id[L"MONITOR\\LAPTOP\\panel"].cur_rel == 0,
-              "a non-virtual name (the glasses) is never written");
+              "a driver index that is not an active virtual display is never written");
         check(world.logged("clamped 200% to 175%") && world.logged("skipped"),
-              "the clamp and the refused glasses write are logged");
+              "the clamp and the refused write are logged");
         check(session.recorded() == 2, "two originals recorded");
         // A reload re-applies: the recorded original must stay the pre-session value.
-        session.apply({{0, L"\\\\.\\DISPLAY5"}, {1, L"\\\\.\\DISPLAY6"}});
+        session.apply({0, 1});
         check(session.recorded() == 2 && world.sets.size() == 2, "re-apply keeps the originals and writes nothing");
 
         // Display churn renumbers the GDI names (bug 15): restore follows the id.
         world.identities = {{L"\\\\.\\DISPLAY7", L"MONITOR\\PSCCDD0\\1"},
                             {L"\\\\.\\DISPLAY8", L"MONITOR\\PSCCDD0\\2"},
                             {L"\\\\.\\DISPLAY5", L"MONITOR\\LAPTOP\\panel"}};
-        world.virtual_names = {L"\\\\.\\DISPLAY7", L"\\\\.\\DISPLAY8"};
+        world.live = {{0, L"\\\\.\\DISPLAY7"}, {1, L"\\\\.\\DISPLAY8"}};
         world.sets.clear();
         session.restore_driver(1);
         check(world.sets.size() == 1 && world.sets[0].first == L"\\\\.\\DISPLAY8" && world.sets[0].second == 1 &&
@@ -763,39 +793,220 @@ void test_display_scale() {
     // An id that no longer resolves to an active virtual display: zero writes.
     FakeScaleWorld gone;
     gone.identities = {{L"\\\\.\\DISPLAY5", L"MONITOR\\PSCCDD0\\1"}};
-    gone.virtual_names = {L"\\\\.\\DISPLAY5"};
+    gone.live = {{0, L"\\\\.\\DISPLAY5"}};
     gone.by_id[L"MONITOR\\PSCCDD0\\1"] = {0, 0, 3};
     {
         gt::DisplayScaleSession session(150, gone.ops());
-        session.apply({{0, L"\\\\.\\DISPLAY5"}});
+        session.apply({0});
         check(gone.sets.size() == 1 && gone.by_id[L"MONITOR\\PSCCDD0\\1"].cur_rel == 2, "150% applied");
-        gone.virtual_names.clear();  // the VDD went away before the restore
+        gone.live.clear();  // the VDD went away before the restore
         gone.sets.clear();
         session.restore_all();
         check(gone.sets.empty() && gone.logged("skipped"), "an unresolved id is skipped with zero writes");
-        check(session.recorded() == 0, "restore_all is idempotent");
+        check(session.recorded() == 1, "a skipped restore keeps the record");
+        // It re-appears under another GDI name: the original is still restorable.
+        gone.identities = {{L"\\\\.\\DISPLAY9", L"MONITOR\\PSCCDD0\\1"}};
+        gone.live = {{0, L"\\\\.\\DISPLAY9"}};
+        session.restore_all();
+        check(gone.sets.size() == 1 && gone.sets[0].first == L"\\\\.\\DISPLAY9" && gone.sets[0].second == 0 &&
+                  session.recorded() == 0,
+              "a display that re-appears after a skipped restore is put back to 100%");
+        session.restore_all();
+        check(gone.sets.size() == 1, "restore_all is idempotent once restored");
     }
 
     // Set failures are logged, never fatal; 0 means Windows is never touched.
     FakeScaleWorld failing;
     failing.identities = {{L"\\\\.\\DISPLAY5", L"MONITOR\\PSCCDD0\\1"}};
-    failing.virtual_names = {L"\\\\.\\DISPLAY5"};
+    failing.live = {{0, L"\\\\.\\DISPLAY5"}};
     failing.by_id[L"MONITOR\\PSCCDD0\\1"] = {0, 0, 3};
     failing.fail_sets = true;
     {
         gt::DisplayScaleSession session(125, failing.ops());
-        session.apply({{0, L"\\\\.\\DISPLAY5"}});
+        session.apply({0});
         check(failing.logged("failed: simulated failure"), "a failed set is logged and the session continues");
     }
     FakeScaleWorld off;
     off.identities = failing.identities;
-    off.virtual_names = failing.virtual_names;
+    off.live = failing.live;
     off.by_id[L"MONITOR\\PSCCDD0\\1"] = {0, 0, 3};
     {
         gt::DisplayScaleSession session(0, off.ops());
-        session.apply({{0, L"\\\\.\\DISPLAY5"}});
-        check(off.sets.empty() && session.recorded() == 0 && !session.enabled(),
+        session.apply({0});
+        check(off.sets.empty() && session.recorded() == 0 && !session.enabled() && !session.active(),
               "target 0 (Windows default) touches nothing");
+    }
+
+    // A failed restore keeps the original: the next restore still writes it,
+    // and a later apply never records the scaled value as the original.
+    FakeScaleWorld flaky;
+    flaky.identities = {{L"\\\\.\\DISPLAY5", L"MONITOR\\PSCCDD0\\1"}};
+    flaky.live = {{0, L"\\\\.\\DISPLAY5"}};
+    flaky.by_id[L"MONITOR\\PSCCDD0\\1"] = {0, 0, 3};
+    {
+        gt::DisplayScaleSession session(175, flaky.ops());
+        session.apply({0});
+        check(flaky.by_id[L"MONITOR\\PSCCDD0\\1"].cur_rel == 3, "175% applied");
+        flaky.fail_sets = true;
+        check(!session.restore_driver(0) && session.recorded() == 1, "a failed restore_driver keeps the record");
+        session.restore_all();
+        check(session.recorded() == 1, "a failed restore_all keeps the record");
+        flaky.fail_sets = false;
+        session.apply({0});  // a reload re-applies while the display is still at 175%
+        flaky.sets.clear();
+        check(session.restore_driver(0) && flaky.sets.size() == 1 && flaky.sets[0].second == 0 &&
+                  flaky.by_id[L"MONITOR\\PSCCDD0\\1"].cur_rel == 0 && session.recorded() == 0,
+              "the next restore still writes the original 100%");
+    }
+
+    // Apply resolves names fresh: after Windows renumbers (here swaps) the
+    // GDI names, each driver index still gets its own display and original.
+    FakeScaleWorld renamed;
+    renamed.identities = {{L"\\\\.\\DISPLAY5", L"MONITOR\\PSCCDD0\\1"}, {L"\\\\.\\DISPLAY6", L"MONITOR\\PSCCDD0\\2"}};
+    renamed.live = {{0, L"\\\\.\\DISPLAY5"}, {1, L"\\\\.\\DISPLAY6"}};
+    renamed.by_id[L"MONITOR\\PSCCDD0\\1"] = {0, 0, 3};  // 100%
+    renamed.by_id[L"MONITOR\\PSCCDD0\\2"] = {0, 1, 3};  // 125%
+    {
+        gt::DisplayScaleSession session(150, renamed.ops());
+        session.apply({0});
+        renamed.identities = {{L"\\\\.\\DISPLAY5", L"MONITOR\\PSCCDD0\\2"},
+                              {L"\\\\.\\DISPLAY6", L"MONITOR\\PSCCDD0\\1"}};
+        renamed.live = {{0, L"\\\\.\\DISPLAY6"}, {1, L"\\\\.\\DISPLAY5"}};
+        session.apply({0, 1});  // a cached name list would scale VDD 1 as VDD 0
+        check(renamed.by_id[L"MONITOR\\PSCCDD0\\1"].cur_rel == 2 && renamed.by_id[L"MONITOR\\PSCCDD0\\2"].cur_rel == 2,
+              "after renumbering both VDDs are at 150%");
+        renamed.sets.clear();
+        check(session.restore_driver(1) && renamed.sets.size() == 1 &&
+                  renamed.sets[0].first == L"\\\\.\\DISPLAY5" && renamed.sets[0].second == 1,
+              "VDD 1 (now DISPLAY5) is restored to its own 125%");
+        check(session.restore_driver(0) && renamed.sets.size() == 2 &&
+                  renamed.sets[1].first == L"\\\\.\\DISPLAY6" && renamed.sets[1].second == 0,
+              "VDD 0 (now DISPLAY6) is restored to its own 100%");
+    }
+
+    // Two active virtual displays sharing one monitor id: no write either way.
+    // A detached ghost twin (not an active virtual display) is not ambiguous.
+    FakeScaleWorld twins;
+    twins.identities = {{L"\\\\.\\DISPLAY5", L"MONITOR\\PSCCDD0\\1"},
+                        {L"\\\\.\\DISPLAY6", L"MONITOR\\PSCCDD0\\2"},
+                        {L"\\\\.\\DISPLAY9", L"MONITOR\\PSCCDD0\\1"}};  // detached ghost
+    twins.live = {{0, L"\\\\.\\DISPLAY5"}, {1, L"\\\\.\\DISPLAY6"}};
+    twins.by_id[L"MONITOR\\PSCCDD0\\1"] = {0, 0, 3};
+    twins.by_id[L"MONITOR\\PSCCDD0\\2"] = {0, 0, 3};
+    {
+        gt::DisplayScaleSession session(125, twins.ops());
+        session.apply({0});
+        check(twins.sets.size() == 1 && session.recorded() == 1, "a ghost twin does not block the write");
+        // Now VDD 1 reports the same id as VDD 0.
+        twins.identities[1].second = L"MONITOR\\PSCCDD0\\1";
+        twins.sets.clear();
+        session.apply({1});
+        check(twins.sets.empty() && twins.logged("ambiguous"), "apply to an ambiguous id writes nothing");
+        check(!session.restore_driver(0) && twins.sets.empty() && session.recorded() == 1,
+              "restore with an ambiguous id is skipped, logged and kept");
+        twins.identities[1].second = L"MONITOR\\PSCCDD0\\2";
+        check(session.restore_driver(0) && twins.sets.size() == 1 && twins.sets[0].first == L"\\\\.\\DISPLAY5",
+              "once unambiguous again the restore writes the right display");
+    }
+}
+
+void test_display_scale_backup() {
+    std::printf("vdd_selftest: display scale crash backup\n");
+    // Serialization round trip, including the backslashes of monitor ids.
+    gt::DisplayScaleBackup backup;
+    backup[L"MONITOR\\PSCCDD0\\{4d36e96e}\\0001"] = {0, 100};
+    backup[L"MONITOR\\PSCCDD0\\2"] = {-2, 0};
+    const std::string text = gt::serialize_display_scale_backup(backup);
+    gt::DisplayScaleBackup parsed;
+    std::string error;
+    check(gt::parse_display_scale_backup(text, parsed, error) && parsed == backup,
+          "the backup round-trips through its JSON text");
+    check(text.find("\"MONITOR\\\\PSCCDD0\\\\2\": {\"rel\": -2, \"percent\": 0}") != std::string::npos,
+          "the JSON escapes backslashes and keeps rel/percent");
+    check(gt::parse_display_scale_backup("{}", parsed, error) && parsed.empty(), "an empty object parses");
+    for (const char* bad : {"", "{", "[]", "{\"a\": {\"rel\": 1.5}}", "{\"a\": {\"rel\": \"175%\"}}",
+                            "{\"a\": {\"percent\": 100}}", "{\"a\": {\"rel\": 1}} x", "{\"\": {\"rel\": 1}}"}) {
+        gt::DisplayScaleBackup untouched = backup;
+        check(!gt::parse_display_scale_backup(bad, untouched, error) && untouched == backup,
+              "a malformed backup is rejected and leaves the output alone");
+    }
+
+    // File store: atomic replace, deleted when empty, a missing file is empty.
+    const std::filesystem::path path = std::filesystem::temp_directory_path() /
+                                       ("vdd_selftest-scale-" + std::to_string(GetCurrentProcessId()) + ".json");
+    const gt::DisplayScaleBackupStore store = gt::file_display_scale_backup(path);
+    std::filesystem::remove(path);
+    gt::DisplayScaleBackup loaded{{L"stale", {1, 1}}};
+    check(store.load(loaded, error) && loaded.empty(), "a missing backup file loads as empty");
+    check(store.save(backup, error) && std::filesystem::exists(path), "save writes the file");
+    check(store.load(loaded, error) && loaded == backup, "the file loads back what was saved");
+    check(store.save({}, error) && !std::filesystem::exists(path), "an empty backup deletes the file");
+
+    // Crash: 100% -> 175%, then the engine is killed (no restore). Windows
+    // keeps 175%; the next session must still return the display to 100%.
+    FakeScaleWorld world;
+    world.identities = {{L"\\\\.\\DISPLAY5", L"MONITOR\\PSCCDD0\\1"}};
+    world.live = {{0, L"\\\\.\\DISPLAY5"}};
+    world.by_id[L"MONITOR\\PSCCDD0\\1"] = {0, 0, 3};
+    gt::DisplayScaleBackup at_crash;
+    {
+        gt::DisplayScaleSession session(175, world.ops(), world.store());
+        session.apply({0});
+        check(world.events.size() == 2 && world.events[0] == "save" && world.events[1] == "set",
+              "the original is saved before the first write");
+        at_crash = world.backup_file;
+        check(world.backup_exists && at_crash.size() == 1 && at_crash.begin()->second.rel == 0 &&
+                  at_crash.begin()->second.percent == 100,
+              "the backup holds the original 100% by monitor id");
+    }
+    check(!world.backup_exists, "a clean restore removes the entry and deletes the file");
+    // Replay the kill: the display stays at 175% and the backup file stays.
+    world.by_id[L"MONITOR\\PSCCDD0\\1"].cur_rel = 3;
+    world.backup_file = at_crash;
+    world.backup_exists = true;
+    world.sets.clear();
+    {
+        gt::DisplayScaleSession session(175, world.ops(), world.store());
+        check(session.active() && world.logged("unclean exit"), "the next session reports the unclean exit");
+        session.apply({0});
+        check(world.sets.empty() && world.logged("taken from the backup"),
+              "already at 175%: nothing written, the original comes from the backup");
+    }
+    check(world.by_id[L"MONITOR\\PSCCDD0\\1"].cur_rel == 0 && !world.backup_exists,
+          "crash then next session: the display returns to the true original 100%");
+    // Control: without the backup the next session would keep 175% forever.
+    world.by_id[L"MONITOR\\PSCCDD0\\1"].cur_rel = 3;
+    {
+        gt::DisplayScaleSession session(175, world.ops());
+        session.apply({0});
+    }
+    check(world.by_id[L"MONITOR\\PSCCDD0\\1"].cur_rel == 3,
+          "control: with no backup the scaled value is taken as the original");
+
+    // Scaling turned off after the crash still puts the display back.
+    world.backup_file = at_crash;
+    world.backup_exists = true;
+    world.sets.clear();
+    {
+        gt::DisplayScaleSession session(0, world.ops(), world.store());
+        check(!session.enabled() && session.active(), "scaling off with a pending backup is still active");
+        session.apply({0});
+        check(world.sets.size() == 1 && world.sets[0].second == 0 && world.by_id[L"MONITOR\\PSCCDD0\\1"].cur_rel == 0 &&
+                  !world.backup_exists && session.recorded() == 0,
+              "scaling off: the unclean exit's display is restored and the backup deleted");
+    }
+
+    // A backup that cannot be saved means no write at all.
+    FakeScaleWorld readonly;
+    readonly.identities = world.identities;
+    readonly.live = world.live;
+    readonly.by_id[L"MONITOR\\PSCCDD0\\1"] = {0, 0, 3};
+    readonly.fail_saves = true;
+    {
+        gt::DisplayScaleSession session(150, readonly.ops(), readonly.store());
+        session.apply({0});
+        check(readonly.sets.empty() && readonly.logged("could not be saved"),
+              "an unsaved original is never overwritten");
     }
 }
 
@@ -1248,6 +1459,7 @@ int main() {
     }
 
     test_display_scale();
+    test_display_scale_backup();
 
     std::printf("vdd_selftest: %s (%d failures)\n", failures == 0 ? "PASS" : "FAIL", failures);
     return failures == 0 ? 0 : 1;

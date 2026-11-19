@@ -190,12 +190,12 @@ bool read_ui_fields(const Json& document, AppConfig& parsed, std::string& error)
         if (!read_bool(node, "mag_track_hard_iron", parsed.engine.mag_track_hard_iron, error)) {
             return false;
         }
-        if (!read_int(node, "display_scale_pct", parsed.engine.display_scale_pct, error)) {
-            return false;
-        }
         // Only the offered steps reach the engine; anything else (a hand
-        // edit, 200%) falls back to the Windows default.
-        if (display_scale_choice_index(parsed.engine.display_scale_pct) < 0) {
+        // edit such as "175%", 175.5 or 200) falls back to the Windows
+        // default locally instead of rejecting the whole preference file.
+        std::string scale_error;
+        if (!read_int(node, "display_scale_pct", parsed.engine.display_scale_pct, scale_error) ||
+            display_scale_choice_index(parsed.engine.display_scale_pct) < 0) {
             parsed.engine.display_scale_pct = 0;
         }
     }

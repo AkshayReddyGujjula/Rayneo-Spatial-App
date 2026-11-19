@@ -1028,15 +1028,22 @@ int wmain(int argc, wchar_t** argv) {
     if (opt.display_scale > 0 && !opt.virtual_displays) {
         std::printf("display scale: --display-scale ignored without virtual displays\n");
     }
-    gt::DisplayScaleSession display_scale(opt.virtual_displays ? opt.display_scale : 0,
-                                          gt::win32_display_scale_ops());
+    // Crash-safe originals live in config/, not logs/: the controller clears
+    // logs/ at every engine start, which is exactly when an unclean exit's
+    // backup is needed.
+    gt::DisplayScaleSession display_scale(
+        opt.virtual_displays ? opt.display_scale : 0, gt::win32_display_scale_ops(),
+        opt.virtual_displays ? gt::file_display_scale_backup(gt::path_from_utf8(default_repo_path(
+                                   std::filesystem::path("config") / "display-scale-backup.json")))
+                             : gt::DisplayScaleBackupStore{});
     const auto apply_display_scale = [&]() {
-        if (!display_scale.enabled()) {
+        if (!display_scale.active()) {
             return;
         }
-        std::vector<std::pair<int, std::wstring>> targets;
+        // Driver indices only: the session resolves live names itself.
+        std::vector<int> targets;
         for (const gt::ConfiguredDisplay& display : virtual_displays) {
-            targets.emplace_back(display.driver_index, display.device_name);
+            targets.push_back(display.driver_index);
         }
         display_scale.apply(targets);
     };

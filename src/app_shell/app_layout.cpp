@@ -216,8 +216,9 @@ bool add_screen(Layout& layout, std::string& error) {
                              last.distance_m, last.width_m, layout.screens.size());
         screen.height_m = last.height_m;
         // A new screen is always landscape: copying a portrait neighbour's
-        // tall size would give a tall quad whose desktop is 1920 x 1080.
-        if (screen.height_m > screen.width_m) {
+        // tall size would give a tall quad whose desktop is 1920 x 1080. A
+        // landscape neighbour's size is copied as is, even a custom tall one.
+        if (last.portrait && screen.height_m > screen.width_m) {
             std::swap(screen.width_m, screen.height_m);
         }
         screen.pitch_deg = last.pitch_deg;

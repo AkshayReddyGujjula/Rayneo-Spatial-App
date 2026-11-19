@@ -145,7 +145,19 @@ index is `-minScaleRel`. On the 1920x1080 VDDs: min 0, cur 0, max 3 (recommended
 Windows persists the scale per monitor, so a VDD keeps the last value unless restored: the
 engine records each original by monitor id at first touch and restores it before the VDD is
 removed (normal shutdown, the topology guard, and a reload that shrinks the screen count).
-Engine log lines start with `display scale:`.
+A record is dropped only once its restore succeeds; a failed restore, or one skipped because
+the monitor is not an active virtual display, keeps it for a later attempt. Before the first
+write each original is also saved to `config/display-scale-backup.json`
+(`{"<monitor id>": {"rel": R, "percent": P}}`, replaced atomically, deleted when the last entry
+is restored). Not `logs/`: the controller clears that folder at every engine start, which is
+exactly when the file is needed. If the engine is killed while a VDD is scaled, Windows keeps
+the scaled value; the next engine start logs `unclean exit: ...`, takes the original from the
+file (`original N% taken from the backup of an unclean exit`), and restores it at the end of
+that session, or at once if scaling is now off. If the file cannot be written the display is
+not scaled. Targets are resolved from a fresh enumeration on every apply (driver index ->
+live GDI name -> monitor id, because GDI names renumber), and a write happens only when exactly
+one active virtual display carries the monitor id (`ambiguous, N active virtual displays
+share monitor id ...` otherwise). Engine log lines start with `display scale:`.
 
 **Portrait virtual desktops (2026-11-19).** The Parsec VDD offers no portrait modes
 (measured live: only landscape, 1920x1080 at 24/30/60/144/240, 2560x1440, 3840x2160,

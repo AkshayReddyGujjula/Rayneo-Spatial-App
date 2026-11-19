@@ -659,6 +659,20 @@ void test_portrait_screens() {
               grow.screens.back().width_m > grow.screens.back().height_m &&
               grow.screens.back().width_m == grow.screens[2].height_m,
           "a screen added after a portrait one is landscape with the same metres");
+    // A custom tall LANDSCAPE neighbour (portrait off) is copied as is: only
+    // a portrait neighbour's size is turned back to landscape.
+    gt::Layout tall = gt::preset_layout(gt::LayoutPreset::TripleArc);
+    tall.screens.back().width_m = 0.8f;
+    tall.screens.back().height_m = 1.6f;
+    check(!tall.screens.back().portrait && gt::validate_layout(tall, error), "a custom tall landscape screen");
+    check(gt::add_screen(tall, error) && !tall.screens.back().portrait &&
+              tall.screens.back().width_m == 0.8f && tall.screens.back().height_m == 1.6f,
+          "a screen added after a tall landscape one keeps the copied 0.8 x 1.6 m");
+    // Portrait on for an already tall landscape quad changes only the flag.
+    gt::ScreenLayout& tall_quad = tall.screens[2];
+    check(gt::set_screen_portrait(tall, tall_quad, true, error) && tall_quad.portrait &&
+              tall_quad.width_m == 0.8f && tall_quad.height_m == 1.6f,
+          "portrait on for a tall quad (portrait off) changes only the flag");
     gt::Layout fresh = gt::preset_layout(gt::LayoutPreset::Single);
     check(gt::add_screen(fresh, error) && !fresh.screens.back().portrait, "an added screen is not portrait");
 
@@ -1550,6 +1564,20 @@ void test_ui_model(const std::filesystem::path& directory) {
         check(gt::load_app_config(directory / "ui-scale-bad.json", loaded, error) &&
                   loaded.engine.display_scale_pct == 0,
               "a hand-edited screen scaling outside 0/100/125/150/175 normalises to 0");
+    }
+    // A wrongly-typed value is a local fallback, never a failed load: the
+    // other preferences in the same file must survive.
+    for (const char* bad : {"\"175%\"", "175.5", "true", "null", "[175]"}) {
+        write_text(directory / "ui-scale-typed.json",
+                   std::string("{\"version\": 1, \"theme\": \"light\", \"engine_options\": "
+                               "{\"predict_ms\": 20, \"mag_track_hard_iron\": true, "
+                               "\"display_scale_pct\": ") +
+                       bad + "}}\n");
+        loaded = gt::AppConfig{};
+        check(gt::load_app_config(directory / "ui-scale-typed.json", loaded, error) &&
+                  loaded.engine.display_scale_pct == 0 && loaded.engine.predict_ms == 20 &&
+                  loaded.engine.mag_track_hard_iron && loaded.theme == gt::ThemeMode::Light,
+              "a wrongly-typed display_scale_pct falls back to 0 and the other preferences load");
     }
     write_text(directory / "ui-scale-ok.json",
                "{\"version\": 1, \"engine_options\": {\"display_scale_pct\": 175}}\n");
