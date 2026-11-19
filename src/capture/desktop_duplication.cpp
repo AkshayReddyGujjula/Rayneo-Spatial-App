@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cwctype>
+#include <string>
+#include <utility>
 
 using Microsoft::WRL::ComPtr;
 
@@ -51,7 +53,9 @@ bool DesktopDuplicator::initialize(ID3D11Device* device, ID3D11DeviceContext* co
 
 bool DesktopDuplicator::create_duplication(std::string& error) {
     duplication_.Reset();
-    have_desktop_texture_ = false;
+    // A new duplication may carry a new rotation and surface: its first frame
+    // must publish texture and rotation together, even if pointer-only.
+    published_ = PublishedDesktop{};
     ComPtr<IDXGIDevice> dxgi_device;
     ComPtr<IDXGIAdapter> adapter;
     HRESULT result = device_.As(&dxgi_device);
@@ -130,7 +134,7 @@ bool DesktopDuplicator::create_duplication(std::string& error) {
 
     if (force_gdi_fallback_) {
         backend_ = CaptureBackend::GdiFallback;
-        return ensure_gdi_texture(error);
+        return ensure_gdi_texture(width_, height_, error);
     }
 
     ComPtr<IDXGIOutput1> output1;
@@ -141,7 +145,7 @@ bool DesktopDuplicator::create_duplication(std::string& error) {
         std::printf("  capture output %ls: %s, using CPU GDI capture fallback\n",
                     output_name_.c_str(), hresult_text(operation, result).c_str());
         backend_ = CaptureBackend::GdiFallback;
-        return ensure_gdi_texture(error);
+        return ensure_gdi_texture(width_, height_, error);
     }
     // Re-read on every (re)creation: a rotation change is a mode change, which
     // invalidates the duplication (AcquireNextFrame returns
@@ -174,56 +178,70 @@ bool DesktopDuplicator::create_duplication(std::string& error) {
     return true;
 }
 
-bool DesktopDuplicator::ensure_gdi_texture(std::string& error) {
-    if (width_ == 0 || height_ == 0) {
+bool DesktopDuplicator::ensure_gdi_texture(uint32_t width, uint32_t height,
+                                           std::string& error) {
+    if (width == 0 || height == 0) {
         error = "GDI capture output dimensions are zero";
         return false;
     }
     if (copy_texture_.Get() != nullptr && copy_view_.Get() != nullptr &&
-        gdi_bitmap_ != nullptr && gdi_surface_width_ == width_ && gdi_surface_height_ == height_) {
+        gdi_bitmap_ != nullptr && gdi_surface_width_ == width && gdi_surface_height_ == height) {
         return true;
     }
+    // Stage every replacement first; the current texture and DIB stay in use
+    // (and consistent with each other) until both allocations succeeded.
     D3D11_TEXTURE2D_DESC description{};
-    description.Width = width_;
-    description.Height = height_;
+    description.Width = width;
+    description.Height = height;
     description.MipLevels = 1;
     description.ArraySize = 1;
     description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     description.SampleDesc.Count = 1;
     description.Usage = D3D11_USAGE_DEFAULT;
     description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    copy_view_.Reset();
-    copy_texture_.Reset();
-    HRESULT result = device_->CreateTexture2D(&description, nullptr, &copy_texture_);
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11ShaderResourceView> view;
+    HRESULT result = device_->CreateTexture2D(&description, nullptr, &texture);
     if (SUCCEEDED(result)) {
-        result = device_->CreateShaderResourceView(copy_texture_.Get(), nullptr, &copy_view_);
+        result = device_->CreateShaderResourceView(texture.Get(), nullptr, &view);
     }
     if (FAILED(result)) {
         error = hresult_text("creating the GDI fallback texture", result);
         return false;
     }
 
-    destroy_gdi_surface();
     BITMAPINFO bitmap_info{};
     bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bitmap_info.bmiHeader.biWidth = static_cast<LONG>(width_);
-    bitmap_info.bmiHeader.biHeight = -static_cast<LONG>(height_);
+    bitmap_info.bmiHeader.biWidth = static_cast<LONG>(width);
+    bitmap_info.bmiHeader.biHeight = -static_cast<LONG>(height);
     bitmap_info.bmiHeader.biPlanes = 1;
     bitmap_info.bmiHeader.biBitCount = 32;
     bitmap_info.bmiHeader.biCompression = BI_RGB;
-    gdi_desktop_dc_ = GetDC(nullptr);
-    gdi_memory_dc_ = CreateCompatibleDC(gdi_desktop_dc_);
-    gdi_bitmap_ =
-        CreateDIBSection(gdi_desktop_dc_, &bitmap_info, DIB_RGB_COLORS, &gdi_pixels_, nullptr, 0);
-    if (gdi_desktop_dc_ == nullptr || gdi_memory_dc_ == nullptr || gdi_bitmap_ == nullptr ||
-        gdi_pixels_ == nullptr) {
-        destroy_gdi_surface();
+    HDC desktop_dc = GetDC(nullptr);
+    HDC memory_dc = desktop_dc != nullptr ? CreateCompatibleDC(desktop_dc) : nullptr;
+    void* pixels = nullptr;
+    HBITMAP bitmap =
+        desktop_dc != nullptr
+            ? CreateDIBSection(desktop_dc, &bitmap_info, DIB_RGB_COLORS, &pixels, nullptr, 0)
+            : nullptr;
+    if (desktop_dc == nullptr || memory_dc == nullptr || bitmap == nullptr || pixels == nullptr) {
+        if (bitmap != nullptr) DeleteObject(bitmap);
+        if (memory_dc != nullptr) DeleteDC(memory_dc);
+        if (desktop_dc != nullptr) ReleaseDC(nullptr, desktop_dc);
         error = "could not allocate the GDI fallback capture surface";
         return false;
     }
+
+    destroy_gdi_surface();
+    copy_texture_ = std::move(texture);
+    copy_view_ = std::move(view);
+    gdi_desktop_dc_ = desktop_dc;
+    gdi_memory_dc_ = memory_dc;
+    gdi_bitmap_ = bitmap;
+    gdi_pixels_ = pixels;
     gdi_previous_bitmap_ = SelectObject(gdi_memory_dc_, gdi_bitmap_);
-    gdi_surface_width_ = width_;
-    gdi_surface_height_ = height_;
+    gdi_surface_width_ = width;
+    gdi_surface_height_ = height;
     return true;
 }
 
@@ -251,7 +269,9 @@ void DesktopDuplicator::destroy_gdi_surface() {
 }
 
 CapturePollResult DesktopDuplicator::poll_gdi(CapturedDesktop& frame, std::string& error) {
-    if (gdi_memory_dc_ == nullptr || gdi_bitmap_ == nullptr || gdi_pixels_ == nullptr) {
+    if (gdi_memory_dc_ == nullptr || gdi_bitmap_ == nullptr || gdi_pixels_ == nullptr ||
+        copy_texture_.Get() == nullptr || copy_view_.Get() == nullptr ||
+        gdi_surface_width_ != width_ || gdi_surface_height_ != height_) {
         error = "the GDI fallback capture surface is not initialized";
         return CapturePollResult::Failed;
     }
@@ -341,16 +361,24 @@ BOOL CALLBACK find_monitor_rect(HMONITOR monitor, HDC, LPRECT, LPARAM data) {
 bool DesktopDuplicator::refresh_gdi_output_rect(std::string& error) {
     MonitorSearch search{&output_name_, RECT{}, false};
     EnumDisplayMonitors(nullptr, nullptr, find_monitor_rect, reinterpret_cast<LPARAM>(&search));
-    if (!search.found) return true;  // transiently absent: keep the last surface
     const RECT& r = search.rect;
-    if (r.left == output_rect_.left && r.top == output_rect_.top && r.right == output_rect_.right &&
-        r.bottom == output_rect_.bottom) {
-        return true;
-    }
-    if (r.right <= r.left || r.bottom <= r.top) return true;
+    const GdiRectChange change = classify_gdi_rect_change(
+        search.found,
+        CaptureRect{output_rect_.left, output_rect_.top, output_rect_.right, output_rect_.bottom},
+        CaptureRect{r.left, r.top, r.right, r.bottom});
+    // Absent (transiently), degenerate or unchanged: keep the last surface.
+    if (change == GdiRectChange::None) return true;
     const uint32_t width = static_cast<uint32_t>(r.right - r.left);
     const uint32_t height = static_cast<uint32_t>(r.bottom - r.top);
-    if (width != width_ || height != height_) {
+    if (change == GdiRectChange::Resize) {
+        // Allocate before publishing anything: on failure output_rect_ and
+        // the dimensions still describe the surviving surface, so capture
+        // stays consistent and the next rect check retries the resize.
+        if (!ensure_gdi_texture(width, height, error)) {
+            error = "resizing the GDI capture to " + std::to_string(width) + "x" +
+                    std::to_string(height) + " (will retry): " + error;
+            return false;
+        }
         std::printf("  capture output %ls: GDI desktop changed %ux%u -> %ux%u\n",
                     output_name_.c_str(), width_, height_, width, height);
     }
@@ -360,7 +388,7 @@ bool DesktopDuplicator::refresh_gdi_output_rect(std::string& error) {
     surface_width_ = width;
     surface_height_ = height;
     gdi_cursor_valid_ = false;
-    return ensure_gdi_texture(error);
+    return true;
 }
 
 bool DesktopDuplicator::ensure_copy_texture(ID3D11Texture2D* source, std::string& error) {
@@ -377,6 +405,9 @@ bool DesktopDuplicator::ensure_copy_texture(ID3D11Texture2D* source, std::string
 
     copy_view_.Reset();
     copy_texture_.Reset();
+    // The renderer's cached view is the old texture: the next frame must copy
+    // into the new one and publish it, even if it is pointer-only.
+    published_ = PublishedDesktop{};
     D3D11_TEXTURE2D_DESC copy = source_description;
     copy.MipLevels = 1;
     copy.ArraySize = 1;
@@ -468,13 +499,22 @@ CapturePollResult DesktopDuplicator::poll(CapturedDesktop& frame, std::string& e
     frame.surface_width = surface_width_;
     frame.surface_height = surface_height_;
     frame.rotation = rotation_;
-    frame.desktop_updated = info.LastPresentTime.QuadPart != 0 || !have_desktop_texture_;
+    // Texture, surface size and rotation go out together: a pointer-only frame
+    // (LastPresentTime == 0) after a re-duplication, a copy-texture
+    // replacement or a geometry change still copies and publishes, so the
+    // renderer never pairs new pointer extents or rotation with an old image.
+    frame.desktop_updated =
+        desktop_publish_required(info.LastPresentTime.QuadPart != 0, published_, rotation_,
+                                 surface_width_, surface_height_);
     frame.protected_content_masked = info.ProtectedContentMaskedOut != FALSE;
     if (frame.desktop_updated) {
         ID3D11ShaderResourceView* unbound[] = {nullptr, nullptr};
         context_->PSSetShaderResources(0, 2, unbound);
         context_->CopyResource(copy_texture_.Get(), source.Get());
-        have_desktop_texture_ = true;
+        published_.valid = true;
+        published_.rotation = rotation_;
+        published_.surface_width = surface_width_;
+        published_.surface_height = surface_height_;
     }
     if (info.LastMouseUpdateTime.QuadPart != 0) {
         frame.pointer.position_updated = true;
@@ -533,7 +573,7 @@ void DesktopDuplicator::reset() {
     logged_rotation_ = -1;
     logged_size_mismatch_ = false;
     gdi_next_rect_check_ms_ = 0;
-    have_desktop_texture_ = false;
+    published_ = PublishedDesktop{};
 }
 
 }  // namespace gt

@@ -16,6 +16,7 @@
 // being changed concurrently. Its assertion is clearly labelled "(tunable)" and
 // the measured numbers are always printed so the limit can be re-tuned later.
 
+#include "capture/capture_surface_state.h"
 #include "imu/fusion.h"
 #include "imu/pose_estimator.h"
 #include "layout/layout.h"
@@ -740,6 +741,63 @@ bool project_to_pixel(const XMMATRIX& view, const XMMATRIX& proj,
     return true;
 }
 
+// Capture bookkeeping (desktop_duplication.cpp follows these two rules).
+void run_capture_state_checks() {
+    std::printf("\n== capture surface state ==\n");
+    using gt::CaptureRect;
+    using gt::GdiRectChange;
+    const CaptureRect landscape{0, 0, 1920, 1080};
+    const CaptureRect portrait{0, 0, 1080, 1920};
+    check(gt::classify_gdi_rect_change(true, landscape, landscape) == GdiRectChange::None,
+          "GDI rect unchanged: keep the surface");
+    check(gt::classify_gdi_rect_change(false, landscape, portrait) == GdiRectChange::None,
+          "GDI monitor transiently absent: keep the surface");
+    check(gt::classify_gdi_rect_change(true, landscape, CaptureRect{0, 0, 0, 1080}) ==
+              GdiRectChange::None,
+          "GDI degenerate rect: keep the surface");
+    check(gt::classify_gdi_rect_change(true, landscape, CaptureRect{1920, 0, 3840, 1080}) ==
+              GdiRectChange::Move,
+          "GDI same size elsewhere: move only, no reallocation");
+    // A failed allocation leaves the committed rect untouched, so the very
+    // next rect check must still see the resize pending (the old code stored
+    // the new rect before allocating and then reported "unchanged").
+    CaptureRect committed = landscape;
+    bool allocation_ok = false;
+    for (int poll = 0; poll < 3; ++poll) {
+        const GdiRectChange change = gt::classify_gdi_rect_change(true, committed, portrait);
+        check(change == GdiRectChange::Resize,
+              "GDI resize stays pending after " + std::to_string(poll) + " failed allocations");
+        if (change == GdiRectChange::Resize && allocation_ok) committed = portrait;
+        allocation_ok = poll == 1;  // fail twice, then succeed
+    }
+    check(committed.right == 1080 && committed.bottom == 1920,
+          "GDI resize commits the new rect once allocation succeeds");
+    check(gt::classify_gdi_rect_change(true, committed, portrait) == GdiRectChange::None,
+          "GDI resize no longer pending after the commit");
+
+    // Publishing: a pointer-only frame (presented == false) must still publish
+    // when the cache was invalidated or the geometry/rotation changed.
+    using gt::DesktopRotation;
+    gt::PublishedDesktop published;
+    check(gt::desktop_publish_required(false, published, DesktopRotation::Rotate90, 1920, 1080),
+          "first frame after re-duplication publishes even when pointer-only");
+    published.valid = true;
+    published.rotation = DesktopRotation::Identity;
+    published.surface_width = 1920;
+    published.surface_height = 1080;
+    check(!gt::desktop_publish_required(false, published, DesktopRotation::Identity, 1920, 1080),
+          "pointer-only frame with unchanged geometry keeps the cached texture");
+    check(gt::desktop_publish_required(true, published, DesktopRotation::Identity, 1920, 1080),
+          "presented frame always publishes");
+    check(gt::desktop_publish_required(false, published, DesktopRotation::Rotate90, 1920, 1080),
+          "pointer-only frame after a rotation change publishes texture and rotation together");
+    check(gt::desktop_publish_required(false, published, DesktopRotation::Identity, 2560, 1440),
+          "pointer-only frame after a surface resize publishes");
+    published = gt::PublishedDesktop{};  // copy texture replaced
+    check(gt::desktop_publish_required(false, published, DesktopRotation::Identity, 1920, 1080),
+          "pointer-only frame after a copy-texture replacement publishes");
+}
+
 void run_portrait_checks(const gt::Layout& base, const gt::CameraSigns& signs,
                          const std::string& out_dir) {
     std::printf("\n== portrait screens and rotated capture surfaces ==\n");
@@ -1080,6 +1138,7 @@ int main(int argc, char** argv) {
     }
 
     run_portrait_checks(layout, signs, out_dir);
+    run_capture_state_checks();
 
     std::printf("\nview_selftest: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;

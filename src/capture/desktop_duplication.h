@@ -9,6 +9,7 @@
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 
+#include "capture/capture_surface_state.h"
 #include "render/desktop_rotation.h"
 
 #include <cstdint>
@@ -78,7 +79,10 @@ public:
 private:
     bool create_duplication(std::string& error);
     bool ensure_copy_texture(ID3D11Texture2D* source, std::string& error);
-    bool ensure_gdi_texture(std::string& error);
+    // Allocates the GDI texture and DIB for width x height, replacing the old
+    // ones only when both allocations succeeded (the old surface survives a
+    // failure intact).
+    bool ensure_gdi_texture(uint32_t width, uint32_t height, std::string& error);
     void destroy_gdi_surface();
     CapturePollResult poll_gdi(CapturedDesktop& frame, std::string& error);
     bool refresh_gdi_output_rect(std::string& error);
@@ -102,7 +106,7 @@ private:
     RECT output_rect_{};
     CaptureBackend backend_ = CaptureBackend::DesktopDuplication;
     bool force_gdi_fallback_ = false;
-    bool have_desktop_texture_ = false;
+    PublishedDesktop published_;  // invalidated on re-duplication / copy replacement
 
     HDC gdi_desktop_dc_ = nullptr;
     HDC gdi_memory_dc_ = nullptr;
