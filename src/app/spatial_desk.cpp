@@ -1678,8 +1678,16 @@ int wmain(int argc, wchar_t** argv) {
                             // resize removes from the back: restore those
                             // displays' own scale while they still exist.
                             const auto& current = vdd.display_indices();
+                            bool rescaled = false;
                             for (size_t i = count; i < current.size(); ++i) {
-                                display_scale.restore_driver(current[i]);
+                                rescaled = display_scale.restore_driver(current[i]) || rescaled;
+                            }
+                            // Measured live: removing a VDD right after a scale
+                            // change made the remaining VDDs report no modes,
+                            // so the shrink rolled back every time. 750 ms of
+                            // settle made it succeed.
+                            if (rescaled) {
+                                Sleep(750);
                             }
                             const bool resized = vdd.resize(count, detail);
                             const auto& indices = vdd.display_indices();

@@ -293,33 +293,34 @@ void DisplayScaleSession::apply(const std::vector<std::pair<int, std::wstring>>&
     }
 }
 
-void DisplayScaleSession::restore_one(const Original& original) {
+bool DisplayScaleSession::restore_one(const Original& original) {
     const std::string what = original.percent > 0 ? std::to_string(original.percent) + "%"
                                                   : "rel " + std::to_string(original.rel);
     const std::wstring name = live_name(original.monitor_id);
     if (name.empty()) {
         log("restore of VDD " + std::to_string(original.driver_index) + " to " + what +
             " skipped: its monitor is no longer an active virtual display");
-        return;
+        return false;
     }
     const std::string label = narrow(name) + " (VDD " + std::to_string(original.driver_index) + ")";
     std::string error;
     if (!ops_.set(name, original.rel, error)) {
         log(label + ": restore to " + what + " failed: " + error);
-        return;
+        return false;
     }
     log(label + ": restored " + what);
+    return true;
 }
 
-void DisplayScaleSession::restore_driver(int driver_index) {
+bool DisplayScaleSession::restore_driver(int driver_index) {
     for (size_t i = 0; i < originals_.size(); ++i) {
         if (originals_[i].driver_index == driver_index) {
             const Original original = originals_[i];
             originals_.erase(originals_.begin() + static_cast<std::ptrdiff_t>(i));
-            restore_one(original);
-            return;
+            return restore_one(original);
         }
     }
+    return false;
 }
 
 void DisplayScaleSession::restore_all() {

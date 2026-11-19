@@ -82,7 +82,7 @@ public:
     // Scales each named virtual display; driver_index is kept for remove_driver.
     void apply(const std::vector<std::pair<int, std::wstring>>& displays);
     // Restores the display recorded for this VDD driver index (one about to be removed).
-    void restore_driver(int driver_index);
+    bool restore_driver(int driver_index);
     // Restores every recorded display. Idempotent.
     void restore_all();
     size_t recorded() const { return originals_.size(); }
@@ -95,7 +95,7 @@ private:
         int percent = 0;
     };
     std::wstring live_name(const std::wstring& monitor_id) const;
-    void restore_one(const Original& original);
+    bool restore_one(const Original& original);
     void log(const std::string& line) const;
 
     int target_ = 0;

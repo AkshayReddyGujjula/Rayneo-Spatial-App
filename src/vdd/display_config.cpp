@@ -22,6 +22,17 @@
 namespace gt {
 namespace {
 
+// Device names are ASCII (\\.\DISPLAYn); used only in error text.
+std::string ascii_device_name(const std::wstring& wide) {
+    std::string out;
+    out.reserve(wide.size());
+    for (wchar_t ch : wide) {
+        out.push_back(ch < 0x80 ? static_cast<char>(ch) : '?');
+    }
+    return out;
+}
+
+
 bool contains_case_insensitive(const std::wstring& text, const wchar_t* needle) {
     std::wstring lower_text = text;
     std::wstring lower_needle = needle;
@@ -1253,7 +1264,7 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
         const int refresh = choose_refresh_rate(refresh_rates(name->second, width, height),
                                                 preferred_hz);
         if (refresh == 0) {
-            error = "the Parsec VDD does not expose the requested display mode";
+            error = "the Parsec VDD does not expose the requested display mode on " + ascii_device_name(name->second);
             return false;
         }
         DEVMODEW mode{};
@@ -1556,7 +1567,7 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
         const int refresh = choose_refresh_rate(refresh_rates(name->second, width, height),
                                                 preferred_hz);
         if (refresh == 0) {
-            error = "the Parsec VDD does not expose the requested display mode";
+            error = "the Parsec VDD does not expose the requested display mode on " + ascii_device_name(name->second);
             return false;
         }
         DEVMODEW mode{};
