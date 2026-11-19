@@ -435,6 +435,12 @@ DisplayScaleBackupStore file_display_scale_backup(const std::filesystem::path& p
         }
         std::filesystem::path temp = path;
         temp += L".tmp";
+        if (path.has_parent_path()) {
+            // Live: an engine started outside the repo tree resolved config/
+            // to a folder that did not exist, and scaling was skipped.
+            std::error_code dir_error;
+            std::filesystem::create_directories(path.parent_path(), dir_error);
+        }
         {
             std::ofstream out(temp, std::ios::binary | std::ios::trunc);
             const std::string text = serialize_display_scale_backup(backup);

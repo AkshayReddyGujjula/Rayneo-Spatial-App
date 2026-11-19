@@ -140,6 +140,23 @@ int parse_vdd_driver_index(const std::wstring& device_id) {
     return uid - 0x100;
 }
 
+int choose_refresh_rate(const std::vector<int>& available, int preferred);
+
+// Measured live 2026-11-19: right after a VDD removal Windows can be
+// re-applying its saved arrangement for the remaining monitors, and a VDD
+// briefly lists no modes. Poll for up to 2 s instead of failing the reload.
+int settled_refresh_rate(const std::wstring& device_name, int width, int height, int preferred) {
+    for (int waited = 0;; waited += 100) {
+        const int refresh = choose_refresh_rate(refresh_rates(device_name, width, height), preferred);
+        if (refresh != 0 || waited >= 2000) {
+            if (refresh != 0 && waited > 0) {
+                std::printf("  %ls listed its modes again after %d ms\n", device_name.c_str(), waited);
+            }
+            return refresh;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+}
 int choose_refresh_rate(const std::vector<int>& available, int preferred) {
     if (available.empty()) {
         return 0;
@@ -1467,8 +1484,7 @@ bool apply_workspace_topology(const std::vector<DisplayModeSnapshot>& snapshots,
             error = "a planned virtual display has no Windows display name";
             return false;
         }
-        const int refresh = choose_refresh_rate(refresh_rates(name->second, width, height),
-                                                preferred_hz);
+        const int refresh = settled_refresh_rate(name->second, width, height, preferred_hz);
         if (refresh == 0) {
             error = "the Parsec VDD does not expose the requested display mode on " + ascii_device_name(name->second);
             return false;
@@ -1779,8 +1795,7 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
         // A failed portrait toggle must roll the rotation back too.
         snapshot.mode.dmFields |= DM_DISPLAYORIENTATION;
         snapshot.primary = adapter_is_primary(name->second);
-        const int refresh = choose_refresh_rate(refresh_rates(name->second, width, height),
-                                                preferred_hz);
+        const int refresh = settled_refresh_rate(name->second, width, height, preferred_hz);
         if (refresh == 0) {
             error = "the Parsec VDD does not expose the requested display mode on " + ascii_device_name(name->second);
             return false;
@@ -1845,6 +1860,15 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
             staged.push_back(item);
         }
     }
+    // Measured live 2026-11-19: after a VDD removal Windows can re-apply the
+    // arrangement it saved for the remaining monitor set (a screen that was
+    // portrait earlier in the session turned portrait again) a moment AFTER
+    // this commit, and an item whose snapshot already matched was not even
+    // staged. A mismatch therefore re-stages every item and commits again,
+    // twice at most, before failing into the caller's rollback.
+    for (int attempt = 0;; ++attempt) {
+    std::vector<ConfiguredDisplay> candidate;
+    bool retry = false;
     // The new center stages first (same primary-first rule as the takeover),
     // then the other virtual displays, then the aside moves. When the primary
     // moves, stage every virtual position relative to the new origin.
@@ -1882,7 +1906,6 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
     // tolerated (warned, and the live position is published); a persistent
     // extent, orientation or primary mismatch fails, so the caller's rollback
     // restores the snapshot instead of publishing a mode Windows never applied.
-    std::vector<ConfiguredDisplay> candidate;
     candidate.reserve(staged.size());
     for (const StagedMode& item : staged) {
         if (item.driver < 0) {
@@ -1918,6 +1941,13 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
                         actual.dmPelsWidth, actual.dmPelsHeight, actual.dmDisplayOrientation,
                         got.primary ? " as primary" : "", item.x, item.y, item.w, item.h,
                         item.orientation, item.primary ? " as primary" : "");
+            if (verdict == ReadbackVerdict::Mismatch && attempt < 2) {
+                std::printf("  re-applying the arrangement (attempt %d): Windows changed "
+                            "VDD[%d] after the commit\n",
+                            attempt + 2, item.driver);
+                retry = true;
+                break;
+            }
             if (verdict == ReadbackVerdict::Mismatch) {
                 error = "Windows did not apply the planned mode of virtual display " +
                         ascii_device_name(item.device) +
@@ -1932,8 +1962,16 @@ bool reposition_virtual_displays(const std::vector<PlannedDesktop>& planned,
         }
         candidate.push_back(std::move(verified));
     }
+    if (retry) {
+        for (StagedMode& item : staged) {
+            item.needs_change = true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        continue;
+    }
     configured = std::move(candidate);
     return true;
+    }
 }
 
 namespace {
