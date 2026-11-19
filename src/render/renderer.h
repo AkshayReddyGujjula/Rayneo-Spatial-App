@@ -3,6 +3,7 @@
 #include "imu/fusion.h"
 #include "layout/layout.h"
 #include "render/camera.h"
+#include "render/desktop_rotation.h"
 #include "render/screen_geometry.h"
 
 #include <windows.h>
@@ -48,8 +49,13 @@ public:
     void shutdown();
     bool set_layout(const Layout& layout, std::string& error,
                     std::span<const std::optional<size_t>> capture_sources = {});
+    // rotation: how the captured surface must be turned to be upright (a
+    // rotated DXGI output delivers its unrotated scan-out image; GDI and the
+    // label textures are already upright). Applied as a UV transform in the
+    // pixel shaders, so the copy stays a plain CopyResource.
     bool set_screen_texture(size_t screen_index, ID3D11ShaderResourceView* texture,
-                            std::string& error);
+                            std::string& error,
+                            DesktopRotation rotation = DesktopRotation::Identity);
     bool update_screen_cursor(size_t screen_index, const CursorUpdate& update,
                               std::string& error);
 
@@ -97,6 +103,7 @@ private:
         UINT vertex_start = 0;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> label_texture;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> live_texture;
+        DesktopRotation live_rotation = DesktopRotation::Identity;
         ScreenLayout layout;
         std::array<ScreenGeometryVertex, 6> geometry{};
         bool cursor_visible = false;

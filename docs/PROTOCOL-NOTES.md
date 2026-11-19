@@ -174,6 +174,52 @@ overlap and an edge-connected set). Desktop Duplication returns a rotated output
 unrotated, with `DXGI_OUTDUPL_DESC.Rotation` set; the capture/render side
 uprights it.
 
+## Rotated (portrait) capture
+
+A `portrait` screen's virtual display runs the 1920x1080 mode rotated with
+DMDO_90, so its desktop is 1080x1920. Desktop Duplication does not rotate for
+you: `AcquireNextFrame` returns the image in the output's unrotated scan-out
+orientation (a 1920x1080 surface), and `DXGI_OUTDUPL_DESC.Rotation` says how to
+turn it upright. The capture stays on DXGI (it used to drop rotated outputs to the
+GDI fallback) and reports the rotation with each frame. The renderer applies it
+as a per-screen UV transform in the pixel shaders, so the copy stays a single
+`CopyResource` with no extra pass or texture. The transform is the pure function
+`surface_uv_transform` in `src/render/desktop_rotation.h`: 90 -> (v, 1-u),
+180 -> (1-u, 1-v), 270 -> (1-v, u). `view_selftest` checks it pixel by pixel
+against the destination-rect formulas in Microsoft's desktop duplication sample
+(`DisplayManager::SetDirtyVert`, checked verbatim against
+microsoft/Windows-classic-samples). That sample offsets the pointer position by
+`DesktopCoordinates` and never rotates the pointer position or shape.
+
+- **Sizes.** The upright desktop size is the duplicated surface size, with the
+  axes swapped for 90 and 270. It is not taken from `DesktopCoordinates`, which
+  can disagree with the surface. capture_smoketest once saw 1646x1029 coordinates
+  for a 2880x1800 surface. That was not reproduced and its cause is not
+  established; DPI virtualisation is the likely candidate (2880/1646 is about 1.75).
+  The size is recomputed every frame. The capture texture, the GDI surface, the
+  cursor mapping and the per-screen label texture (288x512 for a tall quad) all
+  follow the actual sizes, so capture and render do not assume 16:9.
+- **Pointer.** The engine draws the pointer itself from the duplication pointer
+  info. Windows does not composite it into the duplicated image. Its position is
+  in upright desktop pixels and its shape is upright, which is how the sample uses
+  them. Only the masked-colour and monochrome cursors read the desktop under them,
+  and that read goes through the same UV transform.
+- **Dirty and move rects** come in surface space. They are unused here because the
+  whole frame is copied.
+- **Runtime change.** A rotation change is a mode change, so the duplication gets
+  `DXGI_ERROR_ACCESS_LOST`. The duplication is then recreated and re-reads
+  `Rotation`. A reload that changes a display's mode also rebinds its capture. The
+  GDI fallback has no ACCESS_LOST, so it re-reads its monitor rectangle once a
+  second and resizes its surface. GDI images are always upright.
+- **Log lines for a live check.** Look for
+  `capture output \\.\DISPLAYn: DXGI duplication, rotation 90 deg (DXGI_MODE_ROTATION 2), mode WxH, desktop coordinates 1080x1920`.
+  It is printed whenever the rotation differs from the last one logged for that
+  capture. If the surface ever contradicts the rotation, a
+  `WARNING duplicated surface ... gives a ... desktop` line appears. GDI resizes
+  print `GDI desktop changed A -> B`.
+- **Not live-verified.** Pointer orientation on a rotated output is the main
+  open item. The engine log does not show it, so look at the cursor on the glasses.
+
 ## Fusion notes (live-verified)
 
 - **Yaw has no absolute reference.** With the magnetometer off, a very slow steady

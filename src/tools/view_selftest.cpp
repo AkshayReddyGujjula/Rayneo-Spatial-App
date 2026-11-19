@@ -20,6 +20,7 @@
 #include "imu/pose_estimator.h"
 #include "layout/layout.h"
 #include "render/camera.h"
+#include "render/desktop_rotation.h"
 #include "render/screen_geometry.h"
 
 #include <DirectXMath.h>
@@ -608,6 +609,291 @@ gt::Vec3 package_from_body(const gt::Vec3& body) {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// Portrait screens and rotated Desktop Duplication surfaces
+// ---------------------------------------------------------------------------
+
+// Independent oracle: the Windows "DXGI desktop duplication" sample's
+// DisplayManager::SetDirtyVert destination-rect formulas, applied to the one-pixel
+// surface rect (sx, sy, sx+1, sy+1). W x H is the upright desktop size.
+void oracle_desktop_pixel(gt::DesktopRotation rotation, int sx, int sy, int W, int H, int& dx,
+                          int& dy) {
+    switch (rotation) {
+        case gt::DesktopRotation::Rotate90:  // left = W - bottom, top = left
+            dx = W - (sy + 1);
+            dy = sx;
+            break;
+        case gt::DesktopRotation::Rotate180:  // left = W - right, top = H - bottom
+            dx = W - (sx + 1);
+            dy = H - (sy + 1);
+            break;
+        case gt::DesktopRotation::Rotate270:  // left = top, top = H - right
+            dx = sy;
+            dy = H - (sx + 1);
+            break;
+        default:
+            dx = sx;
+            dy = sy;
+            break;
+    }
+}
+
+// Number of surface pixels whose desktop pixel, sampled at its centre through
+// `transform`, does not land back on that surface pixel.
+int count_rotation_mismatches(gt::DesktopRotation rotation, const gt::SurfaceUvTransform& transform,
+                              int desktop_w, int desktop_h, int stride) {
+    uint32_t sw = 0;
+    uint32_t sh = 0;
+    gt::desktop_size_from_surface(rotation, static_cast<uint32_t>(desktop_w),
+                                  static_cast<uint32_t>(desktop_h), sw, sh);
+    int mismatches = 0;
+    const auto visit = [&](int sx, int sy) {
+        int dx = 0;
+        int dy = 0;
+        oracle_desktop_pixel(rotation, sx, sy, desktop_w, desktop_h, dx, dy);
+        if (dx < 0 || dy < 0 || dx >= desktop_w || dy >= desktop_h) {
+            ++mismatches;
+            return;
+        }
+        float su = 0.0f;
+        float sv = 0.0f;
+        gt::apply_surface_uv_transform(transform, (dx + 0.5f) / desktop_w, (dy + 0.5f) / desktop_h,
+                                       su, sv);
+        const int px = static_cast<int>(std::floor(su * static_cast<float>(sw)));
+        const int py = static_cast<int>(std::floor(sv * static_cast<float>(sh)));
+        if (px != sx || py != sy) ++mismatches;
+    };
+    for (int sy = 0; sy < static_cast<int>(sh); sy += stride) {
+        for (int sx = 0; sx < static_cast<int>(sw); sx += stride) visit(sx, sy);
+        visit(static_cast<int>(sw) - 1, sy);
+    }
+    for (int sx = 0; sx < static_cast<int>(sw); sx += stride) visit(sx, static_cast<int>(sh) - 1);
+    visit(static_cast<int>(sw) - 1, static_cast<int>(sh) - 1);
+    return mismatches;
+}
+
+// Upright test desktop: red block top-left, green band along the bottom,
+// grey elsewhere. Asymmetric under every rotation and mirror.
+std::array<float, 3> desktop_pattern(int x, int y, int W, int H) {
+    if (x < W * 2 / 5 && y < H / 4) return {0.95f, 0.15f, 0.15f};
+    if (y >= H * 9 / 10) return {0.15f, 0.85f, 0.25f};
+    return {0.55f, 0.55f, 0.6f};
+}
+
+// What a rotated output's duplication delivers: the upright pattern laid out in
+// the unrotated scan-out orientation (built through the oracle, not the
+// transform under test).
+struct Surface {
+    int width = 0;
+    int height = 0;
+    std::vector<std::array<float, 3>> texels;
+    std::array<float, 3> sample(float u, float v) const {
+        const int x = std::clamp(static_cast<int>(std::floor(u * width)), 0, width - 1);
+        const int y = std::clamp(static_cast<int>(std::floor(v * height)), 0, height - 1);
+        return texels[static_cast<size_t>(y) * width + x];
+    }
+};
+
+Surface make_surface(gt::DesktopRotation rotation, int desktop_w, int desktop_h) {
+    uint32_t sw = 0;
+    uint32_t sh = 0;
+    gt::desktop_size_from_surface(rotation, static_cast<uint32_t>(desktop_w),
+                                  static_cast<uint32_t>(desktop_h), sw, sh);
+    Surface surface;
+    surface.width = static_cast<int>(sw);
+    surface.height = static_cast<int>(sh);
+    surface.texels.resize(static_cast<size_t>(sw) * sh);
+    for (int sy = 0; sy < surface.height; ++sy) {
+        for (int sx = 0; sx < surface.width; ++sx) {
+            int dx = 0;
+            int dy = 0;
+            oracle_desktop_pixel(rotation, sx, sy, desktop_w, desktop_h, dx, dy);
+            surface.texels[static_cast<size_t>(sy) * surface.width + sx] =
+                desktop_pattern(dx, dy, desktop_w, desktop_h);
+        }
+    }
+    return surface;
+}
+
+// World position of upright desktop UV (u, v) on a screen quad (BL, BR, TR, TL
+// are quad[0], quad[1], quad[2], quad[5]; v = 0 is the top edge).
+gt::ScreenGeometryVertex quad_point(const std::array<gt::ScreenGeometryVertex, 6>& quad, float u,
+                                    float v) {
+    const auto& bl = quad[0];
+    const auto& br = quad[1];
+    const auto& tr = quad[2];
+    const auto& tl = quad[5];
+    const auto mix = [&](float a_tl, float a_tr, float a_bl, float a_br) {
+        const float top = a_tl * (1.0f - u) + a_tr * u;
+        const float bottom = a_bl * (1.0f - u) + a_br * u;
+        return top * (1.0f - v) + bottom * v;
+    };
+    return gt::ScreenGeometryVertex{mix(tl.x, tr.x, bl.x, br.x), mix(tl.y, tr.y, bl.y, br.y),
+                                    mix(tl.z, tr.z, bl.z, br.z), u, v};
+}
+
+bool project_to_pixel(const XMMATRIX& view, const XMMATRIX& proj,
+                      const gt::ScreenGeometryVertex& point, XMFLOAT2& pixel) {
+    XMFLOAT2 ndc;
+    if (!view_to_ndc(proj, world_to_view(view, point), ndc)) return false;
+    pixel = ndc_to_pixel(ndc);
+    return true;
+}
+
+void run_portrait_checks(const gt::Layout& base, const gt::CameraSigns& signs,
+                         const std::string& out_dir) {
+    std::printf("\n== portrait screens and rotated capture surfaces ==\n");
+
+    // 1. DXGI enum mapping (DXGI_MODE_ROTATION: UNSPECIFIED 0 .. ROTATE270 4).
+    check(gt::desktop_rotation_from_dxgi(0) == gt::DesktopRotation::Identity &&
+              gt::desktop_rotation_from_dxgi(1) == gt::DesktopRotation::Identity &&
+              gt::desktop_rotation_from_dxgi(2) == gt::DesktopRotation::Rotate90 &&
+              gt::desktop_rotation_from_dxgi(3) == gt::DesktopRotation::Rotate180 &&
+              gt::desktop_rotation_from_dxgi(4) == gt::DesktopRotation::Rotate270,
+          "DXGI_MODE_ROTATION values map to the four desktop rotations");
+
+    // 2. The UV transform inverts the sample's surface->desktop formulas, for
+    //    a 1080x1920 portrait desktop (1920x1080 scan-out surface at 90/270).
+    const gt::DesktopRotation rotations[4] = {
+        gt::DesktopRotation::Identity, gt::DesktopRotation::Rotate90,
+        gt::DesktopRotation::Rotate180, gt::DesktopRotation::Rotate270};
+    for (const gt::DesktopRotation rotation : rotations) {
+        uint32_t sw = 0;
+        uint32_t sh = 0;
+        gt::desktop_size_from_surface(rotation, 1080, 1920, sw, sh);
+        const int mismatches = count_rotation_mismatches(
+            rotation, gt::surface_uv_transform(rotation), 1080, 1920, 7);
+        std::printf("  rotation %3d: surface %ux%u for desktop 1080x1920, %d mismatched pixels\n",
+                    gt::desktop_rotation_degrees(rotation), sw, sh, mismatches);
+        check(mismatches == 0, "rotation " + std::to_string(gt::desktop_rotation_degrees(rotation)) +
+                                   ": desktop UV -> surface UV matches the duplication sample");
+        // The test discriminates: sampling a rotated surface as if upright fails.
+        if (rotation != gt::DesktopRotation::Identity) {
+            const int unrotated = count_rotation_mismatches(
+                rotation, gt::surface_uv_transform(gt::DesktopRotation::Identity), 1080, 1920, 7);
+            check(unrotated > 0, "rotation " +
+                                     std::to_string(gt::desktop_rotation_degrees(rotation)) +
+                                     ": an ignored rotation is detected (" +
+                                     std::to_string(unrotated) + " mismatches)");
+        }
+        // Landscape desktops too (a rotated landscape output is 1920 wide again).
+        check(count_rotation_mismatches(rotation, gt::surface_uv_transform(rotation), 1920, 1080,
+                                        7) == 0,
+              "rotation " + std::to_string(gt::desktop_rotation_degrees(rotation)) +
+                  ": 1920x1080 desktop also maps exactly");
+    }
+
+    // 3. Portrait geometry: the editor swaps width_m/height_m, so the quad is tall
+    //    and its UV (0,0) corner is the upright desktop's top-left.
+    gt::ScreenLayout portrait = base.screens.empty() ? gt::ScreenLayout{} : base.screens[0];
+    for (const gt::ScreenLayout& screen : base.screens) {
+        if (screen.id == "centre") portrait = screen;
+    }
+    portrait.id = "portrait";
+    portrait.portrait = true;
+    portrait.yaw_deg = 0.0f;
+    portrait.pitch_deg = 0.0f;
+    portrait.roll_deg = 0.0f;
+    portrait.width_m = 0.956f;
+    portrait.height_m = 1.7f;
+    portrait.distance_m = 2.0f;
+    {
+        const float aspect = static_cast<float>(kImageWidth) / static_cast<float>(kImageHeight);
+        const XMMATRIX proj = make_projection(base.fov_deg, aspect);
+        const XMMATRIX view = gt::camera_view_matrix(head_from_applied_euler(0.0f, 0.0f, 0.0f), signs);
+        const auto quad = gt::make_screen_quad(portrait);
+        XMFLOAT2 tl{};
+        XMFLOAT2 tr{};
+        XMFLOAT2 bl{};
+        const bool ok = project_to_pixel(view, proj, quad[5], tl) &&
+                        project_to_pixel(view, proj, quad[2], tr) &&
+                        project_to_pixel(view, proj, quad[0], bl);
+        const float pixel_w = tr.x - tl.x;
+        const float pixel_h = bl.y - tl.y;
+        // Square pixels and a quad facing the camera: the projected aspect is
+        // the metric one, 1.7 / 0.956 (the 16:9 desktop stood on end).
+        const float expected = 1.7f / 0.956f;
+        std::printf("  portrait 0.956 x 1.7 m at 2 m: %.1f x %.1f px (h/w %.3f, expected %.3f)\n",
+                    pixel_w, pixel_h, pixel_h / pixel_w, expected);
+        check(ok && pixel_w > 0.0f && pixel_h > pixel_w,
+              "portrait quad projects taller than wide, upright (TL left of TR, above BL)");
+        check(ok && std::fabs(pixel_h / pixel_w - expected) < 0.01f * expected,
+              "portrait quad aspect is 1.7/0.956 within 1%");
+        check(quad[5].u == 0.0f && quad[5].v == 0.0f && quad[1].u == 1.0f && quad[1].v == 1.0f,
+              "portrait quad UV (0,0) is top-left and (1,1) bottom-right");
+    }
+
+    // 4. Composite: four portrait screens, each fed a 108x192 desktop through a
+    //    surface of a different rotation, sampled exactly as the pixel shader
+    //    does (desktop UV -> surface_uv_transform -> surface). All four must
+    //    show the same upright desktop. Writes view_portrait_rotations.ppm.
+    gt::Layout layout = base;
+    layout.screens.clear();
+    const float yaws[4] = {-16.5f, -5.5f, 5.5f, 16.5f};
+    for (int i = 0; i < 4; ++i) {
+        gt::ScreenLayout screen = portrait;
+        screen.id = "portrait_" + std::to_string(gt::desktop_rotation_degrees(rotations[i]));
+        screen.yaw_deg = yaws[i];
+        screen.distance_m = 5.5f;  // 9.9 deg wide, 17.6 deg tall: four fit in the view
+        layout.screens.push_back(screen);
+    }
+    const float aspect = static_cast<float>(kImageWidth) / static_cast<float>(kImageHeight);
+    const XMMATRIX proj = make_projection(layout.fov_deg, aspect);
+    const XMMATRIX view = gt::camera_view_matrix(head_from_applied_euler(0.0f, 0.0f, 0.0f), signs);
+    Image img;
+    render_background(img);
+    constexpr int kDesktopW = 108;
+    constexpr int kDesktopH = 192;
+    constexpr int kGridU = 300;
+    constexpr int kGridV = 520;
+    int marker_hits = 0;
+    int band_hits = 0;
+    for (int i = 0; i < 4; ++i) {
+        const Surface surface = make_surface(rotations[i], kDesktopW, kDesktopH);
+        const gt::SurfaceUvTransform transform = gt::surface_uv_transform(rotations[i]);
+        const auto quad = gt::make_screen_quad(layout.screens[static_cast<size_t>(i)]);
+        for (int gv = 0; gv < kGridV; ++gv) {
+            for (int gu = 0; gu < kGridU; ++gu) {
+                const float u = (gu + 0.5f) / kGridU;
+                const float v = (gv + 0.5f) / kGridV;
+                float su = 0.0f;
+                float sv = 0.0f;
+                gt::apply_surface_uv_transform(transform, u, v, su, sv);
+                const auto colour = surface.sample(su, sv);
+                XMFLOAT2 pixel{};
+                if (project_to_pixel(view, proj, quad_point(quad, u, v), pixel)) {
+                    img.set(static_cast<int>(pixel.x), static_cast<int>(pixel.y), colour[0],
+                            colour[1], colour[2]);
+                }
+            }
+        }
+        // Read the composited image back where the upright desktop's top-left
+        // block and bottom band must be.
+        const auto read = [&](float u, float v) {
+            XMFLOAT2 pixel{};
+            project_to_pixel(view, proj, quad_point(quad, u, v), pixel);
+            const size_t at = (static_cast<size_t>(pixel.y) * kImageWidth +
+                               static_cast<size_t>(pixel.x)) * 3;
+            return std::array<int, 3>{img.rgb[at], img.rgb[at + 1], img.rgb[at + 2]};
+        };
+        const auto marker = read(0.15f, 0.1f);
+        const auto band = read(0.5f, 0.96f);
+        const auto opposite = read(0.85f, 0.1f);
+        if (marker[0] > 200 && marker[1] < 80 && opposite[0] < 200) ++marker_hits;
+        if (band[1] > 180 && band[0] < 80) ++band_hits;
+    }
+    draw_crosshair(img);
+    const std::string path = out_dir + "/view_portrait_rotations.ppm";
+    if (!img.save(path)) {
+        std::printf("  !! failed to write %s\n", path.c_str());
+        ++g_failures;
+    }
+    std::printf("  composite %s: top-left marker on %d/4 screens, bottom band on %d/4\n",
+                path.c_str(), marker_hits, band_hits);
+    check(marker_hits == 4 && band_hits == 4,
+          "all four rotations composite to the same upright portrait desktop");
+}
+
 int main(int argc, char** argv) {
     const std::string out_dir = argc > 1 ? argv[1] : "scratch";
     std::error_code ec;
@@ -792,6 +1078,8 @@ int main(int argc, char** argv) {
         check(pan_mid.applied.yaw_deg > 15.0f,
               "mid-pan pose reports a right pan (applied yaw > 15 deg)");
     }
+
+    run_portrait_checks(layout, signs, out_dir);
 
     std::printf("\nview_selftest: %s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
