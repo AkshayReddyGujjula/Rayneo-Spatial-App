@@ -7,6 +7,12 @@
 using Microsoft::WRL::ComPtr;
 
 namespace gt {
+
+// desktop_rotation_from_dxgi takes the raw enum value to stay DXGI-free.
+static_assert(DXGI_MODE_ROTATION_UNSPECIFIED == 0 && DXGI_MODE_ROTATION_IDENTITY == 1 &&
+              DXGI_MODE_ROTATION_ROTATE90 == 2 && DXGI_MODE_ROTATION_ROTATE180 == 3 &&
+              DXGI_MODE_ROTATION_ROTATE270 == 4);
+
 namespace {
 
 std::wstring lowercase(std::wstring value) {
@@ -115,6 +121,13 @@ bool DesktopDuplicator::create_duplication(std::string& error) {
     width_ = static_cast<uint32_t>(output_rect_.right - output_rect_.left);
     height_ = static_cast<uint32_t>(output_rect_.bottom - output_rect_.top);
 
+    // DesktopCoordinates are in desktop space, so for a rotated output this is
+    // already the upright size (1080x1920 for a 1920x1080 mode at DMDO_90).
+    rotation_ = DesktopRotation::Identity;
+    surface_width_ = width_;
+    surface_height_ = height_;
+    logged_size_mismatch_ = false;
+
     if (force_gdi_fallback_) {
         backend_ = CaptureBackend::GdiFallback;
         return ensure_gdi_texture(error);
@@ -130,15 +143,32 @@ bool DesktopDuplicator::create_duplication(std::string& error) {
         backend_ = CaptureBackend::GdiFallback;
         return ensure_gdi_texture(error);
     }
+    // Re-read on every (re)creation: a rotation change is a mode change, which
+    // invalidates the duplication (AcquireNextFrame returns
+    // DXGI_ERROR_ACCESS_LOST, per the AcquireNextFrame docs), and poll() lands
+    // here again, so a stale rotation can never survive a re-duplication.
+    // The frames keep arriving in the unrotated scan-out orientation; the
+    // renderer rotates them through surface_uv_transform (desktop_rotation.h).
     DXGI_OUTDUPL_DESC description{};
     duplication_->GetDesc(&description);
-    width_ = description.ModeDesc.Width;
-    height_ = description.ModeDesc.Height;
-    if (description.Rotation != DXGI_MODE_ROTATION_IDENTITY &&
-        description.Rotation != DXGI_MODE_ROTATION_UNSPECIFIED) {
-        duplication_.Reset();
-        backend_ = CaptureBackend::GdiFallback;
-        return ensure_gdi_texture(error);
+    rotation_ = desktop_rotation_from_dxgi(static_cast<int>(description.Rotation));
+    // Provisional until the first frame's surface size (update_desktop_size).
+    // ModeDesc is the scan-out mode, so it is swapped like the surface.
+    if (description.ModeDesc.Width != 0 && description.ModeDesc.Height != 0) {
+        surface_width_ = description.ModeDesc.Width;
+        surface_height_ = description.ModeDesc.Height;
+        desktop_size_from_surface(rotation_, surface_width_, surface_height_, width_, height_);
+    } else {
+        desktop_size_from_surface(rotation_, width_, height_, surface_width_, surface_height_);
+    }
+    if (logged_rotation_ != static_cast<int>(rotation_)) {
+        std::printf("  capture output %ls: DXGI duplication, rotation %d deg (DXGI_MODE_ROTATION "
+                    "%d), mode %ux%u, desktop coordinates %ldx%ld\n",
+                    output_name_.c_str(), desktop_rotation_degrees(rotation_),
+                    static_cast<int>(description.Rotation), description.ModeDesc.Width,
+                    description.ModeDesc.Height, output_rect_.right - output_rect_.left,
+                    output_rect_.bottom - output_rect_.top);
+        logged_rotation_ = static_cast<int>(rotation_);
     }
     backend_ = CaptureBackend::DesktopDuplication;
     return true;
@@ -225,6 +255,13 @@ CapturePollResult DesktopDuplicator::poll_gdi(CapturedDesktop& frame, std::strin
         error = "the GDI fallback capture surface is not initialized";
         return CapturePollResult::Failed;
     }
+    // GDI has no ACCESS_LOST: notice a mode change (resize, rotation, move)
+    // by re-reading the monitor rectangle about once a second.
+    const ULONGLONG now_ms = GetTickCount64();
+    if (now_ms >= gdi_next_rect_check_ms_) {
+        gdi_next_rect_check_ms_ = now_ms + 1000;
+        if (!refresh_gdi_output_rect(error)) return CapturePollResult::Failed;
+    }
     const BOOL copied = BitBlt(gdi_memory_dc_, 0, 0, static_cast<int>(width_),
                                static_cast<int>(height_), gdi_desktop_dc_, output_rect_.left,
                                output_rect_.top, SRCCOPY | CAPTUREBLT);
@@ -269,11 +306,61 @@ CapturePollResult DesktopDuplicator::poll_gdi(CapturedDesktop& frame, std::strin
     frame.texture = copy_view_;
     frame.width = width_;
     frame.height = height_;
+    frame.surface_width = width_;
+    frame.surface_height = height_;
+    frame.rotation = DesktopRotation::Identity;  // GDI copies desktop coordinates: upright
     frame.desktop_updated = true;
     frame.pointer.position_updated = cursor_changed;
     frame.pointer.visible = false;
     ++frames_captured_;
     return CapturePollResult::Frame;
+}
+
+namespace {
+
+struct MonitorSearch {
+    const std::wstring* name;
+    RECT rect;
+    bool found;
+};
+
+BOOL CALLBACK find_monitor_rect(HMONITOR monitor, HDC, LPRECT, LPARAM data) {
+    auto* search = reinterpret_cast<MonitorSearch*>(data);
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (GetMonitorInfoW(monitor, &info) && _wcsicmp(info.szDevice, search->name->c_str()) == 0) {
+        search->rect = info.rcMonitor;
+        search->found = true;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+}  // namespace
+
+bool DesktopDuplicator::refresh_gdi_output_rect(std::string& error) {
+    MonitorSearch search{&output_name_, RECT{}, false};
+    EnumDisplayMonitors(nullptr, nullptr, find_monitor_rect, reinterpret_cast<LPARAM>(&search));
+    if (!search.found) return true;  // transiently absent: keep the last surface
+    const RECT& r = search.rect;
+    if (r.left == output_rect_.left && r.top == output_rect_.top && r.right == output_rect_.right &&
+        r.bottom == output_rect_.bottom) {
+        return true;
+    }
+    if (r.right <= r.left || r.bottom <= r.top) return true;
+    const uint32_t width = static_cast<uint32_t>(r.right - r.left);
+    const uint32_t height = static_cast<uint32_t>(r.bottom - r.top);
+    if (width != width_ || height != height_) {
+        std::printf("  capture output %ls: GDI desktop changed %ux%u -> %ux%u\n",
+                    output_name_.c_str(), width_, height_, width, height);
+    }
+    output_rect_ = r;
+    width_ = width;
+    height_ = height;
+    surface_width_ = width;
+    surface_height_ = height;
+    gdi_cursor_valid_ = false;
+    return ensure_gdi_texture(error);
 }
 
 bool DesktopDuplicator::ensure_copy_texture(ID3D11Texture2D* source, std::string& error) {
@@ -308,9 +395,33 @@ bool DesktopDuplicator::ensure_copy_texture(ID3D11Texture2D* source, std::string
         copy_texture_.Reset();
         return false;
     }
-    width_ = copy.Width;
-    height_ = copy.Height;
     return true;
+}
+
+// The duplicated surface is authoritative for size: it is the unrotated
+// scan-out image in physical pixels, while DXGI_OUTPUT_DESC.DesktopCoordinates
+// are DPI-virtualised in a process that is not per-monitor aware (measured:
+// capture_smoketest saw 1646x1029 coordinates for a 2880x1800 surface). Pointer
+// positions are physical desktop pixels, so the upright size is the surface
+// size with the axes swapped for 90/270. Recomputed every frame because a
+// rotation change re-duplicates without necessarily changing the surface size.
+void DesktopDuplicator::update_desktop_size(uint32_t surface_width, uint32_t surface_height) {
+    surface_width_ = surface_width;
+    surface_height_ = surface_height;
+    desktop_size_from_surface(rotation_, surface_width, surface_height, width_, height_);
+    // DPI virtualisation scales DesktopCoordinates but never turns them on
+    // their side: an orientation disagreement means the rotation contract in
+    // desktop_rotation.h does not hold for this driver. Say so once.
+    const LONG coords_w = output_rect_.right - output_rect_.left;
+    const LONG coords_h = output_rect_.bottom - output_rect_.top;
+    if (!logged_size_mismatch_ && coords_w > 0 && coords_h > 0 && coords_w != coords_h &&
+        width_ != height_ && ((coords_w > coords_h) != (width_ > height_))) {
+        std::printf("  capture output %ls: WARNING duplicated surface %ux%u at rotation %d deg "
+                    "gives a %ux%u desktop, but the output's desktop coordinates are %ldx%ld\n",
+                    output_name_.c_str(), surface_width, surface_height,
+                    desktop_rotation_degrees(rotation_), width_, height_, coords_w, coords_h);
+        logged_size_mismatch_ = true;
+    }
 }
 
 CapturePollResult DesktopDuplicator::poll(CapturedDesktop& frame, std::string& error) {
@@ -345,9 +456,17 @@ CapturePollResult DesktopDuplicator::poll(CapturedDesktop& frame, std::string& e
         if (FAILED(result)) error = hresult_text("reading the duplicated desktop texture", result);
         return CapturePollResult::Failed;
     }
+    {
+        D3D11_TEXTURE2D_DESC source_description{};
+        source->GetDesc(&source_description);
+        update_desktop_size(source_description.Width, source_description.Height);
+    }
     frame.texture = copy_view_;
     frame.width = width_;
     frame.height = height_;
+    frame.surface_width = surface_width_;
+    frame.surface_height = surface_height_;
+    frame.rotation = rotation_;
     frame.desktop_updated = info.LastPresentTime.QuadPart != 0 || !have_desktop_texture_;
     frame.protected_content_masked = info.ProtectedContentMaskedOut != FALSE;
     if (frame.desktop_updated) {
@@ -407,6 +526,12 @@ void DesktopDuplicator::reset() {
     output_name_.clear();
     width_ = 0;
     height_ = 0;
+    surface_width_ = 0;
+    surface_height_ = 0;
+    rotation_ = DesktopRotation::Identity;
+    logged_rotation_ = -1;
+    logged_size_mismatch_ = false;
+    gdi_next_rect_check_ms_ = 0;
     have_desktop_texture_ = false;
 }
 

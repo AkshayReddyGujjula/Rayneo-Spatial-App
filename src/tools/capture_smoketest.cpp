@@ -56,8 +56,11 @@ int main() {
         const gt::CapturePollResult poll = capture.poll(frame, error);
         if (poll == gt::CapturePollResult::Frame && frame.texture && frame.width > 0 &&
             frame.height > 0) {
-            std::printf("capture_smoketest: PASS (%ls, %ux%u, cursor=%s)\n",
+            std::printf("capture_smoketest: PASS (%ls, desktop %ux%u, surface %ux%u, rotation %d "
+                        "deg, cursor=%s)\n",
                         output_description.DeviceName, frame.width, frame.height,
+                        frame.surface_width, frame.surface_height,
+                        gt::desktop_rotation_degrees(frame.rotation),
                         frame.pointer.visible ? "visible" : "separate cursor not visible");
             dxgi_passed = true;
             break;

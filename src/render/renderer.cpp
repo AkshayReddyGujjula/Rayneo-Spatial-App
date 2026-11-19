@@ -36,9 +36,14 @@ cbuffer CursorInfo : register(b1) {
     float3 g_cursor_padding;
 };
 
-// Per-screen colour multiplier: brightness (dimming) times the night tint.
+// Per-screen colour multiplier: brightness (dimming) times the night tint,
+// and the upright-desktop-UV -> captured-surface-UV transform for the screen's
+// texture (identity unless a rotated DXGI output delivered an unrotated
+// scan-out surface; see render/desktop_rotation.h).
 cbuffer ScreenColor : register(b2) {
     float4 g_screen_color;
+    float4 g_surface_u;
+    float4 g_surface_v;
 };
 
 struct VSInput {
@@ -57,6 +62,11 @@ Texture2D g_texture : register(t0);
 Texture2D g_desktop : register(t1);
 SamplerState g_sampler : register(s0);
 
+float2 surface_uv(float2 uv) {
+    float3 h = float3(uv, 1.0f);
+    return float2(dot(g_surface_u.xyz, h), dot(g_surface_v.xyz, h));
+}
+
 PSInput vs_main(VSInput input) {
     PSInput output;
     output.pos = mul(float4(input.pos, 1.0f), g_view_proj);
@@ -66,14 +76,14 @@ PSInput vs_main(VSInput input) {
 }
 
 float4 ps_main(PSInput input) : SV_TARGET {
-    float4 texel = g_texture.Sample(g_sampler, input.uv) * input.color;
+    float4 texel = g_texture.Sample(g_sampler, surface_uv(input.uv)) * input.color;
     return float4(texel.rgb * g_screen_color.rgb, texel.a);
 }
 
 float4 ps_cursor_raw(PSInput input) {
     float4 cursor = g_texture.Sample(g_sampler, input.uv);
     float2 desktop_uv = g_cursor_rect.xy + input.uv * g_cursor_rect.zw;
-    float4 desktop = g_desktop.Sample(g_sampler, desktop_uv);
+    float4 desktop = g_desktop.Sample(g_sampler, surface_uv(desktop_uv));
     if (g_cursor_mode == 0) {
         return cursor;
     }
@@ -97,6 +107,25 @@ float4 ps_cursor(PSInput input) : SV_TARGET {
     return float4(c.rgb * g_screen_color.rgb, c.a);
 }
 )";
+
+// Mirrors cbuffer ScreenColor (b2).
+struct ScreenConstants {
+    float color[4];
+    float surface_u[4];
+    float surface_v[4];
+};
+static_assert(sizeof(ScreenConstants) == 48);
+
+ScreenConstants make_screen_constants(const float color[4], DesktopRotation rotation) {
+    const SurfaceUvTransform t = surface_uv_transform(rotation);
+    ScreenConstants constants{};
+    for (int i = 0; i < 4; ++i) constants.color[i] = color[i];
+    for (int i = 0; i < 3; ++i) {
+        constants.surface_u[i] = t.row0[i];
+        constants.surface_v[i] = t.row1[i];
+    }
+    return constants;
+}
 
 struct CursorConstants {
     float u;
@@ -440,7 +469,7 @@ bool Renderer::init(HWND hwnd, uint32_t width, uint32_t height, std::string& err
         error = "cursor constant buffer creation failed";
         return false;
     }
-    cb_desc.ByteWidth = 16;
+    cb_desc.ByteWidth = sizeof(ScreenConstants);
     if (FAILED(device_->CreateBuffer(&cb_desc, nullptr, &screen_color_buffer_))) {
         error = "screen colour constant buffer creation failed";
         return false;
@@ -541,12 +570,14 @@ bool Renderer::set_layout(const Layout& layout, std::string& error,
 }
 
 bool Renderer::set_screen_texture(size_t screen_index, ID3D11ShaderResourceView* texture,
-                                  std::string& error) {
+                                  std::string& error, DesktopRotation rotation) {
     if (screen_index >= screen_draws_.size()) {
         error = "screen texture index is out of range";
         return false;
     }
     screen_draws_[screen_index].live_texture = texture;
+    screen_draws_[screen_index].live_rotation =
+        texture != nullptr ? rotation : DesktopRotation::Identity;
     return true;
 }
 
@@ -658,7 +689,11 @@ void Renderer::render(const Quat& head, float fov_horizontal_deg, float time_s) 
         ID3D11ShaderResourceView* texture[] = {
             screen.live_texture ? screen.live_texture.Get() : screen.label_texture.Get()};
         context_->PSSetShaderResources(0, 1, texture);
-        context_->UpdateSubresource(screen_color_buffer_.Get(), 0, nullptr, screen.color, 0, 0);
+        // The label texture is drawn upright; only a live capture is rotated.
+        const ScreenConstants constants = make_screen_constants(
+            screen.color,
+            screen.live_texture ? screen.live_rotation : DesktopRotation::Identity);
+        context_->UpdateSubresource(screen_color_buffer_.Get(), 0, nullptr, &constants, 0, 0);
         context_->Draw(6, screen.vertex_start);
     }
 
@@ -733,8 +768,10 @@ void Renderer::render(const Quat& head, float fov_horizontal_deg, float time_s) 
                 constants.mode = static_cast<uint32_t>(screen.cursor_mode);
                 context_->UpdateSubresource(cursor_constant_buffer_.Get(), 0, nullptr, &constants,
                                             0, 0);
-                context_->UpdateSubresource(screen_color_buffer_.Get(), 0, nullptr, screen.color, 0,
-                                            0);
+                const ScreenConstants screen_constants =
+                    make_screen_constants(screen.color, screen.live_rotation);
+                context_->UpdateSubresource(screen_color_buffer_.Get(), 0, nullptr,
+                                            &screen_constants, 0, 0);
                 ID3D11ShaderResourceView* textures[] = {screen.cursor_view.Get(),
                                                         screen.live_texture.Get()};
                 context_->PSSetShaderResources(0, 2, textures);

@@ -1815,7 +1815,8 @@ int wmain(int argc, wchar_t** argv) {
                 continue;
             }
             if (captured.desktop_updated &&
-                !renderer.set_screen_texture(screen_index, captured.texture.Get(), capture_error)) {
+                !renderer.set_screen_texture(screen_index, captured.texture.Get(), capture_error,
+                                             captured.rotation)) {
                 if (elapsed >= next_capture_error_log) {
                     std::printf("desktop texture update failed for screen '%s': %s\n",
                                 layout.screens[screen_index].id.c_str(), capture_error.c_str());
