@@ -2538,6 +2538,108 @@ int query_taskbar_state() {
 
 namespace {
 
+std::wstring lower_copy(const std::wstring& text) {
+    std::wstring out = text;
+    for (wchar_t& ch : out) {
+        ch = static_cast<wchar_t>(std::towlower(ch));
+    }
+    return out;
+}
+
+struct NoticeTextScan {
+    std::vector<std::wstring> texts;
+};
+
+BOOL CALLBACK collect_child_text(HWND child, LPARAM param) {
+    auto* scan = reinterpret_cast<NoticeTextScan*>(param);
+    wchar_t text[512]{};
+    if (GetWindowTextW(child, text, 512) > 0) {
+        scan->texts.emplace_back(text);
+    }
+    return TRUE;
+}
+
+std::wstring process_image_of(HWND hwnd) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (process == nullptr) {
+        return {};
+    }
+    wchar_t path[MAX_PATH]{};
+    DWORD size = MAX_PATH;
+    const BOOL ok = QueryFullProcessImageNameW(process, 0, path, &size);
+    CloseHandle(process);
+    return ok ? std::wstring(path, size) : std::wstring{};
+}
+
+struct NoticeSweep {
+    std::vector<HWND> matches;
+};
+
+BOOL CALLBACK find_autohide_notice(HWND hwnd, LPARAM param) {
+    if (!IsWindowVisible(hwnd)) {
+        return TRUE;
+    }
+    wchar_t title[64]{};
+    wchar_t window_class[64]{};
+    GetWindowTextW(hwnd, title, 64);
+    GetClassNameW(hwnd, window_class, 64);
+    if (std::wcscmp(window_class, L"#32770") != 0) {
+        return TRUE;  // cheap pre-filter before the process and text reads
+    }
+    NoticeTextScan scan;
+    EnumChildWindows(hwnd, collect_child_text, reinterpret_cast<LPARAM>(&scan));
+    if (is_taskbar_autohide_notice(title, window_class, process_image_of(hwnd), scan.texts)) {
+        reinterpret_cast<NoticeSweep*>(param)->matches.push_back(hwnd);
+    }
+    return TRUE;
+}
+
+}  // namespace
+
+bool is_taskbar_autohide_notice(const std::wstring& title, const std::wstring& window_class,
+                                const std::wstring& process_image,
+                                const std::vector<std::wstring>& texts) {
+    if (title != L"Taskbar" || window_class != L"#32770") {
+        return false;
+    }
+    const std::wstring image = lower_copy(process_image);
+    const size_t slash = image.find_last_of(L"\\/");
+    const std::wstring base = slash == std::wstring::npos ? image : image.substr(slash + 1);
+    if (base != L"explorer.exe") {
+        return false;
+    }
+    // Measured live: the notice is a TaskDialog whose message lives in a
+    // DirectUIHWND (no readable window text); its only readable child is the
+    // OK button. A classic MessageBox variant exposes the message as a Static.
+    bool ok_button = false;
+    for (const std::wstring& text : texts) {
+        const std::wstring lowered = lower_copy(text);
+        if (lowered.find(L"auto-hide toolbar") != std::wstring::npos ||
+            lowered.find(L"already hidden on this side") != std::wstring::npos) {
+            return true;
+        }
+        if (lowered == L"ok") {
+            ok_button = true;
+        } else {
+            return false;  // any other control (Cancel, a choice) is not this notice
+        }
+    }
+    return ok_button;
+}
+
+int dismiss_taskbar_autohide_notices() {
+    NoticeSweep sweep;
+    EnumWindows(find_autohide_notice, reinterpret_cast<LPARAM>(&sweep));
+    for (HWND notice : sweep.matches) {
+        PostMessageW(notice, WM_CLOSE, 0, 0);  // the dialog's only button is OK
+    }
+    return static_cast<int>(sweep.matches.size());
+}
+
+namespace {
+
 // Re-applies a taskbar state captured at takeover. Best-effort, never fatal:
 // the taskbar must not fail a display restore. Explorer recreates the tray
 // asynchronously after display churn (the minimize waves prove its reactions

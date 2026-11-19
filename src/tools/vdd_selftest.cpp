@@ -717,6 +717,34 @@ int main() {
     std::printf("  detected taskbar state: %d\n", taskbar_state);
     check(taskbar_state >= 0 && taskbar_state <= 3,
           "taskbar state query returns valid ABM_GETSTATE bits");
+    {
+        const std::vector<std::wstring> notice{L"OK",
+                                               L"A toolbar is already hidden on this side of your "
+                                               L"screen.\nYou can have only one auto-hide toolbar "
+                                               L"per side."};
+        check(gt::is_taskbar_autohide_notice(L"Taskbar", L"#32770",
+                                             LR"(C:\Windows\Explorer.EXE)", notice),
+              "Explorer's auto-hide taskbar notice is recognised");
+        check(!gt::is_taskbar_autohide_notice(L"Taskbar", L"#32770",
+                                              LR"(C:\Tools\notepad.exe)", notice),
+              "the same dialog from another process is left alone");
+        check(gt::is_taskbar_autohide_notice(L"Taskbar", L"#32770",
+                                             LR"(C:\Windows\Explorer.EXE)", {L"OK"}),
+              "the live TaskDialog form (only the OK button is readable) is recognised");
+        check(!gt::is_taskbar_autohide_notice(L"Taskbar", L"#32770",
+                                              LR"(C:\Windows\explorer.exe)",
+                                              {L"OK", L"Some other taskbar message"}),
+              "another Explorer taskbar dialog is left alone");
+        check(!gt::is_taskbar_autohide_notice(L"Taskbar", L"#32770",
+                                              LR"(C:\Windows\explorer.exe)", {L"Yes", L"No"}),
+              "a Taskbar dialog asking a question is left alone");
+        check(!gt::is_taskbar_autohide_notice(L"Taskbar", L"#32770",
+                                              LR"(C:\Windows\explorer.exe)", {}),
+              "a Taskbar dialog with no OK button is left alone");
+        check(!gt::is_taskbar_autohide_notice(L"Taskbar settings", L"#32770",
+                                              LR"(C:\Windows\explorer.exe)", notice),
+              "a differently titled window is left alone");
+    }
 
     std::printf("vdd_selftest: glasses display matching\n");
     check(gt::is_glasses_display(L"Generic PnP Monitor",

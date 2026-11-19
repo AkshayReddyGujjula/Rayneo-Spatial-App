@@ -1661,6 +1661,11 @@ int wmain(int argc, wchar_t** argv) {
                 // re-attach the laptop panel and shove them right), so keep
                 // re-fitting the render window on this cadence, not only once.
                 fit_window_to_display(hwnd, render_monitor_id);
+                // Explorer's "toolbar already hidden on this side" notice
+                // appears after primary-display changes; it is clutter only.
+                if (const int dismissed = gt::dismiss_taskbar_autohide_notices(); dismissed > 0) {
+                    std::printf("dismissed %d Explorer auto-hide taskbar notice(s)\n", dismissed);
+                }
             }
             std::error_code time_error;
             const auto write_time =

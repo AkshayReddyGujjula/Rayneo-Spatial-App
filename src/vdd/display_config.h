@@ -191,6 +191,17 @@ struct WorkspaceTopology {
 // Reads the Explorer taskbar state bits (ABM_GETSTATE: ABS_AUTOHIDE and/or
 // ABS_ALWAYSONTOP). Read-only; safe to call anywhere.
 int query_taskbar_state();
+// Explorer pops a modal "Taskbar: A toolbar is already hidden on this side of
+// your screen" notice whenever the workspace changes the primary display while
+// the taskbar auto-hides (measured live 2026-11-19: one per takeover, more per
+// rotation reload; pre-existing). It is only clutter: the auto-hide still
+// works. The pure matcher (unit-tested) decides from the dialog's title, class,
+// owning process image and its static texts; the sweep closes matches (same as
+// pressing OK) and returns how many it closed.
+bool is_taskbar_autohide_notice(const std::wstring& title, const std::wstring& window_class,
+                                const std::wstring& process_image,
+                                const std::vector<std::wstring>& texts);
+int dismiss_taskbar_autohide_notices();
 
 // Pure rect mapping (unit-tested): preserves the window's offset within
 // `from` onto `to`, clamped inside `to` (oversize windows pin at its origin).
