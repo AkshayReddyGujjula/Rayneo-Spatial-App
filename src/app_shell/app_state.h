@@ -185,7 +185,12 @@ struct SplitterTrack {
 };
 
 struct ScrollPortal {
+    // Target scroll position: input (wheel, keys, focus) moves this.
     int offset = 0;
+    // Drawn position: eases toward `offset` (smooth scrolling). shown_s < 0
+    // means "snap to offset on the next paint" (page switch, thumb drag).
+    float shown = 0.0f;
+    double shown_s = -1.0;
     RECT panel{};
     RECT view{};
     RECT scrollbar{};

@@ -111,6 +111,12 @@ private:
 struct FontSet;
 
 void draw_focus_ring(Canvas& canvas, const RECT& rect, int radius);
+
+// Off-screen paint target for a window's back buffer: a 32-bit top-down DIB
+// section. Measured at 2878x1714 / 168 dpi: GDI+ anti-aliasing into a
+// CreateCompatibleBitmap target costs 42-66 ms per frame, into a DIB section
+// 8-13 ms (the controller was capped near 24 fps by this alone).
+HBITMAP create_paint_bitmap(HDC reference, int width, int height);
 void draw_button(Canvas& canvas, const RECT& rect, const std::wstring& label, ButtonStyle style,
                  const WidgetState& state, HFONT font, const wchar_t* icon = nullptr,
                  HFONT icon_font = nullptr);

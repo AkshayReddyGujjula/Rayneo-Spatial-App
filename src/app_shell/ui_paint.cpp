@@ -65,8 +65,26 @@ ScrollArea begin_scroll(Ui& ui, ScrollPanel panel, const RECT& frame, const RECT
     area.panel = panel;
     area.frame = frame;
     area.view = view;
-    const ScrollPortal& portal = ui.s.scroll[panel];
-    area.offset = std::clamp(portal.offset, 0, std::max(0, portal.max_offset));
+    ScrollPortal& portal = ui.s.scroll[panel];
+    const int target = std::clamp(portal.offset, 0, std::max(0, portal.max_offset));
+    // Smooth scrolling: the drawn position eases toward the target (time
+    // based, so it settles in ~0.2 s at any frame rate). Reduced motion,
+    // a fresh page and thumb drags snap.
+    if (portal.shown_s < 0.0 || ui.s.anim.reduce_motion()) {
+        portal.shown = static_cast<float>(target);
+    } else {
+        const double dt = std::clamp(ui.s.now_s - portal.shown_s, 0.0, 0.1);
+        const float follow = 1.0f - static_cast<float>(std::exp(-dt / 0.055));
+        portal.shown += (static_cast<float>(target) - portal.shown) * follow;
+        if (std::fabs(static_cast<float>(target) - portal.shown) < 0.5f) {
+            portal.shown = static_cast<float>(target);
+        } else {
+            ui.s.repaint_requested = true;
+        }
+    }
+    portal.shown_s = ui.s.now_s;
+    area.offset = std::clamp(static_cast<int>(std::lround(portal.shown)), 0,
+                             std::max(0, portal.max_offset));
     area.saved_panel = ui.panel;
     area.saved_view = ui.view;
     ui.panel = panel;
@@ -88,11 +106,18 @@ void end_scroll(Ui& ui, ScrollArea& area, int content_h) {
     portal.max_offset = max_offset;
     portal.last_max = max_offset;
     portal.visible = max_offset > 0 && view_h > 0;
-    if (area.offset > max_offset) {
+    // The target stays the input's; only clamp it (and the drawn position)
+    // when the content got shorter.
+    if (portal.offset > max_offset) {
         portal.offset = max_offset;
         ui.s.repaint_requested = true;
-    } else {
-        portal.offset = area.offset;
+    }
+    if (portal.offset < 0) {
+        portal.offset = 0;
+    }
+    if (area.offset > max_offset) {
+        portal.shown = static_cast<float>(max_offset);
+        ui.s.repaint_requested = true;
     }
     portal.scrollbar = RECT{};
     portal.thumb = RECT{};
@@ -106,7 +131,8 @@ void end_scroll(Ui& ui, ScrollArea& area, int content_h) {
     const int thumb_h = std::clamp(track_h * view_h / std::max(1, content_h),
                                    std::min(track_h, ui.px(28)), track_h);
     const int travel = std::max(1, track_h - thumb_h);
-    const int thumb_top = track_rect.top + portal.offset * travel / std::max(1, max_offset);
+    const int drawn = std::clamp(area.offset, 0, max_offset);
+    const int thumb_top = track_rect.top + drawn * travel / std::max(1, max_offset);
     RECT thumb{track_rect.left, thumb_top, track_rect.right, thumb_top + thumb_h};
     const int scroll_id = static_cast<int>(kUiScrollBase) + static_cast<int>(area.panel);
     const float hover = ui.track(anim::kHover, scroll_id,
@@ -128,8 +154,12 @@ void end_scroll(Ui& ui, ScrollArea& area, int content_h) {
 void hide_scroll(Ui& ui, ScrollPanel panel) {
     ScrollPortal& portal = ui.s.scroll[panel];
     const int offset = portal.offset;
+    const float shown = portal.shown;
+    const double shown_s = portal.shown_s;
     portal = ScrollPortal{};
     portal.offset = offset;
+    portal.shown = shown;
+    portal.shown_s = shown_s;
 }
 
 void card(Ui& ui, const RECT& rect) {

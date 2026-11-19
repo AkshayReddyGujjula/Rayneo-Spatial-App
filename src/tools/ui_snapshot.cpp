@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -414,6 +415,13 @@ void check_status_dot(const std::string& shot, int width, int height, UINT dpi, 
     }
 }
 
+// --bench N: paint each selected shot N more times after it settles and print
+// the mean paint cost (the controller's frame budget at 60 fps is 16.7 ms).
+int g_bench_frames = 0;
+int g_bench_width = 0;
+int g_bench_height = 0;
+UINT g_bench_dpi = 96;
+
 void render(const Shot& shot, const std::filesystem::path& out_dir) {
     gt::AppState state;
     shot.setup(state);
@@ -456,6 +464,20 @@ void render(const Shot& shot, const std::filesystem::path& out_dir) {
         }
     }
     GdiFlush();
+    if (g_bench_frames > 0) {
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int frame = 0; frame < g_bench_frames; ++frame) {
+            gt::ui::Canvas canvas(dc, client, gt::ui::current_theme(state), shot.dpi);
+            gt::ui::paint_window(canvas, context, hotspots);
+        }
+        GdiFlush();
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count() /
+                          g_bench_frames;
+        std::printf("  [bench] %-44s %5dx%-5d dpi %3u: %7.2f ms/frame (%5.1f fps)\n",
+                    shot.name.c_str(), shot.width, shot.height, shot.dpi, ms, 1000.0 / ms);
+    }
     if (shot.verify && bits != nullptr) {
         shot.verify(shot.name, state, static_cast<const uint32_t*>(bits), hotspots);
     }
@@ -543,6 +565,88 @@ void render(const Shot& shot, const std::filesystem::path& out_dir) {
         const std::filesystem::path file = out_dir / (shot.name + ".png");
         if (!save_png(bitmap, file)) {
             fail(shot.name, "could not write " + file.string());
+        }
+    }
+    SelectObject(dc, previous);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
+    fonts.destroy();
+}
+
+// Smooth scrolling: with motion on, a new scroll target is approached over
+// several frames (never a jump), monotonically, and settles exactly on it.
+void check_smooth_scroll() {
+    const std::string name = "smooth-scroll-tracking-1280x800";
+    gt::AppState state;
+    base_state(state, true);
+    running_state(state);
+    state.page = gt::AppPage::Tracking;
+    state.anim.set_reduce_motion(false);
+    gt::ui::FontSet fonts;
+    fonts.create(96);
+    HDC screen = GetDC(nullptr);
+    HDC dc = CreateCompatibleDC(screen);
+    HBITMAP bitmap = gt::ui::create_paint_bitmap(screen, 1280, 800);
+    ReleaseDC(nullptr, screen);
+    const HGDIOBJ previous = SelectObject(dc, bitmap);
+    const RECT client{0, 0, 1280, 800};
+    gt::ui::PaintContext context;
+    context.state = &state;
+    context.fonts = &fonts;
+    context.dpi = 96;
+    context.client = client;
+    std::vector<gt::ui::Hotspot> hotspots;
+    const auto paint_at = [&](double now) {
+        state.now_s = now;
+        state.repaint_requested = false;
+        gt::ui::Canvas canvas(dc, client, gt::ui::current_theme(state), 96);
+        gt::ui::paint_window(canvas, context, hotspots);
+    };
+    for (int i = 0; i < 40; ++i) {
+        paint_at(i * 0.05);  // settle every entrance animation
+    }
+    gt::ScrollPortal& portal = state.scroll[gt::kScrollPage];
+    if (!portal.visible || portal.max_offset < 100) {
+        fail(name, "the tracking page does not scroll at 1280x800");
+    } else {
+        const int target = portal.max_offset;
+        portal.offset = target;
+        double now = 2.0;
+        float last = portal.shown;
+        bool jumped = false;
+        bool backwards = false;
+        int frames = 0;
+        for (; frames < 60 && portal.shown != static_cast<float>(target); ++frames) {
+            now += 1.0 / 60.0;
+            paint_at(now);
+            if (frames == 0 && portal.shown >= static_cast<float>(target)) {
+                jumped = true;
+            }
+            if (portal.shown < last) {
+                backwards = true;
+            }
+            last = portal.shown;
+        }
+        std::printf("  [..] %s: %d px glide settled in %d frames (%.0f ms at 60 fps)\n", name.c_str(),
+                    target, frames, frames * 1000.0 / 60.0);
+        if (jumped) {
+            fail(name, "the first frame already reached the target (no glide)");
+        }
+        if (backwards) {
+            fail(name, "the drawn position moved backwards");
+        }
+        if (portal.shown != static_cast<float>(target) || frames > 24) {
+            fail(name, "the glide did not settle on the target within 0.4 s");
+        }
+        if (state.repaint_requested) {
+            fail(name, "a settled glide still requests frames");
+        }
+        // A page switch (shown_s reset) snaps instead of gliding.
+        portal.offset = 0;
+        portal.shown_s = -1.0;
+        paint_at(now + 1.0 / 60.0);
+        if (portal.shown != 0.0f) {
+            fail(name, "a reset scroll position glides instead of snapping");
         }
     }
     SelectObject(dc, previous);
@@ -1004,6 +1108,13 @@ int main(int argc, char** argv) {
             out_dir = argv[++i];
         } else if (arg == "--only" && i + 1 < argc) {
             only = argv[++i];
+        } else if (arg == "--bench" && i + 1 < argc) {
+            g_bench_frames = std::atoi(argv[++i]);
+        } else if (arg == "--bench-size" && i + 1 < argc) {
+            unsigned dpi = 96;
+            if (sscanf_s(argv[++i], "%dx%d@%u", &g_bench_width, &g_bench_height, &dpi) >= 2) {
+                g_bench_dpi = dpi;
+            }
         }
     }
     if (!out_dir.empty()) {
@@ -1017,9 +1128,20 @@ int main(int argc, char** argv) {
     }
     check_contrast();
     check_editor_labels();
+    check_smooth_scroll();
     std::printf("ui_snapshot: offscreen renders of the controller UI\n");
     for (const Shot& shot : shots()) {
         if (!only.empty() && shot.name.find(only) == std::string::npos) {
+            continue;
+        }
+        if (g_bench_frames > 0 && g_bench_width > 0) {
+            // --bench-size WxH@dpi: the same page at another window size.
+            Shot sized = shot;
+            sized.width = g_bench_width;
+            sized.height = g_bench_height;
+            sized.dpi = g_bench_dpi;
+            sized.verify = nullptr;
+            render(sized, {});
             continue;
         }
         render(shot, out_dir);

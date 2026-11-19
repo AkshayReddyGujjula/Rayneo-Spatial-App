@@ -213,7 +213,7 @@ void CalGuideWindow::paint() {
     if (back_dc_ == nullptr || back_width_ != width || back_height_ != height) {
         release_back_buffer();
         back_dc_ = CreateCompatibleDC(dc);
-        back_bitmap_ = CreateCompatibleBitmap(dc, std::max(1, width), std::max(1, height));
+        back_bitmap_ = ui::create_paint_bitmap(dc, width, height);
         if (back_dc_ != nullptr && back_bitmap_ != nullptr) {
             back_previous_ = SelectObject(back_dc_, back_bitmap_);
             back_width_ = width;

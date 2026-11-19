@@ -460,6 +460,7 @@ void AppWindow::navigate(AppPage page) {
     state_.editor_fullscreen = false;
     state_.page_transition.begin(state_.now_s, kPageTransitionS);
     state_.scroll[kScrollPage].offset = 0;
+    state_.scroll[kScrollPage].shown_s = -1.0;  // a new page starts at the top, no glide
     state_.hover_id = kUiNone;
     // Persisted with the rest of the preferences on close (no disk write per click).
     state_.config.last_page = page;
@@ -615,7 +616,7 @@ void AppWindow::ensure_back_buffer(int width, int height) {
     }
     HDC screen = GetDC(hwnd_);
     back_dc_ = CreateCompatibleDC(screen);
-    back_bitmap_ = CreateCompatibleBitmap(screen, width, height);
+    back_bitmap_ = ui::create_paint_bitmap(screen, width, height);
     ReleaseDC(hwnd_, screen);
     if (back_dc_ == nullptr || back_bitmap_ == nullptr) {
         release_back_buffer();
@@ -693,7 +694,7 @@ void AppWindow::capture_fade_snapshot() {
     }
     HDC screen = GetDC(hwnd_);
     fade_dc_ = CreateCompatibleDC(screen);
-    fade_bitmap_ = CreateCompatibleBitmap(screen, back_width_, back_height_);
+    fade_bitmap_ = ui::create_paint_bitmap(screen, back_width_, back_height_);
     ReleaseDC(hwnd_, screen);
     if (fade_dc_ == nullptr || fade_bitmap_ == nullptr) {
         release_fade_buffer();
@@ -850,6 +851,8 @@ void AppWindow::on_mouse_move(int x, int y) {
                 static_cast<int>(std::clamp(raw_position, 0L, static_cast<LONG>(travel)));
             set_panel_offset(state_.drag_scroll_panel,
                              portal.max_offset > 0 ? position * portal.max_offset / travel : 0);
+            // The thumb follows the pointer exactly: no easing while dragging.
+            state_.scroll[state_.drag_scroll_panel].shown_s = -1.0;
             return;
         }
         if (state_.drag_field >= 0) {
@@ -1492,6 +1495,7 @@ void AppWindow::execute(int id, int arg) {
             state_.cal_run = CalRunState{};
         }
         state_.scroll[kScrollWizard].offset = 0;
+        state_.scroll[kScrollWizard].shown_s = -1.0;
         invalidate();
         return;
     }
@@ -1507,6 +1511,7 @@ void AppWindow::execute(int id, int arg) {
                 return;
             }
             state_.scroll[kScrollWizard].offset = 0;
+        state_.scroll[kScrollWizard].shown_s = -1.0;
             refresh_health(true);
             invalidate();
             return;
