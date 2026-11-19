@@ -109,7 +109,33 @@ std::vector<PlannedDesktop> plan_workspace_desktops(const std::vector<ScreenPlac
 // edges of non-zero length. Windows silently drops an overlapping batch and
 // packs a gapped display somewhere else, so a plan failing this check would
 // roll the takeover back (or land the mouse in the wrong place).
-bool desktops_tile_seamlessly(const std::vector<PlannedDesktop>& desktops, std::string& reason);
+// With `base_row` (driver indices of the column bases, left to right, from
+// workspace_base_row) neighbouring bases must also share a vertical edge of
+// positive length: connectivity through a stacked row must not hide a gap in
+// the main row. Gaps between stacked screens of neighbouring columns are
+// accepted (each stacked screen still touches its own base).
+bool desktops_tile_seamlessly(const std::vector<PlannedDesktop>& desktops, std::string& reason,
+                              const std::vector<int>& base_row = {});
+// Driver indices of the column bases (pure), left to right, in the planner's
+// own column order: the main row that plan_workspace_desktops lines up.
+std::vector<int> workspace_base_row(const std::vector<ScreenPlacement>& screens,
+                                    int center_driver);
+// Readback of one virtual desktop after a commit (pure verdict, unit-tested).
+struct DisplayReadback {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+    unsigned long orientation = 0;  // DMDO_*
+    bool primary = false;
+};
+enum class ReadbackVerdict {
+    Match,         // exactly as planned
+    PositionOnly,  // extent, orientation and primary as planned; only moved
+    Mismatch,      // Windows kept another extent, orientation or primary
+};
+ReadbackVerdict classify_display_readback(const DisplayReadback& planned,
+                                          const DisplayReadback& actual);
 // The DEVMODE a planned virtual desktop is staged with (pure, unit-tested):
 // its extent, position and refresh rate, and ALWAYS an explicit orientation
 // (DMDO_90 for portrait, DMDO_DEFAULT otherwise) because Windows persists a

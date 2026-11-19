@@ -170,7 +170,12 @@ left `(-1920,420)`, centre `(0,0)` 1080x1920, right `(1080,420)`. A column wider
 than its base, such as a landscape screen above a portrait centre, would leave a
 gap in the base row. Windows would pack that gap, so `plan_workspace_for_layout`
 refuses such a plan through `desktops_tile_seamlessly` (which requires no area
-overlap and an edge-connected set). Desktop Duplication returns a rotated output
+overlap and an edge-connected set, and neighbouring column bases sharing an edge,
+so a stacked row cannot hide the base-row gap; gaps between two stacked screens
+are accepted). The same pure check, `workspace_layout_is_arrangeable`, refuses
+the layout in the controller's Save and in the engine before any VDD is added
+or moved. After a commit the readback tolerates only a position shift; another
+extent, rotation or primary fails into the rollback. Desktop Duplication returns a rotated output
 unrotated, with `DXGI_OUTDUPL_DESC.Rotation` set; the capture/render side
 uprights it.
 

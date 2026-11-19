@@ -5,6 +5,7 @@
 #include "app_shell/session_logs.h"
 #include "layout/layout.h"
 #include "vdd/display_config.h"
+#include "vdd/workspace_reload.h"
 
 #include <shellapi.h>
 
@@ -341,6 +342,14 @@ bool save_layout_to_disk(AppState& state, std::wstring& error) {
     std::string validation_error;
     if (!gt::validate_layout(state.layout, validation_error)) {
         error = L"the layout is not valid: " + wide_from_utf8(validation_error);
+        return false;
+    }
+    // Same planner and tiling check the engine runs before touching any
+    // display: a layout it would refuse is never written (and stays dirty).
+    if (!gt::workspace_layout_is_arrangeable(state.layout, validation_error)) {
+        error = L"This arrangement can't be made into Windows desktops: " +
+                wide_from_utf8(validation_error) +
+                L". Move the stacked screen or turn Portrait off";
         return false;
     }
     std::error_code directory_error;

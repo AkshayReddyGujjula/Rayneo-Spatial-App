@@ -15,6 +15,11 @@ struct WorkspacePlan {
 
 bool plan_workspace_for_layout(const Layout& layout, const std::vector<int>& driver_indices,
                                WorkspacePlan& plan, std::string& error);
+// Pure preflight (no display calls): true when the layout can be made into
+// Windows desktops by the same planner and tiling check the engine uses.
+// Otherwise `reason` says why. The controller refuses to save such a layout
+// and the engine refuses it before any VDD is added, removed or moved.
+bool workspace_layout_is_arrangeable(const Layout& layout, std::string& reason);
 std::vector<ConfiguredDisplay> bind_displays_to_screens(
     const Layout& layout, const std::vector<ConfiguredDisplay>& displays);
 

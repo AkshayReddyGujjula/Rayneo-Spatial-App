@@ -46,12 +46,30 @@ bool plan_workspace_for_layout(const Layout& layout, const std::vector<int>& dri
     // Mixed orientations can leave a gap (a column wider than its base) that
     // Windows would pack elsewhere; refuse it before touching any display.
     std::string tiling;
-    if (!desktops_tile_seamlessly(plan.desktops, tiling)) {
+    if (!desktops_tile_seamlessly(plan.desktops, tiling,
+                                  workspace_base_row(placements, plan.center_driver))) {
         error = "the screen arrangement cannot be laid out as seamless Windows desktops: " +
                 tiling;
         return false;
     }
     return true;
+}
+
+bool workspace_layout_is_arrangeable(const Layout& layout, std::string& reason) {
+    reason.clear();
+    if (layout.screens.empty()) return true;  // nothing to arrange
+    // Driver indices are only labels here; the engine binds in vdd_index
+    // order, so 0..n-1 reproduces its ranking and tie-breaks.
+    std::vector<int> indices(layout.screens.size());
+    std::iota(indices.begin(), indices.end(), 0);
+    WorkspacePlan plan;
+    std::string error;
+    if (plan_workspace_for_layout(layout, indices, plan, error)) return true;
+    // Keep only the specific cause; callers phrase the refusal themselves.
+    static constexpr char kPrefix[] =
+        "the screen arrangement cannot be laid out as seamless Windows desktops: ";
+    reason = error.rfind(kPrefix, 0) == 0 ? error.substr(sizeof(kPrefix) - 1) : error;
+    return false;
 }
 
 std::vector<ConfiguredDisplay> bind_displays_to_screens(

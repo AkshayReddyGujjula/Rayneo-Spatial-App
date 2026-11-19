@@ -435,6 +435,107 @@ void test_portrait_planning() {
               "the landscape triple is seamless");
     }
     {
+        // Review finding: a landscape screen above a portrait centre AND a
+        // landscape screen above the left base. The upper row connects
+        // everything, hiding a 420 px gap between the left base (ends at
+        // x = -420) and the portrait centre (starts at x = 0).
+        const std::vector<P> screens{
+            {0, -45.0f}, {4, -45.0f, 40.0f}, portrait(1, 0.0f), {2, 0.0f, 40.0f}};
+        const auto planned = gt::plan_workspace_desktops(screens, 1, 1920, 1080);
+        print_plan("stacks over a landscape side and a portrait centre", planned);
+        std::string reason;
+        const bool connected = gt::desktops_tile_seamlessly(planned, reason);
+        const auto row = gt::workspace_base_row(screens, 1);
+        check(row == std::vector<int>{0, 1}, "the base row is the left base then the centre");
+        const bool accepted = gt::desktops_tile_seamlessly(planned, reason, row);
+        std::printf("    connectivity-only verdict %s; with the base row: %s\n",
+                    connected ? "accepted" : "refused", reason.c_str());
+        check(connected && !accepted && reason.find("420 px") != std::string::npos,
+              "a gap between neighbouring bases is refused even when the stacked row connects");
+        gt::Layout layout;
+        layout.screens = {{"left", 0, -45.0f},
+                          {"center", 1, 0.0f},
+                          {"above", 2, 0.0f, 40.0f},
+                          {"above-left", 3, -45.0f, 40.0f}};
+        layout.screens[1].portrait = true;
+        std::swap(layout.screens[1].width_m, layout.screens[1].height_m);
+        std::string why;
+        check(!gt::workspace_layout_is_arrangeable(layout, why) &&
+                  why.find("main row") != std::string::npos,
+              "the pure preflight refuses it (no display calls)");
+        std::printf("    preflight reason: %s\n", why.c_str());
+    }
+    {
+        // The review's earlier example: a portrait screen above the left
+        // landscape side screen, next to a landscape screen above the centre:
+        // the upper row has a 420 px gap. Accepted by decision: the bases
+        // abut and each stacked screen touches its own base, so Windows has
+        // nothing to repack; only the mouse cannot cross that upper gap.
+        const std::vector<P> screens{
+            {0, -45.0f}, portrait(3, -45.0f, 40.0f), {1, 0.0f}, {2, 0.0f, 40.0f}};
+        const auto planned = gt::plan_workspace_desktops(screens, 1, 1920, 1080);
+        print_plan("portrait above the side, landscape above the centre", planned);
+        std::string reason;
+        check(desktop_at(planned, 3) == std::make_pair(-1500, -1920) &&
+                  desktop_at(planned, 2) == std::make_pair(0, -1080) &&
+                  gt::desktops_tile_seamlessly(planned, reason,
+                                               gt::workspace_base_row(screens, 1)),
+              "an upper-row gap between two stacked screens is accepted (bases abut)");
+    }
+    {
+        // Yaw seam: +180 and -180 deg are one direction and must group (and
+        // plan) identically.
+        const auto seam = [&](float behind_yaw) {
+            return std::vector<P>{
+                {0, 0.0f}, portrait(1, behind_yaw), {2, 170.0f}, {3, -179.0f, 40.0f}};
+        };
+        const auto plus = seam(180.0f);
+        const auto minus = seam(-180.0f);
+        const auto plus_plan = gt::plan_workspace_desktops(plus, 0, 1920, 1080);
+        const auto minus_plan = gt::plan_workspace_desktops(minus, 0, 1920, 1080);
+        print_plan("seam +180", plus_plan);
+        print_plan("seam -180", minus_plan);
+        std::string plus_reason;
+        std::string minus_reason;
+        const bool plus_ok = gt::desktops_tile_seamlessly(plus_plan, plus_reason,
+                                                          gt::workspace_base_row(plus, 0));
+        const bool minus_ok = gt::desktops_tile_seamlessly(minus_plan, minus_reason,
+                                                           gt::workspace_base_row(minus, 0));
+        check(plus_plan == minus_plan && plus_ok == minus_ok &&
+                  gt::workspace_base_row(plus, 0) == gt::workspace_base_row(minus, 0),
+              "a level portrait at +180 and at -180 deg give the same plan and verdict");
+    }
+    {
+        // Reload/re-pin readback verdict: only a position shift is tolerated.
+        using V = gt::ReadbackVerdict;
+        const gt::DisplayReadback planned{1920, -420, 1080, 1920, DMDO_90, false};
+        auto moved = planned;
+        moved.x = 1900;
+        auto kept_landscape = planned;
+        kept_landscape.width = 1920;
+        kept_landscape.height = 1080;
+        kept_landscape.orientation = DMDO_DEFAULT;
+        auto rotation_only = planned;
+        rotation_only.orientation = DMDO_DEFAULT;
+        auto became_primary = planned;
+        became_primary.primary = true;
+        check(gt::classify_display_readback(planned, planned) == V::Match,
+              "readback: an exact match is accepted");
+        check(gt::classify_display_readback(planned, moved) == V::PositionOnly,
+              "readback: a position-only shift is tolerated");
+        check(gt::classify_display_readback(planned, kept_landscape) == V::Mismatch &&
+                  gt::classify_display_readback(planned, rotation_only) == V::Mismatch &&
+                  gt::classify_display_readback(planned, became_primary) == V::Mismatch,
+              "readback: Windows keeping landscape, the old rotation or another primary fails");
+    }
+    {
+        gt::Layout triple;
+        triple.screens = {{"left", 0, -45.0f}, {"center", 1, 0.0f}, {"right", 2, 45.0f}};
+        std::string why;
+        check(gt::workspace_layout_is_arrangeable(triple, why) && why.empty(),
+              "the landscape triple passes the preflight");
+    }
+    {
         // Mode builder: explicit orientation both ways (Windows persists it).
         const auto tall = gt::build_virtual_desktop_mode({1, -1080, -420, 1080, 1920, true}, 60);
         check(tall.dmPelsWidth == 1080 && tall.dmPelsHeight == 1920 &&

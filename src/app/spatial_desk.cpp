@@ -1052,7 +1052,10 @@ int wmain(int argc, wchar_t** argv) {
         // The pristine arrangement is captured before the VDDs exist:
         // connecting reshuffles it, and the restore pins exactly this back.
         std::vector<gt::DisplayModeSnapshot> pristine;
-        bool started = gt::snapshot_attached_displays(pristine, vdd_error);
+        // Refuse an arrangement the planner cannot tile before any display
+        // is touched (pure check: no VDD is added and nothing moves).
+        bool started = gt::workspace_layout_is_arrangeable(layout, vdd_error);
+        started = started && gt::snapshot_attached_displays(pristine, vdd_error);
         if (started) {
             // The laptop panel (if any) is detached by the takeover below, so
             // it must be identified on the pristine topology: connecting the
@@ -1678,6 +1681,12 @@ int wmain(int argc, wchar_t** argv) {
                 std::string rollback_error;
                 const bool loaded = gt::load_layout(opt.layout_path, candidate, reload_error);
                 bool reload_ok = loaded;
+                // Refused before resize/reposition: an unarrangeable file
+                // never churns the displays.
+                if (reload_ok && opt.virtual_displays &&
+                    !gt::workspace_layout_is_arrangeable(candidate, reload_error)) {
+                    reload_ok = false;
+                }
                 if (reload_ok && opt.virtual_displays) {
                     const gt::WorkspaceReloadOps ops{
                         [&]() -> const std::vector<int>& { return vdd.display_indices(); },
