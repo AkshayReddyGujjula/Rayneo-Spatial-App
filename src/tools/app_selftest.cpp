@@ -1196,6 +1196,9 @@ void test_help_topics() {
         all_long = all_long && text != nullptr && std::wcslen(text) >= 40;
     }
     check(all_long, "every help topic resolves to a substantive text");
+    check(std::wstring(gt::help_text(gt::HelpTopic::EngineDisplayScale)).find(L"300% on a 2880x1800") !=
+              std::wstring::npos,
+          "screen scaling help explains that 175% here matches 300% on a high-resolution laptop");
     check(std::wstring(gt::help_text(gt::HelpTopic::FieldYaw)).find(L"Negative") !=
               std::wstring::npos,
           "the yaw slider help names both directions");

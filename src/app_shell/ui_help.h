@@ -274,8 +274,10 @@ inline const wchar_t* help_text(HelpTopic topic) {
         case HelpTopic::EngineDisplayScale:
             return L"Changes Windows' display scale on the virtual screens while the workspace "
                    L"runs, so text and controls are larger. Each screen goes back to its own "
-                   L"scale when the workspace stops. 175% is the most Windows allows on a "
-                   L"1080p screen. Applies at the next start.";
+                   L"scale when the workspace stops. 175% is the largest Windows allows on "
+                   L"these 1080p screens, and it is about as large as 300% on a 2880x1800 "
+                   L"laptop: the percentage depends on a screen's pixels, so the same size "
+                   L"has a smaller number here. Applies at the next start.";
         case HelpTopic::CalibrationEarbuds:
             return L"Turn on if you are wearing in-ear earbuds for this compass calibration. "
                    L"Calibrate the way you normally work: their magnets are then part of the "
